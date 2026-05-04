@@ -31,6 +31,23 @@ impl Config {
             tree_budget: 16,
         }
     }
+
+    /// Lightweight draft model for speculative decoding (~4× smaller than target).
+    /// Same vocab/block to share embeddings, but embd=4, heads=2, mlp=16.
+    pub fn draft() -> Self {
+        Self {
+            vocab_size: 27,
+            block_size: 16,
+            n_embd: 4,
+            n_head: 2,
+            head_dim: 2,
+            mlp_hidden: 16,
+            bos_token: 26,
+            temperature: 0.5,
+            draft_lookahead: 8,
+            tree_budget: 16,
+        }
+    }
 }
 
 impl Default for Config {

@@ -20,6 +20,20 @@ fn test_config_micro_defaults() {
 }
 
 #[test]
+fn test_config_draft_defaults() {
+    let config = types::Config::draft();
+    assert_eq!(config.vocab_size, 27);
+    assert_eq!(config.block_size, 16);
+    assert_eq!(config.n_embd, 4);
+    assert_eq!(config.n_head, 2);
+    assert_eq!(config.head_dim, 2);
+    assert_eq!(config.mlp_hidden, 16);
+    assert_eq!(config.bos_token, 26);
+    assert_eq!(config.draft_lookahead, 8);
+    assert_eq!(config.tree_budget, 16);
+}
+
+#[test]
 fn test_config_default_is_micro() {
     let default = types::Config::default();
     let micro = types::Config::micro();
@@ -56,7 +70,6 @@ fn test_rng_different_seeds_diverge() {
 #[test]
 fn test_rng_zero_seed_remapped() {
     let mut rng = types::Rng::new(0);
-    // Should not panic or loop forever
     let val = rng.next();
     assert_ne!(val, 0, "rng with seed 0 should still produce output");
 }
@@ -98,7 +111,6 @@ fn test_softmax_basic() {
         x.iter().all(|&v| v > 0.0),
         "all softmax values should be positive"
     );
-    // Should be monotonically increasing since input was [1,2,3]
     assert!(x[0] < x[1] && x[1] < x[2], "softmax should preserve order");
 }
 
@@ -190,7 +202,7 @@ fn test_sample_token_valid() {
     let config = types::Config::micro();
     let mut rng = types::Rng::new(42);
     let mut probs = vec![0.0; config.vocab_size];
-    probs[5] = 1.0; // all mass on token 5
+    probs[5] = 1.0;
     for _ in 0..100 {
         let token = types::sample_token(&probs, &mut rng);
         assert_eq!(token, 5, "should always sample token 5");
@@ -204,8 +216,9 @@ fn test_forward_output_size() {
     let config = types::Config::micro();
     let mut rng = types::Rng::new(42);
     let weights = transformer::TransformerWeights::new(&config, &mut rng);
+    let mut ctx = transformer::ForwardContext::new(&config);
     let mut cache = transformer::KVCache::new(&config);
-    let logits = transformer::forward(&weights, &mut cache, 0, 0, &config);
+    let logits = transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &config);
     assert_eq!(logits.len(), config.vocab_size);
 }
 
@@ -214,8 +227,9 @@ fn test_forward_logits_finite() {
     let config = types::Config::micro();
     let mut rng = types::Rng::new(42);
     let weights = transformer::TransformerWeights::new(&config, &mut rng);
+    let mut ctx = transformer::ForwardContext::new(&config);
     let mut cache = transformer::KVCache::new(&config);
-    let logits = transformer::forward(&weights, &mut cache, 0, 0, &config);
+    let logits = transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &config);
     for (i, &l) in logits.iter().enumerate() {
         assert!(l.is_finite(), "logit {i} is not finite: {l}");
     }
@@ -227,8 +241,9 @@ fn test_forward_cache_populated() {
     let n = config.n_embd;
     let mut rng = types::Rng::new(42);
     let weights = transformer::TransformerWeights::new(&config, &mut rng);
+    let mut ctx = transformer::ForwardContext::new(&config);
     let mut cache = transformer::KVCache::new(&config);
-    transformer::forward(&weights, &mut cache, 0, 0, &config);
+    transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &config);
     let key_sum: f32 = cache.key[..n].iter().sum();
     let val_sum: f32 = cache.value[..n].iter().sum();
     assert!(key_sum != 0.0, "K cache at pos 0 should be populated");
@@ -240,11 +255,24 @@ fn test_forward_positions_differ() {
     let config = types::Config::micro();
     let mut rng = types::Rng::new(42);
     let weights = transformer::TransformerWeights::new(&config, &mut rng);
+    let mut ctx = transformer::ForwardContext::new(&config);
     let mut cache = transformer::KVCache::new(&config);
-    let logits_0 = transformer::forward(&weights, &mut cache, 0, 0, &config);
-    let logits_1 = transformer::forward(&weights, &mut cache, 0, 1, &config);
-    let different = logits_0.iter().zip(&logits_1).any(|(&a, &b)| a != b);
+    let logits_0 = transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &config).to_vec();
+    let logits_1 = transformer::forward(&mut ctx, &weights, &mut cache, 0, 1, &config);
+    let different = logits_0.iter().zip(logits_1).any(|(&a, b)| a != *b);
     assert!(different, "logits at different positions should differ");
+}
+
+#[test]
+fn test_forward_draft_model() {
+    let draft_config = types::Config::draft();
+    let mut rng = types::Rng::new(42);
+    let weights = transformer::TransformerWeights::new(&draft_config, &mut rng);
+    let mut ctx = transformer::ForwardContext::new(&draft_config);
+    let mut cache = transformer::KVCache::new(&draft_config);
+    let logits = transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &draft_config);
+    assert_eq!(logits.len(), draft_config.vocab_size);
+    assert!(logits.iter().all(|&l| l.is_finite()));
 }
 
 #[test]
@@ -327,8 +355,9 @@ fn test_kv_cache_reset() {
     let config = types::Config::micro();
     let mut rng = types::Rng::new(42);
     let weights = transformer::TransformerWeights::new(&config, &mut rng);
+    let mut ctx = transformer::ForwardContext::new(&config);
     let mut cache = transformer::KVCache::new(&config);
-    transformer::forward(&weights, &mut cache, 0, 0, &config);
+    transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &config);
     cache.reset();
     assert!(
         cache.key.iter().all(|&v| v == 0.0),
@@ -340,14 +369,36 @@ fn test_kv_cache_reset() {
     );
 }
 
-// ── speculative ────────────────────────────────────────────────
-
 #[test]
-fn test_dflash_produces_marginals() {
+fn test_forward_context_reuse() {
     let config = types::Config::micro();
     let mut rng = types::Rng::new(42);
     let weights = transformer::TransformerWeights::new(&config, &mut rng);
-    let marginals = speculative::dflash_predict(&weights, 0, 0, &config);
+    let mut ctx = transformer::ForwardContext::new(&config);
+    let mut cache = transformer::KVCache::new(&config);
+
+    let l1 = transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &config).to_vec();
+    let l2 = transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &config);
+    // Second call reuses buffers — results may differ due to cache accumulation
+    for &v in l2.iter() {
+        assert!(v.is_finite(), "reused context produced non-finite: {v}");
+    }
+    drop(l1);
+}
+
+// ── speculative ────────────────────────────────────────────────
+
+fn make_draft() -> (transformer::TransformerWeights, types::Config) {
+    let config = types::Config::draft();
+    let mut rng = types::Rng::new(42);
+    let weights = transformer::TransformerWeights::new(&config, &mut rng);
+    (weights, config)
+}
+
+#[test]
+fn test_dflash_produces_marginals() {
+    let (weights, config) = make_draft();
+    let marginals = speculative::dflash_predict(&weights, &config, 0, 0);
     assert!(
         !marginals.is_empty(),
         "should produce at least one marginal"
@@ -364,12 +415,31 @@ fn test_dflash_produces_marginals() {
 }
 
 #[test]
+fn test_dflash_parallel_matches_count() {
+    let (weights, config) = make_draft();
+    let seq = speculative::dflash_predict(&weights, &config, 0, 0);
+    let par = speculative::dflash_predict_parallel(&weights, &config, 0, 0);
+    assert_eq!(seq.len(), par.len(), "parallel should produce same count");
+}
+
+#[test]
+fn test_dflash_parallel_valid_probs() {
+    let (weights, config) = make_draft();
+    let marginals = speculative::dflash_predict_parallel(&weights, &config, 0, 0);
+    for (i, row) in marginals.iter().enumerate() {
+        let sum: f32 = row.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-4,
+            "parallel row {i} sum = {sum}, expected 1.0"
+        );
+    }
+}
+
+#[test]
 fn test_dflash_positions_differ() {
-    let config = types::Config::micro();
-    let mut rng = types::Rng::new(42);
-    let weights = transformer::TransformerWeights::new(&config, &mut rng);
-    let m0 = speculative::dflash_predict(&weights, 0, 0, &config);
-    let m1 = speculative::dflash_predict(&weights, 0, 1, &config);
+    let (weights, config) = make_draft();
+    let m0 = speculative::dflash_predict(&weights, &config, 0, 0);
+    let m1 = speculative::dflash_predict(&weights, &config, 0, 1);
     assert_ne!(
         m0[0], m1[0],
         "marginals at different positions should differ"
@@ -378,10 +448,8 @@ fn test_dflash_positions_differ() {
 
 #[test]
 fn test_ddtree_respects_budget() {
-    let config = types::Config::micro();
-    let mut rng = types::Rng::new(42);
-    let weights = transformer::TransformerWeights::new(&config, &mut rng);
-    let marginals = speculative::dflash_predict(&weights, 0, 0, &config);
+    let (weights, config) = make_draft();
+    let marginals = speculative::dflash_predict(&weights, &config, 0, 0);
     let tree = speculative::build_dd_tree(&marginals, &config);
     assert!(
         tree.len() <= config.tree_budget,
@@ -394,10 +462,8 @@ fn test_ddtree_respects_budget() {
 
 #[test]
 fn test_ddtree_scores_descending() {
-    let config = types::Config::micro();
-    let mut rng = types::Rng::new(42);
-    let weights = transformer::TransformerWeights::new(&config, &mut rng);
-    let marginals = speculative::dflash_predict(&weights, 0, 0, &config);
+    let (weights, config) = make_draft();
+    let marginals = speculative::dflash_predict(&weights, &config, 0, 0);
     let tree = speculative::build_dd_tree(&marginals, &config);
     for window in tree.windows(2) {
         assert!(
@@ -411,10 +477,8 @@ fn test_ddtree_scores_descending() {
 
 #[test]
 fn test_ddtree_depth_within_lookahead() {
-    let config = types::Config::micro();
-    let mut rng = types::Rng::new(42);
-    let weights = transformer::TransformerWeights::new(&config, &mut rng);
-    let marginals = speculative::dflash_predict(&weights, 0, 0, &config);
+    let (weights, config) = make_draft();
+    let marginals = speculative::dflash_predict(&weights, &config, 0, 0);
     let tree = speculative::build_dd_tree(&marginals, &config);
     for node in &tree {
         assert!(
@@ -428,10 +492,8 @@ fn test_ddtree_depth_within_lookahead() {
 
 #[test]
 fn test_ddtree_valid_token_indices() {
-    let config = types::Config::micro();
-    let mut rng = types::Rng::new(42);
-    let weights = transformer::TransformerWeights::new(&config, &mut rng);
-    let marginals = speculative::dflash_predict(&weights, 0, 0, &config);
+    let (weights, config) = make_draft();
+    let marginals = speculative::dflash_predict(&weights, &config, 0, 0);
     let tree = speculative::build_dd_tree(&marginals, &config);
     for node in &tree {
         assert!(
@@ -444,20 +506,18 @@ fn test_ddtree_valid_token_indices() {
 
 #[test]
 fn test_ddtree_empty_marginals() {
-    let config = types::Config::micro();
+    let config = types::Config::draft();
     let tree = speculative::build_dd_tree(&[], &config);
     assert!(tree.is_empty(), "empty marginals should produce empty tree");
 }
 
 #[test]
 fn test_speculative_step_accepts_at_least_one() {
-    let config = types::Config::micro();
-    let mut rng = types::Rng::new(42);
-    let weights = transformer::TransformerWeights::new(&config, &mut rng);
+    let (weights, config) = make_draft();
     for seed in [0, 42, 100, 999] {
         let mut step_rng = types::Rng::new(seed);
         let (accepted, accept_len) =
-            speculative::speculative_step(&weights, 0, 0, &config, &mut step_rng);
+            speculative::speculative_step(&weights, &config, 0, 0, &mut step_rng);
         assert!(
             !accepted.is_empty(),
             "seed {seed}: should accept at least 1 token"
@@ -471,15 +531,13 @@ fn test_speculative_step_accepts_at_least_one() {
 
 #[test]
 fn test_speculative_step_consistent_for_same_seed() {
-    let config = types::Config::micro();
-    let mut rng = types::Rng::new(42);
-    let weights = transformer::TransformerWeights::new(&config, &mut rng);
+    let (weights, config) = make_draft();
 
     let mut rng1 = types::Rng::new(77);
-    let (a1, l1) = speculative::speculative_step(&weights, 0, 0, &config, &mut rng1);
+    let (a1, l1) = speculative::speculative_step(&weights, &config, 0, 0, &mut rng1);
 
     let mut rng2 = types::Rng::new(77);
-    let (a2, l2) = speculative::speculative_step(&weights, 0, 0, &config, &mut rng2);
+    let (a2, l2) = speculative::speculative_step(&weights, &config, 0, 0, &mut rng2);
 
     assert_eq!(a1, a2, "same seed should produce same accepted tokens");
     assert_eq!(l1, l2, "same seed should produce same acceptance length");

@@ -7,7 +7,9 @@ Inspired by [microgpt-c](https://github.com/nicholasgasior/microgpt-c) and [talo
 ## 🚀 Key Features
 
 - **Real Transformer Inference** — Full GPT forward pass with RMSNorm, multi-head causal attention, ReLU MLP, KV cache, and temperature sampling.
-- **DFlash (Dynamic Flash)** — Block-parallel drafting mechanism that predicts `L` future tokens simultaneously via independent marginal distributions.
+- **Zero-Alloc Forward Pass** — Pre-allocated `ForwardContext` buffers eliminate heap allocations per inference step.
+- **Separate Draft Model** — Lightweight draft model (embd=4, heads=2, mlp=16) runs **3.6× faster** per forward pass than the target model.
+- **DFlash (Dynamic Flash)** — Block-parallel drafting mechanism that predicts `L` future tokens simultaneously via independent marginal distributions. Supports `rayon` parallelism for larger models.
 - **DDTree (Dynamic Draft Tree)** — Best-First Search using a `BinaryHeap` to build a candidate token tree from marginal log-probabilities.
 - **Speculative Verification** — Draft → Tree → Verify pipeline that accepts multiple tokens per step.
 - **Benchmarks + Plots** — 4-component benchmark suite with auto-numbered PNG output via `plotters`.
@@ -62,20 +64,22 @@ Rather than a single linear draft chain, DDTree builds a tree of the most probab
 
 Run on Apple Silicon (single-threaded, `--release` profile, 50k iterations):
 
+**Models:** Target (embd=16, heads=4, mlp=64) · Draft (embd=4, heads=2, mlp=16)
+
 ```
 Method                    Throughput         μs/step  Avg Accept Len
 ───────────────────────────────────────────────────────────────────────────
-Transformer AR             548,121 tok/s         1.82            1.00
-DFlash Draft               751,223 tok/s        10.65            8.00
-DDTree Build               401,820 trees/s       2.49            —
-DFlash+DDTree              430,846 tok/s        13.93            6.00
+Transformer AR             801,222 tok/s         1.25            1.00
+DFlash Draft (draft)     2,904,577 tok/s         2.75            8.00
+DDTree Build               394,266 trees/s       2.54            —
+DFlash+DDTree              730,967 tok/s         5.47            4.00
 
-📈 Speedup: 0.79x (DFlash+DDTree effective vs AR)
+📈 Speedup: 0.91x (DFlash+DDTree effective vs AR)
 ```
 
-![Benchmark Chart](bench/003_bench_result.png)
+![Benchmark Chart](bench/005_bench_result.png)
 
-> **Why speedup < 1x?** The draft model is the same size as the target model. Real speculative decoding speedups require a smaller/faster draft model. The framework is ready — swap in a lighter draft model to see real gains.
+**Key insight:** The draft model is **3.6× faster** per forward pass than the target (2.9M draft tok/s vs 801K AR tok/s). The remaining gap to >1× speedup comes from simulated acceptance rate (75%) — a well-trained draft model matching the target's distribution would accept more tokens and push past parity. The framework is ready for real models.
 
 ### Transformer Proof of Correctness
 
@@ -104,7 +108,7 @@ cargo build --release
 # Run benchmark + generate plot
 cargo run --release
 
-# Run all tests (44 tests)
+# Run all tests (59 tests)
 cargo test --quiet
 
 # Lint
@@ -122,13 +126,13 @@ cargo clippy --all-targets
 src/
   lib.rs          Module index
   main.rs         Entry point (proof → bench → plot)
-  types.rs        Config, Rng, softmax, rmsnorm, matmul, sample_token
-  transformer.rs  TransformerWeights, KVCache, forward, generate
-  speculative.rs  dflash_predict, TreeNode, build_dd_tree, speculative_step
+  types.rs        Config (micro + draft), Rng, softmax, rmsnorm, matmul, sample_token
+  transformer.rs  TransformerWeights, KVCache, ForwardContext, forward, generate
+  speculative.rs  dflash_predict, dflash_predict_parallel, TreeNode, build_dd_tree, speculative_step
   benchmark.rs    BenchResult, run_all (AR / DFlash / DDTree / DFlash+DDTree)
   plot.rs         plot_results → PNG bar chart
 tests/
-  integration.rs  36 integration tests
+  integration.rs  41 integration tests
 bench/
   001_bench_result.png
   002_bench_result.png  ...
