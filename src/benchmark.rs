@@ -106,7 +106,7 @@ fn bench_dflash(
 
     let tps = total_draft_tokens as f64 / elapsed.as_secs_f64();
     BenchResult {
-        label: "DFlash Draft".into(),
+        label: "DFlash".into(),
         throughput: tps,
         time_per_step_us: elapsed.as_micros() as f64 / iters as f64,
         avg_acceptance_len: draft_config.draft_lookahead as f64,
@@ -169,7 +169,7 @@ fn bench_speculative(
     let tps = total_accepted as f64 / elapsed.as_secs_f64();
     let avg_accept = total_accepted as f64 / iters as f64;
     BenchResult {
-        label: "DFlash+DDTree".into(),
+        label: "Speculative Decoding".into(),
         throughput: tps,
         time_per_step_us: elapsed.as_micros() as f64 / iters as f64,
         avg_acceptance_len: avg_accept,

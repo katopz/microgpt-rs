@@ -86,10 +86,7 @@ fn main() {
     let ar_tps = results[0].throughput;
     let spec_tps = results[3].throughput;
     let speedup = spec_tps / ar_tps;
-    println!(
-        "  📈 Speedup: {:.2}x (DFlash+DDTree effective vs AR)",
-        speedup
-    );
+    println!("  📈 Speedup: {:.2}x (Speculative vs AR)", speedup);
 
     // ── Plot ───────────────────────────────────────────────────────
     std::fs::create_dir_all("bench").ok();
