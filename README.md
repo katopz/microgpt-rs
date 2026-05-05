@@ -11,7 +11,9 @@ Inspired by [microgpt-c](https://github.com/nicholasgasior/microgpt-c) and [talo
 - **Separate Draft Model** — Lightweight draft model (embd=4, heads=2, mlp=16) runs **3.6× faster** per forward pass than the target model.
 - **DFlash (Dynamic Flash)** — Block-parallel drafting mechanism that predicts `L` future tokens simultaneously via independent marginal distributions. Supports `rayon` parallelism for larger models.
 - **DDTree (Dynamic Draft Tree)** — Best-First Search using a `BinaryHeap` to build a candidate token tree from marginal log-probabilities.
-- **Speculative Verification** — Draft → Tree → Verify pipeline that accepts multiple tokens per step.
+- **Constraint Pruner** — Pluggable `ConstraintPruner` trait for neuro-symbolic intercept: deterministic rules engine prunes invalid branches before target verification.
+- **Path-Aware Pruning** — `SudokuPruner` validates against accumulated path state (initial board + parent tokens), catching cross-depth row/col/box conflicts that static-only pruning misses.
+- **Computable LoRA** — LLM drafts tokens via semantic probability, deterministic rules engine validates via mathematical constraints, only valid branches reach verification. Demonstrated with 9×9 Sudoku.
 - **Percepta O(log N) Attention** — 2D convex hull KV cache with ternary search, proving LLMs can execute programs internally via geometric attention. Includes adversarial failure tests.
 - **Benchmarks + Plots** — 4-component benchmark suite with auto-numbered PNG output via `plotters`.
 
@@ -60,6 +62,81 @@ Rather than a single linear draft chain, DDTree builds a tree of the most probab
 - **Metric**: Cumulative log-probability
 - **Budget**: `tree_budget` nodes (default 16)
 - **Outcome**: A tree that maximizes Expected Acceptance Length (EAL)
+- **Pruning**: `build_dd_tree_pruned()` integrates any `ConstraintPruner` — invalid tokens never enter the heap
+
+### Path-Aware Constraint Pruning
+
+The DDTree's `ConstraintPruner` trait supports **path-aware** validation:
+
+```rust
+pub trait ConstraintPruner: Send + Sync {
+    fn is_valid(&self, depth: usize, token_idx: usize, parent_tokens: &[usize]) -> bool;
+}
+```
+
+- `parent_tokens[k]` = token placed at depth `k` in the current branch path
+- `SudokuPruner` checks cross-depth row/col/box conflicts incrementally — O(parent_tokens.len()) per check, no board copy needed
+- `extract_parent_tokens(parent_path, num_tokens)` decodes the `TreeNode::parent_path` bitfield (5 bits per depth, max 12 depths)
+
+**3-level comparison** (Arto Inkala, 8 depths, budget=100):
+
+```
+Unpruned:    100 nodes,  46 accumulated-valid (46.0%)
+Static-Only: 100 nodes,  84 accumulated-valid (84.0%)   ← misses cross-depth conflicts
+Path-Aware:  100 nodes, 100 accumulated-valid (100.0%)   ← catches everything
+```
+
+## 🧠 Computable LoRA: Neuro-Symbolic Intercept
+
+The core idea: LLMs draft tokens from semantic probability, but can't natively enforce hard constraints. A deterministic rules engine sits between draft and verification:
+
+```
+LLM drafts logits → ConstraintPruner filters invalid → DDTree builds valid-only tree → Target verifies
+```
+
+### Sudoku as the LLM Problem
+
+Standard LLMs are notoriously bad at Sudoku (constraint-satisfaction / Exact Cover problem). They predict tokens from semantic probability but can't backtrack or run spatial checks. The Computable LoRA intercept forces mathematical validity on top of semantic probability.
+
+### Public API
+
+```rust
+// 9×9 Sudoku board with validation, solving, and display
+let board = Sudoku9x9::arto_inkala();  // 21 clues, 60 empty cells
+let valid = board.is_valid_move(0, 1, 4);  // Check row/col/box constraints
+
+// Computable LoRA: filter draft logits through constraints
+let drafts = vec![(1, 0.15), (3, 0.12), (4, 0.20), (5, 0.08), (8, 0.11)];
+let valid_drafts = ComputableLora::prune_drafts(&board, 0, 1, &drafts);
+// Returns only digits valid at (0,1): [(4, 0.20), (1, 0.15)]
+
+// Streaming solver with event trace
+let mut solver = StreamingSolver::new(board.grid);
+solver.solve_streaming();  // Emits Try/Accepted/Contradiction/Backtrack/Solved events
+```
+
+### Streaming Solve Events
+
+```rust
+pub enum SolveEvent {
+    Try { row: usize, col: usize, digit: u8, depth: usize },
+    Accepted { row: usize, col: usize, digit: u8, filled: usize },
+    Contradiction { row: usize, col: usize, digit: u8, depth: usize },
+    Backtrack { row: usize, col: usize, depth: usize },
+    Solved { steps: usize, hull_size: usize, total_trace: usize },
+}
+```
+
+### Arto Inkala Results
+
+"World's Hardest Sudoku" with 21 clues, 60 empty cells:
+
+| Metric | Value |
+|--------|-------|
+| Solve steps | 49,559 |
+| Hull vertices | 7 |
+| Compression ratio | 7,079.9× |
+| Attention retrieval | O(49,559) → O(log 7) ≈ O(3) |
 
 ## 📊 Benchmark Results
 
@@ -153,6 +230,9 @@ Percepta:  ternary search hull  → O(log H) per step (H = hull size ≤ N)
 | **Combined expressions work** | (3+5)×2−2 = 14 via tiny VM | `test_arithmetic_combined_expression` |
 | **Backtracking search works** | 4×4 Sudoku + 8-Queens solved via attention-tracked DFS | `test_sudoku_4x4_backtracking`, `test_nqueens_8_backtracking` |
 | **Hull captures search peaks** | Backtrack valleys compressed, solution retained | `test_sudoku_4x4_hull_captures_search` |
+| **9×9 Sudoku solved** | Arto Inkala "World's Hardest" in 49,559 steps, 7 hull vertices | `test_sudoku9x9_solve_arto_inkala` |
+| **Computable LoRA prunes drafts** | Invalid logits filtered before DDTree build | `test_computable_lora_prune_drafts` |
+| **Path-aware pruning catches cross-depth conflicts** | Same-digit same-row conflicts between parent/child depths | `test_ddtree_path_aware_catches_cross_depth_conflicts` |
 
 ### Adversarial Findings (Limitations Discovered)
 
@@ -188,6 +268,7 @@ The Percepta blog solved the Arto Inkala Sudoku (hardest in the world) inside a 
 |---------|--------------|--------|
 | **4×4 Sudoku** | DFS with constraint checking + backtracking | Solved correctly, hull compresses valleys |
 | **8-Queens** | Column + diagonal conflict detection + backtracking | Solved correctly, 8 queens placed without conflicts |
+| **9×9 Sudoku (Arto Inkala)** | Full backtracking solve with hull trace | 49,559 steps, hull compressed to 7 vertices (7,080×) |
 | **Backtracking pattern** | Forward → peak → dead-end → undo → new branch | Hull captures peaks, skips valleys |
 
 **No training needed** — the solver is a deterministic state machine. The attention mechanism tracks its execution trace through forward placements AND backtracking undos. The hull compresses the "mountain range" trace: search peaks are retained, backtrack valleys are dropped.
@@ -215,6 +296,7 @@ The Percepta team demonstrated **full in-model computation** (33K tok/s, 7K line
 | Zigzag | 1,000 | <100 | >90% |
 | Collinear (flat) | 100 | ≤2 | ~98% |
 | Exponential (Fibonacci) | 45 | ≤2 | ~96% |
+| Arto Inkala backtracking | 49,559 | 7 | 99.99% (7,080×) |
 
 ## 🛠️ Getting Started
 
@@ -231,8 +313,14 @@ cargo build --release
 # Run benchmark + generate plot
 cargo run --release
 
-# Run all tests (187 tests)
-cargo test --quiet
+# Run all tests (157 tests: 77 unit + 80 integration)
+cargo test --quiet --workspace
+
+# Run Sudoku solver example (streaming "thinking" output)
+cargo run --example sudoku_9x9
+
+# Run speculative decoding comparison (Unpruned / Static / Path-Aware)
+cargo run --example sudoku_speculative
 
 # Lint
 cargo clippy --all-targets
@@ -251,12 +339,19 @@ src/
   main.rs         Entry point (proof → bench → Percepta bench → plot)
   types.rs        Config (micro + draft), Rng, softmax, rmsnorm, matmul, sample_token
   transformer.rs  TransformerWeights, KVCache, ForwardContext, forward, generate
-  speculative.rs  dflash_predict, dflash_predict_parallel, TreeNode, build_dd_tree, speculative_step
+  speculative.rs  ConstraintPruner, SudokuPruner, NoPruner, TreeNode,
+                  extract_parent_tokens, build_dd_tree_pruned,
+                  dflash_predict, speculative_step
   percepta.rs     Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
+                  Sudoku9x9, ComputableLora, StreamingSolver, SolveEvent
   benchmark.rs    BenchResult, run_all (AR / DFlash / DDTree / Speculative Decoding)
   plot.rs         plot_results → PNG bar chart
+examples/
+  sudoku_9x9.rs          Streaming solver with "thinking" output + hull compression stats
+  sudoku_speculative.rs  3-column DDTree comparison: Unpruned / Static-Only / Path-Aware
 tests/
-  integration.rs  71 integration tests (includes adversarial + DFA + arithmetic + backtracking + geometry)
+  integration.rs  80 integration tests (adversarial + DFA + arithmetic + backtracking + geometry
+                  + Sudoku9x9 + ComputableLora + StreamingSolver)
 bench/
   001_bench_result.png
   002_bench_result.png  ...
