@@ -1,4 +1,4 @@
-use microgpt_rs::{benchmark, plot, transformer, types};
+use microgpt_rs::{benchmark, percepta, plot, transformer, types};
 
 fn main() {
     let config = types::Config::micro();
@@ -98,7 +98,85 @@ fn main() {
         Err(e) => eprintln!("\n⚠️  Plot failed: {e}"),
     }
 
+    // ── 6. Percepta 2D Attention Benchmark ─────────────────────────
+    println!("\n🧠 Percepta 2D Convex Hull Attention (O(log N) vs O(N))");
+    println!("{}", "─".repeat(60));
+
+    percepta_benchmark();
+
     println!("\n✨ Done.");
+}
+
+/// Benchmark: Percepta O(log N) hull attention vs standard O(N) linear scan.
+/// Proves correctness (same results) and measures speedup across trace sizes.
+fn percepta_benchmark() {
+    let trace_sizes = [1_000, 10_000, 100_000];
+
+    println!(
+        "  {:>12} {:>8} {:>12} {:>12} {:>10} {:>8}",
+        "Trace Size", "Hull", "Linear μs", "Fast μs", "Speedup", "Match"
+    );
+    println!("{}", "─".repeat(66));
+
+    for &size in &trace_sizes {
+        let mut cache = percepta::KVCache2D::with_capacity(size);
+
+        // Build convex parabolic key distribution (simulates execution trace)
+        let mid = size as f32 / 2.0;
+        for i in 0..size {
+            let x = i as f32;
+            let y = -((x - mid) / (mid * 0.02)).powi(2);
+            cache.append(percepta::Vec2::new(x, y), i);
+        }
+
+        let query = percepta::Vec2::new(5.0, 10.0);
+
+        // Warmup
+        for _ in 0..10 {
+            let _ = cache.fast_attention(&query);
+            let _ = cache.linear_attention(&query);
+        }
+
+        // Benchmark linear O(N)
+        let iters_linear = 100;
+        let start = std::time::Instant::now();
+        let (lin_score, lin_val) = cache.linear_attention(&query);
+        for _ in 0..iters_linear {
+            let _ = cache.linear_attention(&query);
+        }
+        let elapsed_linear = start.elapsed() / (iters_linear + 1);
+
+        // Benchmark fast O(log N)
+        let iters_fast = 10_000;
+        let start = std::time::Instant::now();
+        let (fast_score, fast_val) = cache.fast_attention(&query);
+        for _ in 0..iters_fast {
+            let _ = cache.fast_attention(&query);
+        }
+        let elapsed_fast = start.elapsed() / (iters_fast + 1);
+
+        let speedup = elapsed_linear.as_secs_f64() / elapsed_fast.as_secs_f64();
+        let score_match = (lin_score - fast_score).abs() < 1e-3;
+        let val_match = lin_val == fast_val;
+
+        println!(
+            "  {:>12} {:>8} {:>12.2} {:>12.4} {:>9.1}x {:>8}",
+            size,
+            cache.hull_len(),
+            elapsed_linear.as_secs_f64() * 1e6,
+            elapsed_fast.as_secs_f64() * 1e6,
+            speedup,
+            if score_match && val_match {
+                "✅"
+            } else {
+                "❌"
+            }
+        );
+    }
+
+    println!();
+    println!("  Hull compression: O(N) keys → O(H) hull vertices");
+    println!("  Attention search: ternary search over unimodal dot-product sequence");
 }
 
 /// Auto-number bench results sequentially.

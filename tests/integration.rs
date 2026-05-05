@@ -542,3 +542,626 @@ fn test_speculative_step_consistent_for_same_seed() {
     assert_eq!(a1, a2, "same seed should produce same accepted tokens");
     assert_eq!(l1, l2, "same seed should produce same acceptance length");
 }
+
+// ── Percepta 2D Convex Hull Attention Tests ────────────────────────
+
+use microgpt_rs::percepta::{KVCache2D, Vec2};
+
+#[test]
+fn test_percepta_vec2_dot() {
+    let a = Vec2::new(3.0, 4.0);
+    let b = Vec2::new(1.0, 0.0);
+    assert!((a.dot(&b) - 3.0).abs() < 1e-6, "dot product wrong");
+}
+
+#[test]
+fn test_percepta_cross_z_signs() {
+    let origin = Vec2::new(0.0, 0.0);
+    let right = Vec2::new(1.0, 0.0);
+    let up = Vec2::new(0.0, 1.0);
+    // Left turn: origin → right → up
+    assert!(Vec2::cross_z(&origin, &right, &up) > 0.0);
+    // Right turn: origin → up → right
+    assert!(Vec2::cross_z(&origin, &up, &right) < 0.0);
+}
+
+#[test]
+fn test_percepta_empty_cache() {
+    let cache = KVCache2D::new();
+    assert!(cache.is_empty());
+    let (s, v) = cache.fast_attention(&Vec2::new(1.0, 0.0));
+    assert_eq!(s, f32::NEG_INFINITY);
+    assert_eq!(v, 0);
+}
+
+#[test]
+fn test_percepta_single_key() {
+    let mut cache = KVCache2D::new();
+    cache.append(Vec2::new(5.0, 10.0), 42);
+    let (lin_s, lin_v) = cache.linear_attention(&Vec2::new(1.0, 1.0));
+    let (fast_s, fast_v) = cache.fast_attention(&Vec2::new(1.0, 1.0));
+    assert!((lin_s - fast_s).abs() < 1e-6);
+    assert_eq!(lin_v, fast_v);
+    assert_eq!(lin_v, 42);
+}
+
+#[test]
+fn test_percepta_two_keys_picks_max() {
+    let mut cache = KVCache2D::new();
+    cache.append(Vec2::new(0.0, 100.0), 0);
+    cache.append(Vec2::new(100.0, 0.0), 1);
+
+    // Query with positive x, zero y → should pick key (100, 0)
+    let q = Vec2::new(1.0, 0.0);
+    let (_, fast_v) = cache.fast_attention(&q);
+    assert_eq!(fast_v, 1, "should pick x-heavy key");
+
+    // Query with zero x, positive y → should pick key (0, 100)
+    let q = Vec2::new(0.0, 1.0);
+    let (_, fast_v) = cache.fast_attention(&q);
+    assert_eq!(fast_v, 0, "should pick y-heavy key");
+}
+
+#[test]
+fn test_percepta_linear_fast_match_parabolic() {
+    let mut cache = KVCache2D::new();
+    for i in 0..1000u32 {
+        let x = i as f32;
+        let y = -((x - 500.0) / 50.0).powi(2);
+        cache.append(Vec2::new(x, y), i as usize);
+    }
+
+    let queries = [
+        Vec2::new(1.0, 0.0),
+        Vec2::new(0.0, 1.0),
+        Vec2::new(-1.0, 1.0),
+        Vec2::new(5.0, 10.0),
+        Vec2::new(-3.0, 7.0),
+    ];
+
+    for query in &queries {
+        let (lin_s, lin_v) = cache.linear_attention(query);
+        let (fast_s, fast_v) = cache.fast_attention(query);
+        assert!(
+            (lin_s - fast_s).abs() < 1e-3,
+            "score mismatch for query ({}, {}): linear={lin_s}, fast={fast_s}",
+            query.x,
+            query.y
+        );
+        assert_eq!(
+            lin_v, fast_v,
+            "value mismatch for query ({}, {})",
+            query.x, query.y
+        );
+    }
+}
+
+#[test]
+fn test_percepta_linear_fast_match_100k() {
+    let mut cache = KVCache2D::new();
+    for i in 0..100_000u32 {
+        let x = i as f32;
+        let y = -((x - 50000.0) / 1000.0).powi(2);
+        cache.append(Vec2::new(x, y), i as usize);
+    }
+
+    let query = Vec2::new(5.0, 10.0);
+    let (lin_s, lin_v) = cache.linear_attention(&query);
+    let (fast_s, fast_v) = cache.fast_attention(&query);
+
+    assert!((lin_s - fast_s).abs() < 1e-3, "100k trace: score mismatch");
+    assert_eq!(lin_v, fast_v, "100k trace: value mismatch");
+}
+
+#[test]
+fn test_percepta_hull_compression_collinear() {
+    let mut cache = KVCache2D::new();
+    for i in 0..500 {
+        cache.append(Vec2::new(i as f32, i as f32 * 2.0), i);
+    }
+    // Collinear points compress to 2 endpoints
+    assert!(
+        cache.hull_len() <= 2,
+        "collinear hull should be <= 2, got {}",
+        cache.hull_len()
+    );
+    assert_eq!(cache.len(), 500, "total keys preserved");
+}
+
+#[test]
+fn test_percepta_hull_keeps_convex() {
+    let mut cache = KVCache2D::new();
+    // Concave-down: every point is a hull vertex
+    for i in 0..50u32 {
+        let x = i as f32;
+        let y = -(x - 25.0).powi(2);
+        cache.append(Vec2::new(x, y), i as usize);
+    }
+    assert_eq!(cache.hull_len(), 50, "concave-down should keep all points");
+}
+
+#[test]
+fn test_percepta_reset() {
+    let mut cache = KVCache2D::new();
+    cache.append(Vec2::new(1.0, 2.0), 0);
+    cache.append(Vec2::new(3.0, 4.0), 1);
+    assert!(!cache.is_empty());
+    cache.reset();
+    assert!(cache.is_empty());
+    assert_eq!(cache.hull_len(), 0);
+}
+
+#[test]
+fn test_percepta_hull_is_subset_of_keys() {
+    let mut cache = KVCache2D::new();
+    for i in 0..200u32 {
+        let x = i as f32;
+        let y = (x * 0.1).sin() - (x * 0.05).cos();
+        cache.append(Vec2::new(x, y), i as usize);
+    }
+
+    // All hull indices must be valid key indices
+    for &idx in cache.hull_indices() {
+        assert!(idx < cache.len(), "hull index {idx} out of range");
+    }
+    // Hull must be smaller than total keys (unless all convex)
+    assert!(
+        cache.hull_len() <= cache.len(),
+        "hull can't be larger than keys"
+    );
+}
+
+#[test]
+fn test_percepta_multiple_queries_correctness() {
+    let mut cache = KVCache2D::new();
+    // Sinusoidal distribution — hull compresses to peaks only
+    for i in 0..5000u32 {
+        let x = i as f32;
+        let y = (x * 0.01).sin();
+        cache.append(Vec2::new(x, y), i as usize);
+    }
+
+    let hull_ratio = cache.hull_len() as f64 / cache.len() as f64;
+    assert!(
+        hull_ratio < 0.5,
+        "sinusoidal hull should compress (< 50%), got {:.1}%",
+        hull_ratio * 100.0
+    );
+
+    // Verify every hull point is correct
+    for query in [
+        Vec2::new(1.0, 0.0),
+        Vec2::new(0.0, 1.0),
+        Vec2::new(1.0, 1.0),
+        Vec2::new(-1.0, 0.5),
+    ] {
+        let (lin_s, lin_v) = cache.linear_attention(&query);
+        let (fast_s, fast_v) = cache.fast_attention(&query);
+        assert!(
+            (lin_s - fast_s).abs() < 1e-3,
+            "sinusoidal score mismatch: lin={lin_s}, fast={fast_s}"
+        );
+        assert_eq!(lin_v, fast_v, "sinusoidal value mismatch");
+    }
+}
+
+// ── Percepta: Adversarial, Computation & Geometry Tests ───────────
+
+#[test]
+fn test_percepta_adversarial_v_shape_fast_wrong() {
+    let mut cache = KVCache2D::new();
+    // V-shape: valley at index 2
+    cache.append(Vec2::new(0.0, 10.0), 0);
+    cache.append(Vec2::new(1.0, 5.0), 1);
+    cache.append(Vec2::new(2.0, 0.0), 2); // valley bottom
+    cache.append(Vec2::new(3.0, 5.0), 3);
+    cache.append(Vec2::new(4.0, 10.0), 4);
+
+    // Upper hull = only the two peaks (indices 0 and 4)
+    assert_eq!(cache.hull_len(), 2, "V-shape hull should be 2 endpoints");
+
+    // Query pointing DOWN: linear finds valley bottom, fast misses it
+    let query = Vec2::new(0.0, -1.0);
+    let (lin_score, lin_val) = cache.linear_attention(&query);
+    let (fast_score, fast_val) = cache.fast_attention(&query);
+
+    assert_eq!(lin_val, 2, "linear should find valley bottom");
+    assert!((lin_score - 0.0).abs() < 1e-6, "linear score should be 0");
+    assert_ne!(fast_val, lin_val, "fast should disagree on valley query");
+    assert!(fast_score < lin_score, "fast score should be worse");
+}
+
+#[test]
+fn test_percepta_adversarial_v_shape_positive_correct() {
+    let mut cache = KVCache2D::new();
+    cache.append(Vec2::new(0.0, 10.0), 0);
+    cache.append(Vec2::new(1.0, 5.0), 1);
+    cache.append(Vec2::new(2.0, 0.0), 2);
+    cache.append(Vec2::new(3.0, 5.0), 3);
+    cache.append(Vec2::new(4.0, 10.0), 4);
+
+    // Query pointing UP: optimum IS on hull → fast matches linear
+    let query = Vec2::new(0.0, 1.0);
+    let (lin_score, _) = cache.linear_attention(&query);
+    let (fast_score, fast_val) = cache.fast_attention(&query);
+
+    assert!(
+        (lin_score - fast_score).abs() < 1e-6,
+        "scores should match for hull-optimal query"
+    );
+    assert!(
+        fast_val == 0 || fast_val == 4,
+        "fast should find a peak, got {fast_val}"
+    );
+}
+
+#[test]
+fn test_percepta_dfa_divisible_by_3() {
+    // DFA: binary strings divisible by 3
+    // States: 0 (accept), 1, 2
+    // Transition: δ(state, bit) = (2*state + bit) % 3
+    let input = [1, 1, 0, 1, 1, 0]; // 54 in binary, 54 % 3 == 0
+    let mut state = 0usize;
+    let mut cache = KVCache2D::new();
+
+    for (step, &bit) in input.iter().enumerate() {
+        let next_state = (state * 2 + bit) % 3;
+        cache.append(
+            Vec2::new(step as f32, state as f32 * 100.0 + bit as f32 * 10.0),
+            next_state,
+        );
+        state = next_state;
+    }
+
+    assert_eq!(state, 0, "54 should be divisible by 3");
+    assert_eq!(cache.len(), 6, "should have 6 trace entries");
+}
+
+#[test]
+fn test_percepta_dfa_stress_all_integers() {
+    for n in 0..1000u32 {
+        let bits: Vec<u8> = (0..16)
+            .rev()
+            .map(|shift| ((n >> shift) & 1) as u8)
+            .collect();
+
+        let mut state = 0usize;
+        let mut cache = KVCache2D::new();
+
+        for (step, &bit) in bits.iter().enumerate() {
+            let next_state = (state * 2 + bit as usize) % 3;
+            cache.append(Vec2::new(step as f32, state as f32 * 100.0), next_state);
+            state = next_state;
+        }
+
+        assert_eq!(
+            state == 0,
+            n % 3 == 0,
+            "DFA wrong for n={n}: expected state={}, got state={state}",
+            if n % 3 == 0 { 0 } else { 1 }
+        );
+
+        if !cache.is_empty() {
+            let query = Vec2::new(0.0, 1.0);
+            let (lin_s, _) = cache.linear_attention(&query);
+            let (fast_s, _) = cache.fast_attention(&query);
+            assert!(
+                (lin_s - fast_s).abs() < 1e-3,
+                "DFA trace attention mismatch for n={n}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_percepta_fibonacci_trace() {
+    let mut cache = KVCache2D::with_capacity(50);
+    let mut fib = vec![0u64, 1u64];
+    cache.append(Vec2::new(0.0, 0.0), 0);
+    cache.append(Vec2::new(1.0, 1.0), 1);
+
+    for i in 2..45u32 {
+        let next = fib[i as usize - 1] + fib[i as usize - 2];
+        fib.push(next);
+        cache.append(Vec2::new(i as f32, next as f32), i as usize);
+    }
+
+    // Exponential growth is concave-UP → hull compresses to 2
+    assert!(
+        cache.hull_len() <= 2,
+        "exponential growth should compress hull, got {}",
+        cache.hull_len()
+    );
+
+    // Endpoint queries still work correctly
+    let query = Vec2::new(1.0, 0.0);
+    let (lin_s, lin_v) = cache.linear_attention(&query);
+    let (fast_s, fast_v) = cache.fast_attention(&query);
+    assert!((lin_s - fast_s).abs() < 1e-3);
+    assert_eq!(lin_v, fast_v);
+
+    assert_eq!(fib[10], 55);
+    assert_eq!(fib[20], 6765);
+    assert_eq!(fib[44], 701408733);
+}
+
+#[test]
+fn test_percepta_counter_collinear() {
+    let mut cache = KVCache2D::new();
+    for i in 0..10000 {
+        cache.append(Vec2::new(i as f32, i as f32), i);
+    }
+
+    assert!(
+        cache.hull_len() <= 2,
+        "counter trace should compress to 2, got {}",
+        cache.hull_len()
+    );
+
+    let query = Vec2::new(1.0, 1.0);
+    let (lin_s, lin_v) = cache.linear_attention(&query);
+    let (fast_s, fast_v) = cache.fast_attention(&query);
+
+    assert!((lin_s - fast_s).abs() < 1e-3);
+    assert_eq!(lin_v, fast_v);
+    assert_eq!(lin_v, 9999, "should pick the last counter value");
+}
+
+#[test]
+fn test_percepta_unimodality_proof() {
+    let mut cache = KVCache2D::new();
+    // Concave-down parabola: all points on hull
+    for i in 0..100u32 {
+        let x = i as f32;
+        let y = -(x - 50.0).powi(2) / 100.0;
+        cache.append(Vec2::new(x, y), i as usize);
+    }
+    assert_eq!(cache.hull_len(), 100);
+
+    let queries = [
+        Vec2::new(1.0, 0.0),
+        Vec2::new(0.0, 1.0),
+        Vec2::new(1.0, 1.0),
+        Vec2::new(-1.0, 1.0),
+        Vec2::new(2.0, -1.0),
+    ];
+
+    for query in &queries {
+        let hull = cache.hull_indices();
+        let scores: Vec<f32> = hull
+            .iter()
+            .map(|&idx| query.dot(&cache.keys()[idx]))
+            .collect();
+
+        let max_pos = scores
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+
+        for i in 1..=max_pos {
+            assert!(
+                scores[i] >= scores[i - 1] - 1e-6,
+                "not unimodal before max at i={i}: {} < {}",
+                scores[i],
+                scores[i - 1]
+            );
+        }
+        for i in max_pos + 1..scores.len() {
+            assert!(
+                scores[i] <= scores[i - 1] + 1e-6,
+                "not unimodal after max at i={i}: {} > {}",
+                scores[i],
+                scores[i - 1]
+            );
+        }
+    }
+}
+
+#[test]
+fn test_percepta_supporting_point_360_degrees() {
+    let mut cache = KVCache2D::new();
+    // Concave-down parabola: all points on upper hull
+    for i in 0..500u32 {
+        let x = i as f32;
+        let y = -(x - 250.0).powi(2) / 100.0 + 100.0;
+        cache.append(Vec2::new(x, y), i as usize);
+    }
+
+    for deg in 0..360 {
+        let rad = (deg as f32).to_radians();
+        let query = Vec2::new(rad.cos(), rad.sin());
+
+        let (lin_s, lin_v) = cache.linear_attention(&query);
+        let (fast_s, fast_v) = cache.fast_attention(&query);
+
+        assert!(
+            (lin_s - fast_s).abs() < 1e-3,
+            "supporting point violated at deg={deg}: lin={lin_s}, fast={fast_s}"
+        );
+        assert_eq!(lin_v, fast_v, "value mismatch at deg={deg}");
+    }
+}
+
+#[test]
+fn test_percepta_random_convex_stress() {
+    let mut seed = 12345u64;
+    let next_seed = |s: &mut u64| -> f32 {
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((*s >> 33) as f32) / (1u64 << 31) as f32
+    };
+
+    let mut cache = KVCache2D::with_capacity(10000);
+    let center = next_seed(&mut seed) * 5000.0;
+    let scale = 100.0 + next_seed(&mut seed) * 900.0;
+    let offset = next_seed(&mut seed) * 50.0;
+
+    for i in 0..10000u32 {
+        let x = i as f32;
+        let y = -(x - center).powi(2) / scale + offset;
+        cache.append(Vec2::new(x, y), i as usize);
+    }
+
+    for _ in 0..100 {
+        let qx = (next_seed(&mut seed) - 0.5) * 20.0;
+        let qy = next_seed(&mut seed) * 20.0; // qy >= 0 for unimodal guarantee
+        let query = Vec2::new(qx, qy);
+
+        let (lin_s, lin_v) = cache.linear_attention(&query);
+        let (fast_s, fast_v) = cache.fast_attention(&query);
+
+        assert!(
+            (lin_s - fast_s).abs() < 1e-2,
+            "random stress: score mismatch for ({qx:.2}, {qy:.2}): lin={lin_s:.2}, fast={fast_s:.2}"
+        );
+        assert_eq!(
+            lin_v, fast_v,
+            "random stress: value mismatch for ({qx:.2}, {qy:.2})"
+        );
+    }
+}
+
+// ── Percepta: Arithmetic Computation via Attention ─────────────────
+
+#[test]
+fn test_percepta_arithmetic_addition() {
+    let mut cache = KVCache2D::new();
+    let query = Vec2::new(1.0, 0.0);
+
+    cache.append(Vec2::new(0.0, 42.0), 42);
+
+    for step in 1..=17 {
+        let (lin_s, lin_v) = cache.linear_attention(&query);
+        let (fast_s, fast_v) = cache.fast_attention(&query);
+        assert!((lin_s - fast_s).abs() < 1e-3, "step {step}: score mismatch");
+        assert_eq!(lin_v, fast_v, "step {step}: value mismatch");
+        let next = fast_v + 1;
+        cache.append(Vec2::new(step as f32, next as f32), next);
+    }
+
+    let (_, result) = cache.fast_attention(&query);
+    assert_eq!(result, 59, "42 + 17 = 59");
+}
+
+#[test]
+fn test_percepta_arithmetic_subtraction() {
+    let mut cache = KVCache2D::new();
+    let query = Vec2::new(1.0, 0.0);
+
+    cache.append(Vec2::new(0.0, 100.0), 100);
+
+    for step in 1..=37 {
+        let (_, prev) = cache.fast_attention(&query);
+        let next = prev - 1;
+        cache.append(Vec2::new(step as f32, next as f32), next);
+    }
+
+    let (_, result) = cache.fast_attention(&query);
+    assert_eq!(result, 63, "100 - 37 = 63");
+
+    let (lin_s, lin_v) = cache.linear_attention(&query);
+    let (fast_s, fast_v) = cache.fast_attention(&query);
+    assert!((lin_s - fast_s).abs() < 1e-3);
+    assert_eq!(lin_v, fast_v);
+}
+
+#[test]
+fn test_percepta_arithmetic_multiplication() {
+    let mut cache = KVCache2D::new();
+    let query = Vec2::new(1.0, 0.0);
+
+    cache.append(Vec2::new(0.0, 0.0), 0);
+
+    for step in 1..=8 {
+        let (_, prev) = cache.fast_attention(&query);
+        let next = prev + 7;
+        cache.append(Vec2::new(step as f32, next as f32), next);
+    }
+
+    let (_, result) = cache.fast_attention(&query);
+    assert_eq!(result, 56, "7 × 8 = 56");
+}
+
+#[test]
+fn test_percepta_arithmetic_division() {
+    let mut cache = KVCache2D::new();
+    let query = Vec2::new(1.0, 0.0);
+
+    cache.append(Vec2::new(0.0, 100.0), 100);
+
+    let mut quotient = 0usize;
+    for step in 1.. {
+        let (_, prev) = cache.fast_attention(&query);
+        if prev < 7 {
+            break;
+        }
+        let next = prev - 7;
+        cache.append(Vec2::new(step as f32, next as f32), next);
+        quotient += 1;
+    }
+
+    let (_, remainder) = cache.fast_attention(&query);
+    assert_eq!(quotient, 14, "100 ÷ 7 = 14");
+    assert_eq!(remainder, 2, "100 % 7 = 2");
+}
+
+#[test]
+fn test_percepta_arithmetic_power() {
+    let mut cache = KVCache2D::new();
+    let query = Vec2::new(1.0, 0.0);
+
+    cache.append(Vec2::new(0.0, 1.0), 1);
+
+    for step in 1..=10 {
+        let (_, prev) = cache.fast_attention(&query);
+        let next = prev * 2;
+        cache.append(Vec2::new(step as f32, next as f32), next);
+    }
+
+    let (_, result) = cache.fast_attention(&query);
+    assert_eq!(result, 1024, "2^10 = 1024");
+    assert!(cache.hull_len() <= 2, "exponential trace compresses to 2");
+}
+
+#[test]
+fn test_percepta_arithmetic_combined_vm() {
+    let mut cache = KVCache2D::new();
+    let query = Vec2::new(1.0, 0.0);
+
+    // (3 + 5) * 2 - 2 = 14
+    let program: Vec<(&str, usize)> = vec![("LOAD", 3), ("ADD", 5), ("MUL", 2), ("SUB", 2)];
+
+    let mut expected = 0usize;
+    for (step, (opcode, operand)) in program.iter().enumerate() {
+        let acc = match *opcode {
+            "LOAD" => *operand,
+            "ADD" => {
+                let (_, prev) = cache.fast_attention(&query);
+                prev + operand
+            }
+            "SUB" => {
+                let (_, prev) = cache.fast_attention(&query);
+                prev - operand
+            }
+            "MUL" => {
+                let (_, prev) = cache.fast_attention(&query);
+                prev * operand
+            }
+            _ => panic!("unknown opcode: {opcode}"),
+        };
+        cache.append(Vec2::new(step as f32, acc as f32), acc);
+        expected = acc;
+    }
+
+    let (_, result) = cache.fast_attention(&query);
+    assert_eq!(result, 14, "(3 + 5) × 2 - 2 = 14");
+    assert_eq!(result, expected);
+
+    let (lin_s, lin_v) = cache.linear_attention(&query);
+    let (fast_s, fast_v) = cache.fast_attention(&query);
+    assert!((lin_s - fast_s).abs() < 1e-3);
+    assert_eq!(lin_v, fast_v);
+}
