@@ -46,16 +46,39 @@ experience shown in the Percepta blog.
   - `format_events()` produces concise web-demo-style output
   - Shows first 4 placements, evenly spaced middle, last 5
 
-- [x] **T5: Verify and commit**
+- [x] **T5: Verify example and tests**
   - `cargo test --quiet` passes all 138 tests (58 unit + 80 integration)
   - `cargo run --example sudoku_9x9` produces streaming output
   - `cargo clippy --quiet` clean
-  - Commit with message: `feat: 9x9 sudoku example with streaming thinking output`
+  - Commit: `097fd48 feat: 9x9 sudoku example with streaming thinking output`
 
-## Results
+- [x] **T6: Wire `ComputableLora` into `speculative.rs` DDTree**
+  - Add `ConstraintPruner` trait to `speculative.rs` (`Send + Sync`)
+  - Implement `NoPruner` (identity) and `SudokuPruner` (row/col/box rules)
+  - `SudokuPruner` maps DDTree depth → (row, col), validates digits 1-9
+  - Add `build_dd_tree_pruned(marginals, config, pruner)` function
+  - Before adding children to heap, filter through `pruner.is_valid(depth, token)`
+  - Invalid branches never enter the tree → saves verification budget
+  - Refactored `build_dd_tree` to delegate to `build_dd_tree_pruned` with `NoPruner`
+  - 10 new tests: NoPruner, SudokuPruner, pruned tree size, valid-only guarantee
+
+- [x] **T7: End-to-end Sudoku speculative decoding example**
+  - Create `examples/sudoku_speculative.rs`
+  - Simulated draft model marginals (uniform over valid digits)
+  - DDTree comparison: without vs with Computable LoRA pruning
+  - Results: **52% valid unpruned → 100% valid pruned** (48 invalid branches eliminated)
+  - Token distribution table shows exactly which digits were pruned per depth
+  - Commit: `feat: constraint pruner for dd-tree speculative decoding`
+
+## Results (so far)
 - Arto Inkala puzzle solved: 49,559 steps, 7 hull vertices, 7079.9x compression
 - O(49559) → O(log 7) ≈ O(3) attention speedup
 - Linear and fast attention scores match perfectly
+- Streaming output matches web demo style
+- **DDTree pruning: 52% valid → 100% valid branches** (48 invalid eliminated)
+- Computable LoRA guarantees mathematically valid placements
+- 148 tests passing (68 unit + 80 integration), zero clippy warnings
+</newtext>
 
 ## Constraints
 - Keep solver logic in `src/percepta.rs` (pub) — examples call into it
