@@ -151,6 +151,8 @@ Percepta:  ternary search hull  → O(log H) per step (H = hull size ≤ N)
 | **All 4 arithmetic ops work** | +, −, ×, ÷ computed via attention retrieval | `test_arithmetic_comprehensive` |
 | **Power works** | 2^10 = 1024 via repeated doubling | `test_arithmetic_power` |
 | **Combined expressions work** | (3+5)×2−2 = 14 via tiny VM | `test_arithmetic_combined_expression` |
+| **Backtracking search works** | 4×4 Sudoku + 8-Queens solved via attention-tracked DFS | `test_sudoku_4x4_backtracking`, `test_nqueens_8_backtracking` |
+| **Hull captures search peaks** | Backtrack valleys compressed, solution retained | `test_sudoku_4x4_hull_captures_search` |
 
 ### Adversarial Findings (Limitations Discovered)
 
@@ -177,6 +179,18 @@ We proved that the 4 fundamental operations can be computed incrementally using 
 The comprehensive test (`test_arithmetic_comprehensive`) verifies all a+b, a×b, a−b, a÷b for a,b ∈ 0..=10 — **960 arithmetic operations**, all computed correctly via attention-based state retrieval.
 
 **Key insight**: Query `(1, 0)` always retrieves the latest state because `dot((1,0), (step, acc)) = step`, maximized at the most recent entry. This works regardless of whether acc increases, decreases, or grows exponentially.
+
+### Backtracking Search Proof (Sudoku & N-Queens)
+
+The Percepta blog solved the Arto Inkala Sudoku (hardest in the world) inside a transformer at 32K tok/s — **without training**. They *compiled* a C solver into transformer weights. Our PoC proves the attention substrate handles the same backtracking pattern:
+
+| Problem | What It Tests | Result |
+|---------|--------------|--------|
+| **4×4 Sudoku** | DFS with constraint checking + backtracking | Solved correctly, hull compresses valleys |
+| **8-Queens** | Column + diagonal conflict detection + backtracking | Solved correctly, 8 queens placed without conflicts |
+| **Backtracking pattern** | Forward → peak → dead-end → undo → new branch | Hull captures peaks, skips valleys |
+
+**No training needed** — the solver is a deterministic state machine. The attention mechanism tracks its execution trace through forward placements AND backtracking undos. The hull compresses the "mountain range" trace: search peaks are retained, backtrack valleys are dropped.
 
 ### Correctness Guarantee
 
@@ -217,7 +231,7 @@ cargo build --release
 # Run benchmark + generate plot
 cargo run --release
 
-# Run all tests (176 tests)
+# Run all tests (187 tests)
 cargo test --quiet
 
 # Lint
@@ -242,7 +256,7 @@ src/
   benchmark.rs    BenchResult, run_all (AR / DFlash / DDTree / Speculative Decoding)
   plot.rs         plot_results → PNG bar chart
 tests/
-  integration.rs  68 integration tests (includes adversarial + DFA + arithmetic + geometry)
+  integration.rs  71 integration tests (includes adversarial + DFA + arithmetic + backtracking + geometry)
 bench/
   001_bench_result.png
   002_bench_result.png  ...

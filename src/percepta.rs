@@ -1178,4 +1178,253 @@ mod tests {
             }
         }
     }
+
+    // ── Backtracking Computation: Sudoku & N-Queens ──────────────
+    //
+    // The Percepta blog solved the Arto Inkala Sudoku (hardest in the world)
+    // inside a transformer at 32K tok/s. They did NOT train the model —
+    // they COMPILED a C solver into transformer weights via MILP solvers.
+    // The model executes the program deterministically, like a CPU.
+    //
+    // These tests prove our 2D attention mechanism correctly tracks
+    // backtracking search: forward placements, dead-end detection, undos,
+    // and alternative branches. No training needed.
+
+    fn sudoku4_check(board: &[u8; 16], pos: usize, digit: u8) -> bool {
+        let row = pos / 4;
+        let col = pos % 4;
+        for c in 0..4 {
+            if board[row * 4 + c] == digit {
+                return false;
+            }
+        }
+        for r in 0..4 {
+            if board[r * 4 + col] == digit {
+                return false;
+            }
+        }
+        let br = (row / 2) * 2;
+        let bc = (col / 2) * 2;
+        for r in br..br + 2 {
+            for c in bc..bc + 2 {
+                if board[r * 4 + c] == digit {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn sudoku4_valid(board: &[u8; 16]) -> bool {
+        for pos in 0..16 {
+            let d = board[pos];
+            if d == 0 {
+                return false;
+            }
+            let mut tmp = *board;
+            tmp[pos] = 0;
+            if !sudoku4_check(&tmp, pos, d) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn sudoku4_solve(board: &mut [u8; 16], cache: &mut KVCache2D, step: &mut usize) -> bool {
+        let filled = board.iter().filter(|&&v| v > 0).count();
+        cache.append(Vec2::new(*step as f32, filled as f32 * 10.0), *step);
+        *step += 1;
+
+        let pos = match board.iter().position(|&v| v == 0) {
+            Some(p) => p,
+            None => return true,
+        };
+
+        for digit in 1..=4u8 {
+            if sudoku4_check(board, pos, digit) {
+                board[pos] = digit;
+                if sudoku4_solve(board, cache, step) {
+                    return true;
+                }
+                board[pos] = 0;
+            }
+        }
+        false
+    }
+
+    fn nqueens_check(queens: &[i32], row: usize, col: i32) -> bool {
+        for (r, &c) in queens.iter().enumerate().take(row) {
+            if c == col || (c - col).abs() == (r as i32 - row as i32).abs() {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn nqueens_solve(
+        queens: &mut [i32],
+        row: usize,
+        n: usize,
+        cache: &mut KVCache2D,
+        step: &mut usize,
+    ) -> bool {
+        let placed = queens.iter().filter(|&&q| q >= 0).count();
+        cache.append(Vec2::new(*step as f32, placed as f32 * 10.0), *step);
+        *step += 1;
+
+        if row >= n {
+            return true;
+        }
+
+        for col in 0..n {
+            if nqueens_check(queens, row, col as i32) {
+                queens[row] = col as i32;
+                if nqueens_solve(queens, row + 1, n, cache, step) {
+                    return true;
+                }
+                queens[row] = -1;
+            }
+        }
+        false
+    }
+
+    /// BACKTRACKING PATTERN: forward exploration → dead end → backtrack → solution.
+    /// The trace creates a "mountain range" pattern.
+    /// The hull captures peaks (deepest explorations), skips valleys (backtracks).
+    #[test]
+    fn test_backtracking_forward_undo_pattern() {
+        let mut cache = KVCache2D::new();
+
+        // Forward: depth 0→1→2→3→4 (peak)
+        cache.append(Vec2::new(0.0, 10.0), 0);
+        cache.append(Vec2::new(1.0, 20.0), 1);
+        cache.append(Vec2::new(2.0, 30.0), 2);
+        cache.append(Vec2::new(3.0, 40.0), 3);
+        cache.append(Vec2::new(4.0, 50.0), 4); // peak
+
+        // Dead end → backtrack to depth 2
+        cache.append(Vec2::new(5.0, 30.0), 5); // valley
+
+        // New branch from depth 2 → goes deeper
+        cache.append(Vec2::new(6.0, 40.0), 6);
+        cache.append(Vec2::new(7.0, 50.0), 7);
+        cache.append(Vec2::new(8.0, 60.0), 8);
+        cache.append(Vec2::new(9.0, 70.0), 9); // solution
+
+        let query = Vec2::new(1.0, 0.0);
+        let (_, result) = cache.fast_attention(&query);
+        assert_eq!(result, 9, "should return final state");
+
+        // Hull: should capture peaks (0, 4, 9) but NOT the valley (5)
+        let hull = cache.hull_indices();
+        assert!(
+            hull.len() <= 3,
+            "hull should compress to ~3 vertices, got {}",
+            hull.len()
+        );
+        assert!(hull.contains(&9), "hull should contain solution step");
+        assert!(
+            !hull.contains(&5),
+            "hull should NOT contain the backtrack valley"
+        );
+
+        // Verify fast matches linear
+        let (lin_s, lin_v) = cache.linear_attention(&query);
+        let (fast_s, fast_v) = cache.fast_attention(&query);
+        assert!((lin_s - fast_s).abs() < 1e-3);
+        assert_eq!(lin_v, fast_v);
+    }
+
+    /// 4×4 SUDOKU: Full backtracking solver with attention trace.
+    /// Each recursive call records state. Attention retrieves latest state.
+    #[test]
+    fn test_sudoku_4x4_backtracking() {
+        // 4×4 Sudoku: 1 _ _ _ / _ _ 2 _ / _ 3 _ _ / _ _ _ 4
+        let mut board: [u8; 16] = [1, 0, 0, 0, 0, 0, 2, 0, 0, 3, 0, 0, 0, 0, 0, 4];
+        let mut cache = KVCache2D::new();
+        let mut step = 0usize;
+
+        let solved = sudoku4_solve(&mut board, &mut cache, &mut step);
+
+        assert!(solved, "4×4 Sudoku should be solvable");
+        assert!(board.iter().all(|&v| v > 0), "all cells filled");
+        assert!(
+            sudoku4_valid(&board),
+            "solution should satisfy all constraints"
+        );
+
+        // Attention retrieves correct final state
+        let query = Vec2::new(1.0, 0.0);
+        let (lin_s, lin_v) = cache.linear_attention(&query);
+        let (fast_s, fast_v) = cache.fast_attention(&query);
+        assert!((lin_s - fast_s).abs() < 1e-3);
+        assert_eq!(lin_v, fast_v);
+        assert_eq!(fast_v, step - 1, "should return final step");
+    }
+
+    /// 4×4 SUDOKU HULL: Hull captures search tree peaks, compresses backtracks.
+    #[test]
+    fn test_sudoku_4x4_hull_captures_search() {
+        let mut board: [u8; 16] = [1, 0, 0, 0, 0, 0, 2, 0, 0, 3, 0, 0, 0, 0, 0, 4];
+        let mut cache = KVCache2D::new();
+        let mut step = 0usize;
+
+        sudoku4_solve(&mut board, &mut cache, &mut step);
+
+        // Hull should compress (backtracking creates valleys)
+        assert!(
+            cache.hull_len() < cache.len(),
+            "hull should compress: hull={}, total={}",
+            cache.hull_len(),
+            cache.len()
+        );
+
+        // Hull should contain the final state
+        let hull = cache.hull_indices();
+        assert!(
+            hull.contains(&(step - 1)),
+            "hull should contain final step {}",
+            step - 1
+        );
+    }
+
+    /// 8-QUEENS: Classic backtracking with attention trace.
+    #[test]
+    fn test_nqueens_8_backtracking() {
+        let mut queens: [i32; 8] = [-1; 8];
+        let mut cache = KVCache2D::new();
+        let mut step = 0usize;
+
+        let solved = nqueens_solve(&mut queens, 0, 8, &mut cache, &mut step);
+
+        assert!(solved, "8-Queens should have a solution");
+        assert!(queens.iter().all(|&q| q >= 0), "all queens placed");
+
+        // Verify no conflicts
+        for i in 0..8 {
+            for j in i + 1..8 {
+                assert_ne!(queens[i], queens[j], "queens {i},{j} same column");
+                assert_ne!(
+                    (queens[i] - queens[j]).abs(),
+                    (j - i) as i32,
+                    "queens {i},{j} same diagonal"
+                );
+            }
+        }
+
+        // Attention retrieves final state
+        let query = Vec2::new(1.0, 0.0);
+        let (lin_s, lin_v) = cache.linear_attention(&query);
+        let (fast_s, fast_v) = cache.fast_attention(&query);
+        assert!((lin_s - fast_s).abs() < 1e-3);
+        assert_eq!(lin_v, fast_v);
+
+        // Hull shows backtracking structure
+        assert!(
+            cache.hull_len() < cache.len(),
+            "8-Queens hull should compress: hull={}, total={}",
+            cache.hull_len(),
+            cache.len()
+        );
+    }
 }
