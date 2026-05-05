@@ -1381,3 +1381,188 @@ fn test_percepta_nqueens_8() {
         cache.len()
     );
 }
+
+// ── 9×9 Sudoku + Computable LoRA Tests ───────────────────────────
+
+#[test]
+fn test_sudoku9x9_arto_inkala_clues() {
+    let puzzle = microgpt_rs::percepta::Sudoku9x9::arto_inkala();
+    assert_eq!(puzzle.clue_count(), 21, "Arto Inkala should have 21 clues");
+    assert_eq!(puzzle.grid[0][0], 8);
+    assert_eq!(puzzle.grid[8][1], 9);
+}
+
+#[test]
+fn test_sudoku9x9_is_valid_move() {
+    let puzzle = microgpt_rs::percepta::Sudoku9x9::arto_inkala();
+    // Row 0 has 8, so placing 8 at (0,1) is invalid (row)
+    assert!(!puzzle.is_valid_move(0, 1, 8));
+    // Col 1 has 5 (at row 3), 7 (row 2), 9 (row 8), so those are invalid for col
+    assert!(!puzzle.is_valid_move(0, 1, 5));
+    assert!(!puzzle.is_valid_move(0, 1, 7));
+    // Box (0,0)-(2,2) contains 8,3,7 — placing those is invalid
+    assert!(!puzzle.is_valid_move(1, 0, 3));
+    // 0 is never valid
+    assert!(!puzzle.is_valid_move(0, 1, 0));
+    // Something valid
+    assert!(puzzle.is_valid_move(0, 1, 1));
+}
+
+#[test]
+fn test_sudoku9x9_display_format() {
+    let puzzle = microgpt_rs::percepta::Sudoku9x9::arto_inkala();
+    let display = puzzle.display();
+    assert!(display.contains("8 . . | . . . | . . "));
+    assert!(display.contains("------+-------+------"));
+}
+
+#[test]
+fn test_sudoku9x9_solve_arto_inkala() {
+    let mut puzzle = microgpt_rs::percepta::Sudoku9x9::arto_inkala();
+    let mut cache = microgpt_rs::percepta::KVCache2D::new();
+    let mut step = 0usize;
+
+    let solved = puzzle.solve(&mut cache, &mut step);
+
+    assert!(solved, "Arto Inkala should be solvable");
+    assert!(puzzle.is_solved(), "board should be fully solved");
+    assert!(step > 0, "should take at least one step");
+
+    // All cells filled
+    for r in 0..9 {
+        for c in 0..9 {
+            assert!(puzzle.grid[r][c] > 0, "cell ({r},{c}) should be filled");
+        }
+    }
+}
+
+#[test]
+fn test_sudoku9x9_solve_hull_compression() {
+    let mut puzzle = microgpt_rs::percepta::Sudoku9x9::arto_inkala();
+    let mut cache = microgpt_rs::percepta::KVCache2D::new();
+    let mut step = 0usize;
+
+    puzzle.solve(&mut cache, &mut step);
+
+    assert!(
+        cache.hull_len() < cache.len(),
+        "9×9 hull should compress: hull={}, total={}",
+        cache.hull_len(),
+        cache.len()
+    );
+
+    // Attention retrieves final state
+    let query = microgpt_rs::percepta::Vec2::new(1.0, 0.0);
+    let (lin_s, lin_v) = cache.linear_attention(&query);
+    let (fast_s, fast_v) = cache.fast_attention(&query);
+    assert!((lin_s - fast_s).abs() < 1e-3, "scores should match");
+    assert_eq!(lin_v, fast_v, "values should match");
+    assert_eq!(fast_v, step - 1, "should return final step");
+}
+
+#[test]
+fn test_computable_lora_prune_drafts() {
+    use microgpt_rs::percepta::{ComputableLora, Sudoku9x9};
+
+    let puzzle = Sudoku9x9::arto_inkala();
+
+    // Cell (0,1): row 0 has 8, col 1 has 5/7/9, box has 8/3/7
+    // Valid digits for (0,1): 1, 2, 4, 6
+    let drafts: Vec<(u8, f32)> = vec![
+        (8, -0.1), // Invalid: in row and box
+        (5, -0.3), // Invalid: in col
+        (7, -0.5), // Invalid: in col and box
+        (3, -0.7), // Invalid: in box
+        (2, -1.0), // Valid
+        (1, -1.2), // Valid
+    ];
+
+    let pruned = ComputableLora::prune_drafts(&puzzle, 0, 1, &drafts);
+
+    assert_eq!(pruned.len(), 2, "should have 2 valid moves");
+    assert_eq!(pruned[0].0, 2, "highest prob valid = 2");
+    assert_eq!(pruned[1].0, 1, "next valid = 1");
+
+    // All pruned are valid
+    for (digit, _) in &pruned {
+        assert!(
+            puzzle.is_valid_move(0, 1, *digit),
+            "digit {digit} should be valid"
+        );
+    }
+}
+
+#[test]
+fn test_computable_lora_prune_all_invalid() {
+    use microgpt_rs::percepta::{ComputableLora, Sudoku9x9};
+
+    let puzzle = Sudoku9x9::arto_inkala();
+
+    // Cell (0,0) already has 8 — all drafts for that cell should be pruned
+    // because any digit placed there would conflict with the existing 8
+    let _drafts: Vec<(u8, f32)> = vec![(1, -0.1), (2, -0.2), (3, -0.3)];
+
+    // Actually (0,0) is filled, so let's test a cell where all proposed digits are invalid
+    // Cell (1,2): already has 3, so placing anything there should be "invalid"
+    // because the cell is already filled. But is_valid_move only checks if the digit
+    // conflicts with neighbors. Let's pick a filled cell and verify all neighbors block it.
+    // Better: cell (0,1) where we propose only invalid digits
+    let all_invalid: Vec<(u8, f32)> = vec![
+        (8, -0.1), // in row + box
+        (3, -0.2), // in box
+        (7, -0.3), // in col + box
+    ];
+
+    let pruned = ComputableLora::prune_drafts(&puzzle, 0, 1, &all_invalid);
+    assert!(pruned.is_empty(), "all drafts should be pruned");
+}
+
+#[test]
+fn test_streaming_solver_arto_inkala() {
+    use microgpt_rs::percepta::{SolveEvent, StreamingSolver};
+
+    let mut solver = StreamingSolver::new(microgpt_rs::percepta::Sudoku9x9::arto_inkala().grid);
+
+    let solved = solver.solve_streaming();
+
+    assert!(solved, "should solve");
+    assert!(solver.state.is_solved(), "board should be solved");
+    assert!(!solver.events.is_empty(), "should have events");
+
+    // Should have at least one Solved event
+    let has_solved = solver
+        .events
+        .iter()
+        .any(|e| matches!(e, SolveEvent::Solved { .. }));
+    assert!(has_solved, "should have Solved event");
+
+    // Should have Try and Accepted events
+    let has_try = solver
+        .events
+        .iter()
+        .any(|e| matches!(e, SolveEvent::Try { .. }));
+    let has_accepted = solver
+        .events
+        .iter()
+        .any(|e| matches!(e, SolveEvent::Accepted { .. }));
+    assert!(has_try, "should have Try events");
+    assert!(has_accepted, "should have Accepted events");
+
+    // Format should produce non-empty output
+    let output = solver.format_events();
+    assert!(!output.is_empty(), "format should produce output");
+    assert!(output.contains("Solved"), "should mention solving");
+    assert!(
+        output.contains("Hull compression"),
+        "should show hull stats"
+    );
+}
+
+#[test]
+fn test_sudoku9x9_next_empty() {
+    let puzzle = microgpt_rs::percepta::Sudoku9x9::arto_inkala();
+    let empty = puzzle.next_empty();
+    assert!(empty.is_some(), "should find empty cell");
+    let (r, c) = empty.unwrap();
+    assert_eq!(puzzle.grid[r][c], 0, "returned cell should be empty");
+}

@@ -212,6 +212,450 @@ impl KVCache2D {
     }
 }
 
+// ── 9×9 Sudoku: Public API for examples ──────────────────────────
+
+/// 9×9 Sudoku board. 0 = empty cell, 1-9 = digit.
+#[derive(Clone, Debug)]
+pub struct Sudoku9x9 {
+    pub grid: [[u8; 9]; 9],
+}
+
+impl Sudoku9x9 {
+    /// Create from a 9×9 grid. 0 = empty.
+    pub fn new(grid: [[u8; 9]; 9]) -> Self {
+        Self { grid }
+    }
+
+    /// Arto Inkala's famous "World's Hardest Sudoku" (21 clues).
+    pub fn arto_inkala() -> Self {
+        Self::new([
+            [8, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 3, 6, 0, 0, 0, 0, 0],
+            [0, 7, 0, 0, 9, 0, 2, 0, 0],
+            [0, 5, 0, 0, 0, 7, 0, 0, 0],
+            [0, 0, 0, 0, 4, 5, 7, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0, 3, 0],
+            [0, 0, 1, 0, 0, 0, 0, 6, 8],
+            [0, 0, 8, 5, 0, 0, 0, 1, 0],
+            [0, 9, 0, 0, 0, 0, 4, 0, 0],
+        ])
+    }
+
+    /// Check if placing `digit` at (row, col) violates Sudoku rules.
+    /// The "rules engine" — deterministic constraint satisfaction.
+    pub fn is_valid_move(&self, row: usize, col: usize, digit: u8) -> bool {
+        if digit == 0 {
+            return false;
+        }
+        // Row constraint
+        for c in 0..9 {
+            if self.grid[row][c] == digit {
+                return false;
+            }
+        }
+        // Column constraint
+        for r in 0..9 {
+            if self.grid[r][col] == digit {
+                return false;
+            }
+        }
+        // 3×3 box constraint
+        let box_r = (row / 3) * 3;
+        let box_c = (col / 3) * 3;
+        for r in 0..3 {
+            for c in 0..3 {
+                if self.grid[box_r + r][box_c + c] == digit {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Count given clues (non-zero cells).
+    pub fn clue_count(&self) -> usize {
+        self.grid
+            .iter()
+            .flat_map(|row| row.iter())
+            .filter(|&&v| v > 0)
+            .count()
+    }
+
+    /// Check if the board is fully solved.
+    pub fn is_solved(&self) -> bool {
+        self.grid.iter().flat_map(|row| row.iter()).all(|&v| v > 0) && self.is_valid_solution()
+    }
+
+    /// Find next empty cell, returns (row, col) or None.
+    pub fn next_empty(&self) -> Option<(usize, usize)> {
+        for r in 0..9 {
+            for c in 0..9 {
+                if self.grid[r][c] == 0 {
+                    return Some((r, c));
+                }
+            }
+        }
+        None
+    }
+
+    /// Pretty-print the board as a string.
+    pub fn display(&self) -> String {
+        let mut s = String::with_capacity(256);
+        for r in 0..9 {
+            if r > 0 && r % 3 == 0 {
+                s.push_str("------+-------+------\n");
+            }
+            for c in 0..9 {
+                if c > 0 && c % 3 == 0 {
+                    s.push_str("| ");
+                }
+                match self.grid[r][c] {
+                    0 => s.push_str(". "),
+                    d => {
+                        s.push_str(&format!("{d} "));
+                    }
+                }
+            }
+            s.push('\n');
+        }
+        s
+    }
+
+    /// Solve with KVCache2D trace. Returns true if solved.
+    pub fn solve(&mut self, cache: &mut KVCache2D, step: &mut usize) -> bool {
+        let filled = self.clue_count();
+        cache.append(Vec2::new(*step as f32, filled as f32), *step);
+        *step += 1;
+
+        let Some((row, col)) = self.next_empty() else {
+            return true;
+        };
+
+        for digit in 1..=9u8 {
+            if self.is_valid_move(row, col, digit) {
+                self.grid[row][col] = digit;
+                if self.solve(cache, step) {
+                    return true;
+                }
+                self.grid[row][col] = 0;
+            }
+        }
+        false
+    }
+
+    /// Validate a complete board satisfies all constraints.
+    fn is_valid_solution(&self) -> bool {
+        for r in 0..9 {
+            let mut seen = [false; 10];
+            for c in 0..9 {
+                let d = self.grid[r][c] as usize;
+                if d == 0 || seen[d] {
+                    return false;
+                }
+                seen[d] = true;
+            }
+        }
+        for c in 0..9 {
+            let mut seen = [false; 10];
+            for r in 0..9 {
+                let d = self.grid[r][c] as usize;
+                if d == 0 || seen[d] {
+                    return false;
+                }
+                seen[d] = true;
+            }
+        }
+        for box_r in (0..9).step_by(3) {
+            for box_c in (0..9).step_by(3) {
+                let mut seen = [false; 10];
+                for r in 0..3 {
+                    for c in 0..3 {
+                        let d = self.grid[box_r + r][box_c + c] as usize;
+                        if d == 0 || seen[d] {
+                            return false;
+                        }
+                        seen[d] = true;
+                    }
+                }
+            }
+        }
+        true
+    }
+}
+
+// ── Computable LoRA: Deterministic Rules Engine ──────────────────
+
+/// Neuro-symbolic intercept: prunes LLM-drafted tokens against
+/// deterministic constraints. Invalid moves get probability 0.0.
+///
+/// This is the bridge between speculative decoding (DDTree) and
+/// the Percepta execution trace. The LLM proposes, the rules dispose.
+pub struct ComputableLora;
+
+impl ComputableLora {
+    /// Filter drafted (digit, log_prob) pairs through Sudoku constraints.
+    /// Returns only valid moves, sorted by probability descending.
+    ///
+    /// In a real system: the fast draft model proposes logits,
+    /// this intercept prunes invalid branches *before* target verification.
+    pub fn prune_drafts(
+        state: &Sudoku9x9,
+        row: usize,
+        col: usize,
+        logits: &[(u8, f32)],
+    ) -> Vec<(u8, f32)> {
+        let mut valid: Vec<(u8, f32)> = logits
+            .iter()
+            .filter(|(digit, _)| state.is_valid_move(row, col, *digit))
+            .copied()
+            .collect();
+        valid.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        valid
+    }
+}
+
+// ── Streaming Solver: Step-by-step "thinking" output ─────────────
+
+/// Events emitted during streaming solve.
+#[derive(Debug)]
+pub enum SolveEvent {
+    /// Attempting to place a digit.
+    Try {
+        row: usize,
+        col: usize,
+        digit: u8,
+        depth: usize,
+    },
+    /// Placement accepted, moving deeper.
+    Accepted {
+        row: usize,
+        col: usize,
+        digit: u8,
+        filled: usize,
+    },
+    /// Contradiction found — this branch is dead.
+    Contradiction {
+        row: usize,
+        col: usize,
+        digit: u8,
+        depth: usize,
+    },
+    /// Backtracking from a dead end.
+    Backtrack {
+        row: usize,
+        col: usize,
+        depth: usize,
+    },
+    /// Puzzle solved.
+    Solved {
+        steps: usize,
+        hull_size: usize,
+        total_trace: usize,
+    },
+}
+
+/// Solver that emits events for streaming display.
+/// Produces the "LLM thinking" output pattern from the Percepta demo.
+pub struct StreamingSolver {
+    pub state: Sudoku9x9,
+    pub cache: KVCache2D,
+    pub step: usize,
+    pub events: Vec<SolveEvent>,
+}
+
+impl StreamingSolver {
+    pub fn new(grid: [[u8; 9]; 9]) -> Self {
+        Self {
+            state: Sudoku9x9::new(grid),
+            cache: KVCache2D::new(),
+            step: 0,
+            events: Vec::new(),
+        }
+    }
+
+    /// Solve and collect streaming events.
+    pub fn solve_streaming(&mut self) -> bool {
+        self.solve_recursive(0)
+    }
+
+    fn solve_recursive(&mut self, depth: usize) -> bool {
+        let filled = self.state.clue_count();
+        self.cache
+            .append(Vec2::new(self.step as f32, filled as f32), self.step);
+        self.step += 1;
+
+        let Some((row, col)) = self.state.next_empty() else {
+            self.events.push(SolveEvent::Solved {
+                steps: self.step,
+                hull_size: self.cache.hull_len(),
+                total_trace: self.cache.len(),
+            });
+            return true;
+        };
+
+        for digit in 1..=9u8 {
+            self.events.push(SolveEvent::Try {
+                row,
+                col,
+                digit,
+                depth,
+            });
+
+            if self.state.is_valid_move(row, col, digit) {
+                self.state.grid[row][col] = digit;
+                let new_filled = self.state.clue_count();
+                self.events.push(SolveEvent::Accepted {
+                    row,
+                    col,
+                    digit,
+                    filled: new_filled,
+                });
+
+                if self.solve_recursive(depth + 1) {
+                    return true;
+                }
+
+                self.state.grid[row][col] = 0;
+                self.events.push(SolveEvent::Backtrack { row, col, depth });
+            } else {
+                self.events.push(SolveEvent::Contradiction {
+                    row,
+                    col,
+                    digit,
+                    depth,
+                });
+            }
+        }
+        false
+    }
+
+    /// Format events as concise streaming "thinking" text.
+    /// Matches the Percepta web demo style: ~25 lines showing
+    /// early exploration, key backtracks, convergence, and solution.
+    pub fn format_events(&self) -> String {
+        let mut out = String::new();
+        if self.events.is_empty() {
+            return out;
+        }
+
+        // Collect key moments from the event stream
+        let mut accepted_idx = 0usize;
+        let mut accepted_events: Vec<(usize, usize, u8, usize, usize)> = Vec::new();
+
+        for event in &self.events {
+            match event {
+                SolveEvent::Accepted {
+                    row,
+                    col,
+                    digit,
+                    filled,
+                } => {
+                    accepted_events.push((*row, *col, *digit, *filled, accepted_idx));
+                    accepted_idx += 1;
+                }
+                SolveEvent::Backtrack { .. } => {}
+                _ => {}
+            }
+        }
+
+        // Phrases for varied output
+        const OK_PHRASES: &[&str] = &[
+            "No immediate violations.",
+            "Looks consistent.",
+            "Still consistent.",
+            "No violations so far.",
+            "That works.",
+            "Looks good.",
+        ];
+
+        // Select ~20 key placements: first 4, last 5, and evenly spaced middle ones
+        let n = accepted_events.len();
+        let mut shown_indices: Vec<usize> = Vec::new();
+
+        if n <= 20 {
+            // Show all if few enough
+            shown_indices = (0..n).collect();
+        } else {
+            // First 4
+            shown_indices.extend(0..4usize.min(n));
+            // Last 5
+            let last_start = n.saturating_sub(5);
+            // Middle: evenly spaced, ~11 points
+            let middle_count = 11usize;
+            if n > 20 {
+                for i in 0..middle_count {
+                    let idx = 4 + ((n - 9) as f64 * i as f64 / middle_count as f64) as usize;
+                    if idx < last_start && !shown_indices.contains(&idx) {
+                        shown_indices.push(idx);
+                    }
+                }
+            }
+            // Last 5
+            for i in last_start..n {
+                if !shown_indices.contains(&i) {
+                    shown_indices.push(i);
+                }
+            }
+            shown_indices.sort();
+        }
+
+        // Track depth changes for backtrack annotations
+        let mut prev_filled = 0usize;
+        let mut shown_count = 0usize;
+
+        for &idx in &shown_indices {
+            let (row, col, digit, filled, _seq) = accepted_events[idx];
+            shown_count += 1;
+
+            // Detect backtrack: filled count decreased from previous shown
+            if filled < prev_filled && shown_count > 1 {
+                let drop = prev_filled - filled;
+                if drop >= 3 {
+                    out.push_str(&format!(
+                        "Undoing row {} col {}. Going back up.\n",
+                        row + 1,
+                        col + 1,
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "Trying another path at row {}, col {}.\n",
+                        row + 1,
+                        col + 1,
+                    ));
+                }
+            }
+
+            out.push_str(&format!(
+                "Trying {digit} at row {}, col {}.\n",
+                row + 1,
+                col + 1,
+            ));
+            let phrase = OK_PHRASES[shown_count % OK_PHRASES.len()];
+            out.push_str(&format!("{phrase} ({filled}/81 resolved)\n"));
+            prev_filled = filled;
+        }
+
+        // Always show the Solved event
+        for event in &self.events {
+            if let SolveEvent::Solved {
+                steps,
+                hull_size,
+                total_trace,
+            } = event
+            {
+                let ratio = *total_trace as f64 / *hull_size as f64;
+                out.push_str(&format!(
+                    "\n✅ Solved in {steps} steps!\n\
+                     Hull compression: {hull_size} vertices \
+                     from {total_trace} trace entries ({ratio:.1}x)\n"
+                ));
+            }
+        }
+
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
