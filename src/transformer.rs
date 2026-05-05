@@ -1,4 +1,4 @@
-use crate::types::*;
+use crate::types::{self, *};
 
 /// All transformer weights stored as flat f32 vectors.
 /// Layout matches talos-vs-macbook bench_c.c.
@@ -89,8 +89,74 @@ impl ForwardContext {
     }
 }
 
+/// Fused attention head: score → softmax → weighted value sum in one kernel.
+/// Avoids separate `softmax()` call and write-back of normalized scores.
+///
+/// SAFETY: caller must ensure all indices are in bounds.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+unsafe fn attention_head(
+    q: &[f32],
+    key_cache: &[f32],
+    value_cache: &[f32],
+    attn_out: &mut [f32],
+    scores_buf: &mut [f32],
+    h_off: usize,
+    n: usize,
+    hd: usize,
+    t_n: usize,
+    scale: f32,
+) {
+    // SAFETY: caller ensures all indices are in bounds.
+    // Pass 1: compute Q·K scores and find max for numerical stability
+    let mut max_score = f32::NEG_INFINITY;
+    for t in 0..t_n {
+        let k_off = t * n + h_off;
+        let mut dot = 0.0f32;
+        for d in 0..hd {
+            unsafe {
+                dot += *q.get_unchecked(h_off + d) * *key_cache.get_unchecked(k_off + d);
+            }
+        }
+        let score = dot * scale;
+        unsafe {
+            *scores_buf.get_unchecked_mut(t) = score;
+        }
+        if score > max_score {
+            max_score = score;
+        }
+    }
+
+    // Pass 2: exp(scores - max) and accumulate sum
+    let mut sum = 0.0f32;
+    for t in 0..t_n {
+        let exp_val = unsafe { (*scores_buf.get_unchecked(t) - max_score).exp() };
+        unsafe {
+            *scores_buf.get_unchecked_mut(t) = exp_val;
+        }
+        sum += exp_val;
+    }
+
+    // Pass 3: normalize + weighted value accumulation (no write-back of scores)
+    let inv_sum = 1.0 / sum;
+    for d in 0..hd {
+        let mut val = 0.0f32;
+        for t in 0..t_n {
+            unsafe {
+                val += *scores_buf.get_unchecked(t)
+                    * inv_sum
+                    * *value_cache.get_unchecked(t * n + h_off + d);
+            }
+        }
+        unsafe {
+            *attn_out.get_unchecked_mut(h_off + d) = val;
+        }
+    }
+}
+
 /// Zero-alloc forward pass. Writes logits into `ctx.logits` and returns &mut to it.
 /// Matches bench_c.c: RMSNorm → Attn → Res → RMSNorm → MLP → Res → LM Head.
+#[inline(always)]
 pub fn forward<'a>(
     ctx: &'a mut ForwardContext,
     weights: &TransformerWeights,
@@ -103,8 +169,13 @@ pub fn forward<'a>(
     let hd = config.head_dim;
 
     // 1. Embedding: x = wte[token] + wpe[pos]
-    for (i, xi) in ctx.x.iter_mut().enumerate().take(n) {
-        *xi = weights.wte[token * n + i] + weights.wpe[pos * n + i];
+    let tok_off = token * n;
+    let pos_off_emb = pos * n;
+    for i in 0..n {
+        unsafe {
+            *ctx.x.get_unchecked_mut(i) = *weights.wte.get_unchecked(tok_off + i)
+                + *weights.wpe.get_unchecked(pos_off_emb + i);
+        }
     }
 
     // 2. RMSNorm on embedding
@@ -121,61 +192,53 @@ pub fn forward<'a>(
 
     // Store K, V in cache
     let pos_off = pos * n;
-    cache.key[pos_off..pos_off + n].copy_from_slice(&ctx.k[..n]);
-    cache.value[pos_off..pos_off + n].copy_from_slice(&ctx.v[..n]);
+    unsafe {
+        std::ptr::copy_nonoverlapping(ctx.k.as_ptr(), cache.key.as_mut_ptr().add(pos_off), n);
+        std::ptr::copy_nonoverlapping(ctx.v.as_ptr(), cache.value.as_mut_ptr().add(pos_off), n);
+    }
 
-    // 5. Multi-head attention with causal mask
+    // 5. Multi-head attention: fused score → softmax → weighted value per head
     let scale = 1.0 / (hd as f32).sqrt();
     ctx.attn_out[..n].fill(0.0);
+    let t_n = pos + 1;
 
     for h in 0..config.n_head {
-        let h_off = h * hd;
-        let t_n = pos + 1;
-
-        // Attention scores (use pre-allocated buffer)
-        let scores = &mut ctx.scores[..t_n];
-        for (t, score) in scores.iter_mut().enumerate() {
-            let mut dot = 0.0f32;
-            let k_off = t * n + h_off;
-            for d in 0..hd {
-                dot += ctx.q[h_off + d] * cache.key[k_off + d];
-            }
-            *score = dot * scale;
-        }
-        softmax(scores);
-
-        // Weighted sum of values
-        for d in 0..hd {
-            let mut val = 0.0f32;
-            for (t, &s) in scores.iter().enumerate() {
-                val += s * cache.value[t * n + h_off + d];
-            }
-            ctx.attn_out[h_off + d] = val;
+        unsafe {
+            attention_head(
+                &ctx.q,
+                &cache.key,
+                &cache.value,
+                &mut ctx.attn_out,
+                &mut ctx.scores,
+                h * hd,
+                n,
+                hd,
+                t_n,
+                scale,
+            );
         }
     }
 
-    // 6. Output projection + residual
-    // Reuse ctx.x as scratch for matmul output
+    // 6. Output projection + residual (fused)
     matmul(&mut ctx.x, &weights.attn_wo, &ctx.attn_out, n, n);
-    for (xi, &ri) in ctx.x.iter_mut().zip(&ctx.xr).take(n) {
-        *xi += ri;
+    for i in 0..n {
+        unsafe {
+            *ctx.x.get_unchecked_mut(i) += *ctx.xr.get_unchecked(i);
+        }
     }
 
     // 7. Save residual → pre-MLP RMSNorm
     ctx.xr2[..n].copy_from_slice(&ctx.x[..n]);
     rmsnorm(&mut ctx.x);
 
-    // 8. MLP: W1 → ReLU → W2
-    matmul(
+    // 8. MLP: W1 → ReLU → W2 (fused matmul+ReLU avoids extra buffer scan)
+    types::matmul_relu(
         &mut ctx.hidden,
         &weights.mlp_w1,
         &ctx.x,
         config.mlp_hidden,
         n,
     );
-    for val in ctx.hidden.iter_mut().take(config.mlp_hidden) {
-        *val = val.max(0.0); // ReLU
-    }
     matmul(
         &mut ctx.x,
         &weights.mlp_w2,
@@ -185,8 +248,10 @@ pub fn forward<'a>(
     );
 
     // 9. Residual
-    for (xi, &ri) in ctx.x.iter_mut().zip(&ctx.xr2).take(n) {
-        *xi += ri;
+    for i in 0..n {
+        unsafe {
+            *ctx.x.get_unchecked_mut(i) += *ctx.xr2.get_unchecked(i);
+        }
     }
 
     // 10. LM Head

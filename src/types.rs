@@ -69,6 +69,7 @@ impl Rng {
     }
 
     #[allow(clippy::should_implement_trait)]
+    #[inline(always)]
     pub fn next(&mut self) -> u64 {
         self.state ^= self.state << 13;
         self.state ^= self.state >> 7;
@@ -77,11 +78,13 @@ impl Rng {
     }
 
     /// Uniform [0, 1).
+    #[inline(always)]
     pub fn uniform(&mut self) -> f32 {
         (self.next() >> 11) as f32 * (1.0 / 9007199254740992.0)
     }
 
     /// Standard normal via Box-Muller transform.
+    #[inline]
     pub fn normal(&mut self) -> f32 {
         let u1 = self.uniform().max(1e-10);
         let u2 = self.uniform();
@@ -90,43 +93,98 @@ impl Rng {
 }
 
 /// In-place softmax. Handles empty slices gracefully.
+/// Two-pass: find max (for numerical stability), then exp+sum+normalize fused.
+#[inline(always)]
 pub fn softmax(x: &mut [f32]) {
     if x.is_empty() {
         return;
     }
-    let max_val = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum = 0.0;
+
+    // Pass 1: find max for numerical stability
+    let max_val = {
+        let mut max = x[0];
+        let len = x.len();
+        for i in 1..len {
+            let v = unsafe { *x.get_unchecked(i) };
+            if v > max {
+                max = v;
+            }
+        }
+        max
+    };
+
+    // Pass 2: exp, sum, and normalize in one loop
+    let mut sum = 0.0f32;
     for val in x.iter_mut() {
         *val = (*val - max_val).exp();
         sum += *val;
     }
+
+    let inv_sum = 1.0 / sum;
     for val in x.iter_mut() {
-        *val /= sum;
+        *val *= inv_sum;
     }
 }
 
 /// In-place RMSNorm (no learnable gain).
+/// Two-pass: compute mean-square, then scale.
+#[inline(always)]
 pub fn rmsnorm(x: &mut [f32]) {
     if x.is_empty() {
         return;
     }
-    let ms: f32 = x.iter().map(|&v| v * v).sum::<f32>() / x.len() as f32;
-    let scale = 1.0 / (ms + 1e-5).sqrt();
+
+    // Pass 1: sum of squares
+    let mut sum_sq = 0.0f32;
+    for &v in x.iter() {
+        sum_sq += v * v;
+    }
+
+    // Pass 2: scale
+    let inv_rms = 1.0 / (sum_sq / x.len() as f32 + 1e-5).sqrt();
     for val in x.iter_mut() {
-        *val *= scale;
+        *val *= inv_rms;
     }
 }
 
 /// Matrix-vector multiply: output = weight @ input.
 /// Weight layout: [rows, cols] row-major.
+#[inline(always)]
 pub fn matmul(output: &mut [f32], weight: &[f32], input: &[f32], rows: usize, cols: usize) {
-    for (r, row) in weight.chunks_exact(cols).take(rows).enumerate() {
-        let sum: f32 = row.iter().zip(input.iter()).map(|(&w, &x)| w * x).sum();
-        output[r] = sum;
+    for r in 0..rows {
+        let row_off = r * cols;
+        let mut sum = 0.0f32;
+        for c in 0..cols {
+            sum +=
+                unsafe { *weight.get_unchecked(row_off + c) } * unsafe { *input.get_unchecked(c) };
+        }
+        unsafe {
+            *output.get_unchecked_mut(r) = sum;
+        }
+    }
+}
+
+/// Fused matrix-vector multiply + ReLU: output = max(0, weight @ input).
+/// Saves one full buffer scan vs separate matmul + ReLU.
+/// Used for MLP hidden layer where activation immediately follows projection.
+#[inline(always)]
+pub fn matmul_relu(output: &mut [f32], weight: &[f32], input: &[f32], rows: usize, cols: usize) {
+    for r in 0..rows {
+        let row_off = r * cols;
+        let mut sum = 0.0f32;
+        for c in 0..cols {
+            sum +=
+                unsafe { *weight.get_unchecked(row_off + c) } * unsafe { *input.get_unchecked(c) };
+        }
+        // Fused ReLU: clamp to non-negative
+        unsafe {
+            *output.get_unchecked_mut(r) = sum.max(0.0);
+        }
     }
 }
 
 /// Sample a token index from a probability distribution using cumulative scan.
+#[inline(always)]
 pub fn sample_token(probs: &[f32], rng: &mut Rng) -> usize {
     let r = rng.uniform();
     let mut cumsum = 0.0;
