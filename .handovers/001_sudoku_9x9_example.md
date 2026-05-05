@@ -12,21 +12,16 @@ The Gemini PoC showed a mock `SudokuState` + `SpeculativeSudokuDrafter` with har
 
 ## Where is the Plan/Code/Test
 
-- **Plan**: `.plans/001_sudoku_9x9_example.md` — 5 tasks, all complete
+- **Plan**: `.plans/001_sudoku_9x9_example.md` — 7 tasks, all complete
 - **Code**:
   - `src/percepta.rs` — Added `Sudoku9x9`, `ComputableLora`, `SolveEvent`, `StreamingSolver` (public API, ~380 lines)
+  - `src/speculative.rs` — Added `ConstraintPruner` trait, `NoPruner`, `SudokuPruner`, `build_dd_tree_pruned` (~200 lines)
   - `examples/sudoku_9x9.rs` — Runnable example with Computable LoRA demo + streaming solve
-- **Tests**: `tests/integration.rs` — 9 new integration tests:
-  - `test_sudoku9x9_arto_inkala_clues`
-  - `test_sudoku9x9_is_valid_move`
-  - `test_sudoku9x9_display_format`
-  - `test_sudoku9x9_solve_arto_inkala`
-  - `test_sudoku9x9_solve_hull_compression`
-  - `test_computable_lora_prune_drafts`
-  - `test_computable_lora_prune_all_invalid`
-  - `test_streaming_solver_arto_inkala`
-  - `test_sudoku9x9_next_empty`
-- **Commit**: `097fd48` on `main`
+  - `examples/sudoku_speculative.rs` — End-to-end DDTree pruning comparison demo
+- **Tests**: 
+  - `src/speculative.rs` — 10 new unit tests (pruner behavior, tree size, valid-only guarantee)
+  - `tests/integration.rs` — 9 integration tests (solver, display, computable lora, streaming)
+- **Commits**: `097fd48`, `5a1116a` on `main`
 
 ## Reflection: Struggling / Solved
 
@@ -38,24 +33,35 @@ The Gemini PoC showed a mock `SudokuState` + `SpeculativeSudokuDrafter` with har
 
 4. **Unused variable warnings**: `total_accepted` and `backtrack_events` were collected but never used in `format_events`. Removed them to keep clippy clean.
 
+5. **DDTree pruning test saturation**: `test_ddtree_pruned_sudoku_reduces_tree_size` initially failed because both pruned and unpruned trees hit the budget limit (100, then 500 nodes). The issue: with uniform marginals and 5 depths × 9 branches = huge candidate space, even 4-valid-per-depth × 5 = 1024 > 500. Fixed by using single-depth marginals (1 depth × 9 branches) with budget=20, so unpruned=9, pruned=4.
+
+6. **Trait method resolution**: `SudokuPruner::is_valid` requires `ConstraintPruner` trait in scope. The example needed `use microgpt_rs::speculative::ConstraintPruner` import.
+
 ## Results
 
-Running `cargo run --example sudoku_9x9` produces:
+### Example 1: `cargo run --example sudoku_9x9`
 - Computable LoRA intercept demo (LLM proposes 5 digits, rules engine prunes to 1)
 - Streaming "thinking" output with ~25 key moments
 - Arto Inkala puzzle solved: **49,559 steps, 7 hull vertices, 7,079.9x compression**
 - O(49,559) → O(log 7) ≈ O(3) attention speedup
 - Linear and fast attention scores match perfectly
 
+### Example 2: `cargo run --example sudoku_speculative`
+- DDTree comparison: without vs with Computable LoRA pruning
+- **52% valid unpruned → 100% valid pruned** (48 invalid branches eliminated)
+- Token distribution shows exactly which digits were pruned per depth
+- Cell (1,2): pruned [3,5,7,8,9], kept [1,2,4,6]
+- Cell (1,3): pruned [1,3,7,8], kept [2,4,5,6,9]
+
 ## Remain Work
 
-1. **Wire into `speculative.rs`**: The `ComputableLora::prune_drafts` is currently standalone. Next step is to integrate it into `build_dd_tree` as a branch pruning step — the DDTree drafts branches, and the rules engine prunes invalid ones before target verification.
+1. **Free Embedding Bridge**: Project pre-LM-head hidden states to 2D to query the `KVCache2D` using actual transformer data. Currently the example uses `Vec2::new(1.0, 0.0)` as a query.
 
-2. **Free Embedding Bridge**: Project pre-LM-head hidden states to 2D to query the `KVCache2D` using actual transformer data. Currently the example uses `Vec2::new(1.0, 0.0)` as a query.
+2. **Scale to actual LLM tokens**: The current example maps Sudoku digits (1-9) to tokens. For a real LLM, we'd need a tokenizer that maps digit tokens to vocabulary indices.
 
-3. **Scale to actual LLM tokens**: The current example maps Sudoku digits (1-9) to tokens. For a real LLM, we'd need a tokenizer that maps digit tokens to vocabulary indices.
+3. **Streaming with actual print flush**: The current `format_events()` collects all events first then formats. For real-time streaming, we'd want a callback-based approach that prints + flushes as events occur.
 
-4. **Streaming with actual print flush**: The current `format_events()` collects all events first then formats. For real-time streaming, we'd want a callback-based approach that prints + flushes as events occur.
+4. **Dynamic pruning across depths**: Current `SudokuPruner` checks each depth independently. For full speculative decoding, the pruner would need to track placements from parent path and validate against accumulated state.
 
 ## Issues Ref
 
