@@ -1,17 +1,34 @@
 //! Sudoku Speculative Decoding: DDTree + Computable LoRA Pruning
 //!
-//! Demonstrates the neuro-symbolic intercept in action:
-//! - Draft model proposes logits (simulated uniform for Sudoku digits)
-//! - ConstraintPruner filters invalid digits before DDTree build
-//! - Compare tree size and valid-branch ratio: with vs without pruning
+//! Demonstrates the neuro-symbolic intercept with 3-level comparison:
+//! - **Unpruned**: Draft model proposes all high-probability tokens
+//! - **Static-Only**: Prunes against initial board, ignores cross-depth conflicts
+//! - **Path-Aware**: Prunes against initial board AND parent tokens in same path
+//!
+//! Shows that path-aware pruning catches cross-depth row/col/box conflicts
+//! that static-only pruning misses.
 //!
 //! Run: cargo run --example sudoku_speculative
 
 use microgpt_rs::percepta::Sudoku9x9;
 use microgpt_rs::speculative::{
-    ConstraintPruner, SudokuPruner, build_dd_tree, build_dd_tree_pruned,
+    ConstraintPruner, SudokuPruner, TreeNode, build_dd_tree, build_dd_tree_pruned,
+    extract_parent_tokens,
 };
 use microgpt_rs::types::Config;
+
+// ── Static-Only Pruner: ignores parent_tokens (depth-0-only validation) ──
+
+/// Wraps `SudokuPruner` but ignores parent path context.
+/// Only validates against the initial board state — the "before" state
+/// of Plan 002. Used to demonstrate the gap that path-aware pruning fills.
+struct StaticOnlyPruner<'a>(&'a SudokuPruner);
+
+impl ConstraintPruner for StaticOnlyPruner<'_> {
+    fn is_valid(&self, depth: usize, token_idx: usize, _parent_tokens: &[usize]) -> bool {
+        self.0.is_valid(depth, token_idx, &[])
+    }
+}
 
 fn main() {
     println!("🧠 Sudoku Speculative Decoding: DDTree + Computable LoRA");
@@ -27,34 +44,29 @@ fn main() {
     let pruner = SudokuPruner::new(board.clone());
 
     // ── 1. Simulate draft model marginals ──────────────────────────
-    // In a real system, the draft model would produce these.
-    // For Sudoku, we simulate uniform probability over digits 1-9.
-    // (vocab_size = 10: index 0 = padding, 1-9 = digits)
-    let lookahead = 5usize.min(pruner.empty_count());
-    let marginals: Vec<Vec<f32>> = (0..lookahead)
-        .map(|depth| {
+    // Uniform probability over digits 1-9 (vocab_size = 10, index 0 = padding).
+    // Use 8 depths to stress row 0 — all empties in same row cause cross-depth conflicts.
+    let lookahead = 8usize.min(pruner.empty_count());
+
+    let raw_marginals: Vec<Vec<f32>> = (0..lookahead)
+        .map(|_| {
             let mut probs = vec![0.0f32; 10];
-            let valid_count = count_valid_at_depth(&pruner, depth);
-            // Uniform over valid digits for a fair simulation
             for d in 1..=9u8 {
-                if pruner.is_valid(depth, d as usize) {
-                    probs[d as usize] = 1.0 / valid_count as f32;
-                }
+                probs[d as usize] = 1.0 / 9.0;
             }
             probs
         })
         .collect();
 
-    println!("📊 Draft Model Marginals (uniform over valid digits)");
+    println!("📊 Draft Model Marginals (uniform over digits 1-9, {lookahead} depths)");
     println!("{}", "─".repeat(60));
-    for (depth, probs) in marginals.iter().enumerate() {
+    for depth in 0..lookahead {
         let pos = pruner.position_at(depth).unwrap_or((0, 0));
         let valid_digits: Vec<u8> = (1..=9)
-            .filter(|&d| pruner.is_valid(depth, d as usize))
+            .filter(|&d| pruner.is_valid(depth, d as usize, &[]))
             .collect();
-        let total_prob: f32 = probs.iter().sum();
         println!(
-            "  Depth {depth}: ({},{}) valid={:?} sum={total_prob:.3}",
+            "  Depth {depth}: ({},{}) static-valid={:?}",
             pos.0 + 1,
             pos.1 + 1,
             valid_digits,
@@ -66,157 +78,273 @@ fn main() {
         ..Config::draft()
     };
 
-    // ── 2. Build DDTree WITHOUT pruning ────────────────────────────
-    // Use raw marginals (no constraint filtering)
-    let raw_marginals: Vec<Vec<f32>> = (0..lookahead)
-        .map(|_| {
-            let mut probs = vec![0.0f32; 10];
-            for d in 1..=9u8 {
-                probs[d as usize] = 1.0 / 9.0;
-            }
-            probs
-        })
-        .collect();
-
+    // ── 2. Build 3 DDTree variants ─────────────────────────────────
     let tree_unpruned = build_dd_tree(&raw_marginals, &config);
 
-    // ── 3. Build DDTree WITH Computable LoRA pruning ───────────────
-    let tree_pruned = build_dd_tree_pruned(&raw_marginals, &config, &pruner);
+    let static_pruner = StaticOnlyPruner(&pruner);
+    let tree_static = build_dd_tree_pruned(&raw_marginals, &config, &static_pruner);
 
-    // ── 4. Compare results ─────────────────────────────────────────
-    println!("\n📈 DDTree Comparison: Without vs With Pruning");
-    println!("{}", "─".repeat(60));
+    let tree_aware = build_dd_tree_pruned(&raw_marginals, &config, &pruner);
 
-    let unpruned_valid = count_valid_branches(&tree_unpruned, &pruner);
-    let pruned_valid = count_valid_branches(&tree_pruned, &pruner);
+    // ── 3. Count validity for each tree ────────────────────────────
+    // Static validity: valid against initial board only
+    let unpruned_static_valid = count_static_valid(&tree_unpruned, &pruner);
+    let static_static_valid = count_static_valid(&tree_static, &pruner);
+    let aware_static_valid = count_static_valid(&tree_aware, &pruner);
 
-    let unpruned_valid_pct = if tree_unpruned.is_empty() {
-        0.0
-    } else {
-        unpruned_valid as f64 / tree_unpruned.len() as f64 * 100.0
-    };
-    let pruned_valid_pct = if tree_pruned.is_empty() {
-        0.0
-    } else {
-        pruned_valid as f64 / tree_pruned.len() as f64 * 100.0
-    };
+    // Accumulated validity: valid against initial board + all parent tokens in path
+    let unpruned_accum_valid = count_accumulated_valid(&tree_unpruned, &pruner);
+    let static_accum_valid = count_accumulated_valid(&tree_static, &pruner);
+    let aware_accum_valid = count_accumulated_valid(&tree_aware, &pruner);
 
-    println!("  {:<25} {:>12} {:>12}", "Metric", "Unpruned", "Pruned");
-    println!("{}", "─".repeat(50));
+    // ── 4. Three-column comparison ─────────────────────────────────
+    println!("\n📈 DDTree Comparison: Unpruned vs Static-Only vs Path-Aware");
+    println!("{}", "─".repeat(70));
     println!(
-        "  {:<25} {:>12} {:>12}",
+        "  {:<24} {:>12} {:>12} {:>12}",
+        "Metric", "Unpruned", "Static-Only", "Path-Aware"
+    );
+    println!("{}", "─".repeat(62));
+
+    let pct = |v: usize, total: usize| -> String {
+        if total == 0 {
+            return "  —".to_string();
+        }
+        format!("{:.1}%", v as f64 / total as f64 * 100.0)
+    };
+
+    println!(
+        "  {:<24} {:>12} {:>12} {:>12}",
         "Tree nodes",
         tree_unpruned.len(),
-        tree_pruned.len()
+        tree_static.len(),
+        tree_aware.len(),
     );
     println!(
-        "  {:<25} {:>12} {:>12}",
-        "Valid branches", unpruned_valid, pruned_valid
+        "  {:<24} {:>12} {:>12} {:>12}",
+        "Static valid", unpruned_static_valid, static_static_valid, aware_static_valid,
     );
     println!(
-        "  {:<25} {:>11.1}% {:>11.1}%",
-        "Valid ratio", unpruned_valid_pct, pruned_valid_pct
+        "  {:<24} {:>12} {:>12} {:>12}",
+        "Static valid %",
+        pct(unpruned_static_valid, tree_unpruned.len()),
+        pct(static_static_valid, tree_static.len()),
+        pct(aware_static_valid, tree_aware.len()),
     );
     println!(
-        "  {:<25} {:>12} {:>12}",
-        "Invalid branches",
-        tree_unpruned.len() - unpruned_valid,
-        tree_pruned.len() - pruned_valid
+        "  {:<24} {:>12} {:>12} {:>12}",
+        "Accumulated valid", unpruned_accum_valid, static_accum_valid, aware_accum_valid,
+    );
+    println!(
+        "  {:<24} {:>12} {:>12} {:>12}",
+        "Accumulated valid %",
+        pct(unpruned_accum_valid, tree_unpruned.len()),
+        pct(static_accum_valid, tree_static.len()),
+        pct(aware_accum_valid, tree_aware.len()),
     );
 
-    // ── 5. Show token distribution at each depth ───────────────────
+    // ── 5. Show token distribution by depth ────────────────────────
     println!("\n🔍 Token Distribution by Depth");
-    println!("{}", "─".repeat(60));
+    println!("{}", "─".repeat(70));
 
-    let max_depth_unpruned = tree_unpruned.iter().map(|n| n.depth).max().unwrap_or(0);
-    let max_depth_pruned = tree_pruned.iter().map(|n| n.depth).max().unwrap_or(0);
-    let max_depth = max_depth_unpruned.max(max_depth_pruned);
+    let max_depth = tree_unpruned
+        .iter()
+        .chain(tree_static.iter())
+        .chain(tree_aware.iter())
+        .map(|n| n.depth)
+        .max()
+        .unwrap_or(0);
 
     println!(
-        "  {:<6} {:<14} {:<14} {:<10} Position",
-        "Depth", "Unpruned", "Pruned", "Pruned?"
+        "  {:<6} {:<14} {:<14} {:<14} Position",
+        "Depth", "Unpruned", "Static-Only", "Path-Aware"
     );
-    println!("{}", "─".repeat(60));
+    println!("{}", "─".repeat(70));
 
     for depth in 0..=max_depth {
-        let mut unpruned_set: Vec<u8> = tree_unpruned
-            .iter()
-            .filter(|n| n.depth == depth)
-            .map(|n| n.token_idx as u8)
-            .collect();
-        unpruned_set.sort();
-        unpruned_set.dedup();
+        let unpruned_set = token_set_at_depth(&tree_unpruned, depth);
+        let static_set = token_set_at_depth(&tree_static, depth);
+        let aware_set = token_set_at_depth(&tree_aware, depth);
 
-        let mut pruned_set: Vec<u8> = tree_pruned
-            .iter()
-            .filter(|n| n.depth == depth)
-            .map(|n| n.token_idx as u8)
-            .collect();
-        pruned_set.sort();
-        pruned_set.dedup();
-
-        let was_pruned = unpruned_set.len() > pruned_set.len();
-        let removed: Vec<u8> = unpruned_set
-            .iter()
-            .filter(|d| !pruned_set.contains(d))
-            .copied()
-            .collect();
         let pos = pruner
             .position_at(depth)
             .map(|(r, c)| format!("({},{})", r + 1, c + 1))
             .unwrap_or_else(|| "—".to_string());
 
         println!(
-            "  {depth:<6} {:<14} {:<14} {:<10} {pos}",
+            "  {depth:<6} {:<14} {:<14} {:<14} {pos}",
             format!("{:?}", unpruned_set),
-            format!("{:?}", pruned_set),
-            if was_pruned {
-                format!("✂️ -{:?}", removed)
-            } else {
-                "=".to_string()
-            },
+            format!("{:?}", static_set),
+            format!("{:?}", aware_set),
         );
     }
 
-    // ── 6. Summary ─────────────────────────────────────────────────
+    // ── 6. Cross-depth conflict examples ───────────────────────────
+    println!("\n🔗 Cross-Depth Conflict Detection");
+    println!("{}", "─".repeat(60));
+
+    // Find an example: static-only missed it, path-aware caught it
+    let static_conflicts = tree_static.len() - static_accum_valid;
+    let aware_conflicts = tree_aware.len() - aware_accum_valid;
+    let caught_by_path = static_conflicts.saturating_sub(aware_conflicts);
+
+    println!("  Static-only tree has {static_conflicts} nodes with cross-depth conflicts");
+    println!("  Path-aware tree has {aware_conflicts} nodes with cross-depth conflicts");
+    println!("  Path-aware pruning caught {caught_by_path} additional cross-depth violations");
+
+    if let Some(example) = find_cross_depth_conflict(&tree_static, &pruner) {
+        let (depth, token, parent_depth, parent_token, pos, parent_pos) = example;
+        println!(
+            "\n  Example: depth {depth} places digit {token} at ({},{}), \
+             but depth {parent_depth} already placed digit {parent_token} at ({},{})",
+            pos.0 + 1,
+            pos.1 + 1,
+            parent_pos.0 + 1,
+            parent_pos.1 + 1,
+        );
+        let same_row = pos.0 == parent_pos.0;
+        let same_col = pos.1 == parent_pos.1;
+        let same_box = pos.0 / 3 == parent_pos.0 / 3 && pos.1 / 3 == parent_pos.1 / 3;
+        if same_row {
+            println!("  → Same row {}!", pos.0 + 1);
+        }
+        if same_col {
+            println!("  → Same column {}!", pos.1 + 1);
+        }
+        if same_box && !same_row && !same_col {
+            println!("  → Same 3×3 box!");
+        }
+    }
+
+    // ── 7. Summary ─────────────────────────────────────────────────
     println!("\n✨ Summary");
     println!("{}", "─".repeat(60));
 
-    let reduction =
-        (tree_unpruned.len() - tree_pruned.len()) as f64 / tree_unpruned.len() as f64 * 100.0;
-
     println!(
-        "  Pruning removed {} invalid branches ({reduction:.1}% reduction)",
-        tree_unpruned.len() - tree_pruned.len()
+        "  Unpruned:    {} tree nodes, {:>5} accumulated-valid ({})",
+        tree_unpruned.len(),
+        unpruned_accum_valid,
+        pct(unpruned_accum_valid, tree_unpruned.len()),
     );
     println!(
-        "  Pruned tree: {}% valid branches (vs {}% unpruned)",
-        pruned_valid_pct, unpruned_valid_pct
+        "  Static-Only: {} tree nodes, {:>5} accumulated-valid ({})",
+        tree_static.len(),
+        static_accum_valid,
+        pct(static_accum_valid, tree_static.len()),
     );
-    println!("  Verification budget saved: tree only explores valid paths");
+    println!(
+        "  Path-Aware:  {} tree nodes, {:>5} accumulated-valid ({})",
+        tree_aware.len(),
+        aware_accum_valid,
+        pct(aware_accum_valid, tree_aware.len()),
+    );
 
-    if pruned_valid == tree_pruned.len() && !tree_pruned.is_empty() {
-        println!("\n  ✅ Computable LoRA guarantees 100% valid placements!");
+    if aware_accum_valid == tree_aware.len() && !tree_aware.is_empty() {
+        println!("\n  ✅ Path-Aware pruning guarantees 100% accumulated validity!");
+    }
+
+    if caught_by_path > 0 {
+        println!(
+            "  🔗 Path awareness caught {caught_by_path} cross-depth conflicts \
+             that static-only missed"
+        );
     }
 
     println!(
-        "\n  Next step: target model verifies only {} branches instead of {}",
-        tree_pruned.len(),
-        tree_unpruned.len()
+        "\n  Target model verifies only {} branches (path-aware) instead of {} (unpruned)",
+        tree_aware.len(),
+        tree_unpruned.len(),
     );
 }
 
-fn count_valid_at_depth(pruner: &SudokuPruner, depth: usize) -> usize {
-    (1..=9)
-        .filter(|&d| pruner.is_valid(depth, d as usize))
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Count nodes valid against initial board state (static check).
+fn count_static_valid(tree: &[TreeNode], pruner: &SudokuPruner) -> usize {
+    tree.iter()
+        .filter(|node| pruner.is_valid(node.depth, node.token_idx, &[]))
         .count()
 }
 
-fn count_valid_branches(
-    tree: &[microgpt_rs::speculative::TreeNode],
-    pruner: &SudokuPruner,
-) -> usize {
-    tree.iter()
-        .filter(|node| pruner.is_valid(node.depth, node.token_idx))
-        .count()
+/// Count nodes valid against accumulated board state (initial + parent placements).
+fn count_accumulated_valid(tree: &[TreeNode], pruner: &SudokuPruner) -> usize {
+    let mut valid = 0;
+    for node in tree {
+        // parent_path includes node's own token, extract depth+1 then take first depth
+        let all_tokens = extract_parent_tokens(node.parent_path, node.depth + 1);
+        let parent_tokens = &all_tokens[..node.depth];
+
+        // Build accumulated board: initial + all parent placements
+        let mut board = pruner.board().clone();
+        for (depth, &token) in parent_tokens.iter().enumerate() {
+            if token == 0 {
+                continue;
+            }
+            if let Some((row, col)) = pruner.position_at(depth) {
+                board.grid[row][col] = token as u8;
+            }
+        }
+
+        // Check node's token against accumulated board
+        if let Some((row, col)) = pruner.position_at(node.depth)
+            && board.is_valid_move(row, col, node.token_idx as u8)
+        {
+            valid += 1;
+        }
+    }
+    valid
+}
+
+/// Get sorted, deduplicated token indices at a given depth.
+fn token_set_at_depth(tree: &[TreeNode], depth: usize) -> Vec<u8> {
+    let mut tokens: Vec<u8> = tree
+        .iter()
+        .filter(|n| n.depth == depth)
+        .map(|n| n.token_idx as u8)
+        .collect();
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+/// Conflict details: (depth, token, conflict_depth, conflict_token, pos, conflict_pos).
+type ConflictDetails = (usize, usize, usize, usize, (usize, usize), (usize, usize));
+
+/// Find first cross-depth conflict in a tree (for demonstration).
+fn find_cross_depth_conflict(tree: &[TreeNode], pruner: &SudokuPruner) -> Option<ConflictDetails> {
+    for node in tree {
+        let all_tokens = extract_parent_tokens(node.parent_path, node.depth + 1);
+        let parent_tokens = &all_tokens[..node.depth];
+
+        let mut board = pruner.board().clone();
+        for (depth, &token) in parent_tokens.iter().enumerate() {
+            if token == 0 {
+                continue;
+            }
+            if let Some((row, col)) = pruner.position_at(depth) {
+                board.grid[row][col] = token as u8;
+            }
+        }
+
+        if let Some((row, col)) = pruner.position_at(node.depth)
+            && !board.is_valid_move(row, col, node.token_idx as u8)
+        {
+            // Find which parent caused the conflict
+            let digit = node.token_idx as u8;
+            for (pd, &pt) in parent_tokens.iter().enumerate() {
+                if pt == 0 || pt as u8 != digit {
+                    continue;
+                }
+                if let Some(ppos) = pruner.position_at(pd) {
+                    let same_row = ppos.0 == row;
+                    let same_col = ppos.1 == col;
+                    let same_box = ppos.0 / 3 == row / 3 && ppos.1 / 3 == col / 3;
+                    if same_row || same_col || same_box {
+                        return Some((node.depth, node.token_idx, pd, pt, (row, col), ppos));
+                    }
+                }
+            }
+        }
+    }
+    None
 }
