@@ -69,17 +69,38 @@ Run on Apple Silicon (single-threaded, `--release` profile, 50k iterations):
 ```
 Method                    Throughput         μs/step  Avg Accept Len
 ───────────────────────────────────────────────────────────────────────────
-Transformer AR             801,222 tok/s         1.25            1.00
-DFlash Draft (draft)     2,904,577 tok/s         2.75            8.00
-DDTree Build               394,266 trees/s       2.54            —
-DFlash+DDTree              730,967 tok/s         5.47            4.00
+Transformer AR             695,820 tok/s         1.44            1.00
+DFlash Draft (draft)     3,012,978 tok/s         2.66            8.00
+DDTree Build               397,244 trees/s       2.52            —
+DFlash+DDTree              756,508 tok/s         5.29            4.00
 
-📈 Speedup: 0.91x (DFlash+DDTree effective vs AR)
+📈 Speedup: 1.09x (DFlash+DDTree effective vs AR)
 ```
 
-![Benchmark Chart](bench/005_bench_result.png)
+![Benchmark Chart](bench/006_bench_result.png)
 
-**Key insight:** The draft model is **3.6× faster** per forward pass than the target (2.9M draft tok/s vs 801K AR tok/s). The remaining gap to >1× speedup comes from simulated acceptance rate (75%) — a well-trained draft model matching the target's distribution would accept more tokens and push past parity. The framework is ready for real models.
+### Per-Step Cost Breakdown
+
+```
+Transformer AR:    1.44μs × 1 forward pass  = 1.44μs/token
+
+DFlash+DDTree:     0.33μs × 8 draft passes  = 2.66μs  (draft)
+                  + 2.52μs tree build        = 2.52μs  (tree)
+                  ─────────────────────────────────────
+                  = 5.18μs / 4 accepted tokens = 1.30μs/token ✓ faster
+```
+
+| Component | Time | vs Draft Forward (0.33μs) |
+|-----------|------|--------------------------|
+| 1 Draft forward | 0.33μs | 1× |
+| 8 Draft forwards | 2.66μs | 8× |
+| DDTree build | 2.52μs | 7.6× |
+
+### Why the speedup is marginal
+
+The draft model is **4.3× faster** per forward pass than the target (3.0M vs 696K tok/s). But the **DDTree build costs as much as ~8 draft forward passes** — tree overhead dominates because the model is tiny.
+
+With real models (e.g., LLaMA-70B target / 7B draft), forward passes take milliseconds while tree construction stays in microseconds — tree becomes <0.1% overhead and speculative decoding wins decisively. The framework is ready for real models.
 
 ### Transformer Proof of Correctness
 
