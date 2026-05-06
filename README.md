@@ -9,13 +9,21 @@ Inspired by [microgpt-c](https://github.com/nicholasgasior/microgpt-c) and [talo
 - **Real Transformer Inference** — Full GPT forward pass with RMSNorm, multi-head causal attention, ReLU MLP, KV cache, and temperature sampling.
 - **Zero-Alloc Forward Pass** — Pre-allocated `ForwardContext` buffers eliminate heap allocations per inference step.
 - **Separate Draft Model** — Lightweight draft model (embd=4, heads=2, mlp=16) runs **3.6× faster** per forward pass than the target model.
-- **DFlash (Dynamic Flash)** — Block-parallel drafting mechanism that predicts `L` future tokens simultaneously via independent marginal distributions. Supports `rayon` parallelism for larger models.
-- **DDTree (Dynamic Draft Tree)** — Best-First Search using a `BinaryHeap` to build a candidate token tree from marginal log-probabilities.
+- **DFlash (Dynamic Flash)** — Block-parallel drafting that predicts `L` future tokens simultaneously via independent marginal distributions. Supports `rayon` parallelism. Also available in **autoregressive mode** (`dflash_predict_ar`) that samples and feeds back tokens for conditional q(x|x<t) distributions.
+- **DDTree (Dynamic Draft Tree)** — Best-First Search using a `BinaryHeap` to build a candidate token tree from marginal log-probabilities. Tree budget constrains exploration.
+- **SpeculativeVerifier (Strategy Pattern)** — Swappable verification via trait: `SimulatedVerifier` (fast, no target model) or `LeviathanVerifier` (real p/q rejection sampling with target model, behind `--features leviathan`).
+- **Leviathan Algorithm 1** † — Full implementation of [Leviathan et al. 2022](https://arxiv.org/pdf/2211.17192): AR draft → target model p/q scoring → rejection sampling → residual distribution `max(0, p−q)` → bonus token from target p(x). Distribution-preserving, proven correct, but needs large model asymmetry to be faster than pure AR.
+- **Bonus Token** — When all γ draft tokens are accepted, sample +1 token for free from the last marginal (simulated) or target p(x) at position γ (Leviathan).
+- **Residual Distribution Sampling** — `max(0, p−q)` normalized distribution for sampling replacement tokens on rejection (Algorithm 1, Equation 3).
 - **Constraint Pruner** — Pluggable `ConstraintPruner` trait for neuro-symbolic intercept: deterministic rules engine prunes invalid branches before target verification.
 - **Path-Aware Pruning** — `SudokuPruner` validates against accumulated path state (initial board + parent tokens), catching cross-depth row/col/box conflicts that static-only pruning misses.
 - **Computable LoRA** — LLM drafts tokens via semantic probability, deterministic rules engine validates via mathematical constraints, only valid branches reach verification. Demonstrated with 9×9 Sudoku.
+- **Streaming Solver** — `StreamingSolver` emits `Try`/`Accepted`/`Contradiction`/`Backtrack`/`Solved` events for real-time visualization of the search process.
 - **Percepta O(log N) Attention** — 2D convex hull KV cache with ternary search, proving LLMs can execute programs internally via geometric attention. Includes adversarial failure tests.
-- **Benchmarks + Plots** — 4-component benchmark suite with auto-numbered PNG output via `plotters`.
+- **TUI Visualization** — Ratatui-based terminal UI showing the Sudoku solver in real-time: color-coded grid, step/trace panels, speculative mode comparison (behind `--features sudoku`).
+- **Benchmarks + Plots** — 6-method benchmark suite (AR, DFlash, DDTree, Speculative, AR Draft, Leviathan †) with auto-numbered PNG output via `plotters`.
+
+† Behind `--features leviathan`
 
 ## 🏗️ Architecture
 
@@ -355,18 +363,30 @@ cargo run --release
 # Run with Leviathan Algorithm 1 verification (6 benchmarks, includes real p/q rejection)
 cargo run --release --features leviathan
 
-# Run all tests (173 tests with --all-features: 93 unit + 80 integration)
-# Without leviathan: 169 tests (89 unit + 80 integration)
+# Run with Sudoku constraint pruner (adds SudokuPruner tests + examples)
+cargo run --release --features sudoku
+
+# Run everything (all benchmarks + Sudoku pruner + Leviathan)
+cargo run --release --all-features
+
+# Run all tests (176 tests with --all-features)
+# Default only:          77 unit + 80 integration
+# +sudoku:               93 unit + 80 integration
+# +leviathan:            89 unit + 80 integration
+# +sudoku +leviathan:    96 unit + 80 integration
 cargo test --quiet --workspace --all-features
 
 # Run Sudoku solver example (streaming "thinking" output)
-cargo run --example sudoku_9x9
+cargo run --example sudoku_9x9 --features sudoku
 
 # Run speculative decoding comparison (Unpruned / Static / Path-Aware)
-cargo run --example sudoku_speculative
+cargo run --example sudoku_speculative --features sudoku
+
+# Run TUI visualization (real-time grid + speculative mode, requires terminal)
+cargo run --example sudoku_tui --features sudoku
 
 # Lint
-cargo clippy --all-targets --all-features
+cargo clippy --all-targets --all-features --quiet
 ```
 
 ### Output
@@ -378,28 +398,34 @@ cargo clippy --all-targets --all-features
 
 ```
 src/
-  lib.rs          Module index
-  main.rs         Entry point (proof → bench → Percepta bench → plot)
-  types.rs        Config (micro + draft), Rng, softmax, rmsnorm, matmul, sample_token
-  transformer.rs  TransformerWeights, KVCache, ForwardContext, forward, generate
-  speculative.rs  ConstraintPruner, SudokuPruner, NoPruner, TreeNode,
-                  SpeculativeVerifier (trait), SimulatedVerifier, LeviathanVerifier †,
-                  dflash_predict, dflash_predict_ar, build_dd_tree_pruned,
-                  sample_from_distribution, sample_residual_distribution,
-                  speculative_step, speculative_step_verifier
-  percepta.rs     Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
-                  Sudoku9x9, ComputableLora, StreamingSolver, SolveEvent
-  benchmark.rs    BenchResult, run_all (AR / DFlash / DDTree / Speculative / AR Draft / Leviathan †)
-  plot.rs         plot_results → PNG bar chart
+  lib.rs            Module index
+  main.rs           Entry point (proof → bench → Percepta bench → plot)
+  types.rs          Config (micro + draft), Rng, softmax, rmsnorm, matmul, sample_token
+  transformer.rs    TransformerWeights, KVCache, ForwardContext, forward, generate
+  speculative/      SOLID decomposition (plan 005):
+    mod.rs          Re-exports
+    types.rs        TreeNode, DraftResult, ConstraintPruner trait, NoPruner
+    sampling.rs     sample_from_distribution, sample_residual_distribution
+    dd_tree.rs      build_dd_tree, build_dd_tree_pruned, extract_parent_tokens
+    dflash.rs       dflash_predict, dflash_predict_parallel, dflash_predict_ar
+    verifier.rs     SpeculativeVerifier trait, SimulatedVerifier, LeviathanVerifier †
+    step.rs         speculative_step, speculative_step_verifier
+    sudoku_pruner.rs  SudokuPruner (path-aware, cross-depth conflict detection) *
+  percepta.rs       Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
+                    Sudoku9x9, ComputableLora, StreamingSolver, SolveEvent
+  benchmark.rs      BenchResult, run_all (AR / DFlash / DDTree / Speculative / AR Draft / Leviathan †)
+  plot.rs           plot_results → PNG bar chart
   † behind --features leviathan
+  * behind --features sudoku
 examples/
-  sudoku_9x9.rs          Streaming solver with "thinking" output + hull compression stats
-  sudoku_speculative.rs  3-column DDTree comparison: Unpruned / Static-Only / Path-Aware
+  sudoku_9x9.rs          Streaming solver with "thinking" output + hull compression stats *
+  sudoku_speculative.rs  3-column DDTree comparison: Unpruned / Static-Only / Path-Aware *
+  sudoku_tui.rs          Ratatui TUI: real-time grid visualization + speculative mode *
 tests/
   integration.rs  80 integration tests (adversarial + DFA + arithmetic + backtracking + geometry
                   + Sudoku9x9 + ComputableLora + StreamingSolver)
 bench/
-  001_bench_result.png  ...  012_bench_result.png (auto-numbered)
+  001_bench_result.png  ...  014_bench_result.png (auto-numbered)
 ```
 
 ## 📜 References
