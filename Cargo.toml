@@ -10,3 +10,12 @@ rayon = "1.10"
 [features]
 default = []
 leviathan = []
+sudoku = []
+
+[[example]]
+name = "sudoku_speculative"
+required-features = ["sudoku"]
+
+[[example]]
+name = "sudoku_9x9"
+required-features = ["sudoku"]
