@@ -125,9 +125,8 @@ src/
 │   ├── optimizer.rs                   # AdamW optimizer state + step
 │   ├── loss.rs                        # Cross-entropy loss computation
 │   └── training_loop.rs               # Epoch loop, logging, checkpoint
-├── data/                              # FROM PLAN 007 (extended)
-│   ├── ...
-│   └── dataloader.rs                  # NEW: batch iteration, shuffling, padding
+├── gpu/                               # (continued from above)
+│   └── dataloader.rs                  # NEW: batch iteration, shuffling, padding (NOT src/data/)
 ├── transformer.rs                     # EXISTING (unchanged — CPU fallback)
 ├── types.rs                           # EXISTING (extended for LoRA config)
 └── lib.rs                             # EXISTING (add mod gpu behind feature flag)
@@ -141,14 +140,15 @@ src/
 wgpu = { version = "24", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 pollster = { version = "0.4", optional = true }  # block_on for async wgpu init
+safetensors = { version = "0.4", optional = true }   # LoRA weight serialization
 
 [features]
 default = []
 leviathan = []
 sudoku = []
 clora = ["syn"]
-training = ["serde", "serde_json", "walkdir"]
-gpu = ["wgpu", "bytemuck", "pollster"]     # GPU-accelerated training
+training = ["serde", "serde_json"]
+gpu = ["wgpu", "bytemuck", "pollster", "safetensors"]     # GPU-accelerated training
 full = ["leviathan", "sudoku", "clora", "training", "gpu"]
 ```
 
@@ -339,49 +339,72 @@ fn matmul_tiled(
 
 ### 2.2 LoRA Merge
 
+Two-dispatch approach: Dispatch 1 computes `A * input → intermediate[rank]` in parallel. Dispatch 2 computes `W * input + B * intermediate → output[out_dim]` in parallel.
+
 ```wgsl
 // gpu/kernels/lora.wgsl
 
-// LoRA merge: output[i] = base_weight * input + (B * (A * input))
-// A: [rank, n_embd], B: [out_dim, rank], input: [n_embd], output: [out_dim]
+// Dispatch 1: Compute A * input → intermediate[rank]
+// One invocation per rank element. Fully parallel across rank dimension.
 
-@group(0) @binding(0) var<storage, read>       base_weight: array<f32>;  // [out_dim, n_embd]
-@group(0) @binding(1) var<storage, read>       lora_a: array<f32>;       // [rank, n_embd]
-@group(0) @binding(2) var<storage, read>       lora_b: array<f32>;       // [out_dim, rank]
-@group(0) @binding(3) var<storage, read>       input: array<f32>;        // [n_embd]
-@group(0) @binding(4) var<storage, read_write> output: array<f32>;       // [out_dim]
-@group(0) @binding(5) var<uniform>             params: LoraParams;
+@group(0) @binding(0) var<storage, read>       lora_a: array<f32>;       // [rank, n_embd]
+@group(0) @binding(1) var<storage, read>       input: array<f32>;        // [n_embd]
+@group(0) @binding(2) var<storage, read_write> intermediate: array<f32>; // [rank]
+@group(0) @binding(3) var<uniform>             params: LoraParamsA;
 
-struct LoraParams {
-    out_dim: u32,
-    n_embd: u32,
+struct LoraParamsA {
     rank: u32,
-    alpha: f32,     // scaling factor (typically alpha / rank)
+    n_embd: u32,
 }
 
 @compute @workgroup_size(64, 1, 1)
-fn lora_forward(
+fn lora_a_forward(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+) {
+    let r = gid.x;
+    if (r >= params.rank) { return; }
+    
+    var sum: f32 = 0.0;
+    for (var j = 0u; j < params.n_embd; j = j + 1u) {
+        sum = sum + lora_a[r * params.n_embd + j] * input[j];
+    }
+    intermediate[r] = sum;
+}
+
+// Dispatch 2: Compute output[i] = W[i,:] * input + alpha * B[i,:] * intermediate
+// One invocation per output row. Fully parallel across out_dim.
+
+@group(0) @binding(0) var<storage, read>       base_weight: array<f32>;  // [out_dim, n_embd]
+@group(0) @binding(1) var<storage, read>       lora_b: array<f32>;       // [out_dim, rank]
+@group(0) @binding(2) var<storage, read>       input: array<f32>;        // [n_embd]
+@group(0) @binding(3) var<storage, read>       intermediate: array<f32>; // [rank] from dispatch 1
+@group(0) @binding(4) var<storage, read_write> output: array<f32>;       // [out_dim]
+@group(0) @binding(5) var<uniform>             params: LoraParamsB;
+
+struct LoraParamsB {
+    out_dim: u32,
+    n_embd: u32,
+    rank: u32,
+    alpha: f32,
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn lora_b_forward(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {
     let i = gid.x;
     if (i >= params.out_dim) { return; }
     
-    // Base weight contribution: row i of W * input
+    // Base weight: W[i,:] * input
     var base_sum: f32 = 0.0;
     for (var j = 0u; j < params.n_embd; j = j + 1u) {
         base_sum = base_sum + base_weight[i * params.n_embd + j] * input[j];
     }
     
-    // LoRA contribution: B[i,:] * (A * input)
-    // First compute A * input → [rank] intermediates
-    // Then compute B[i,:] dot (A * input)
+    // LoRA: B[i,:] * intermediate (intermediate = A * input, already computed)
     var lora_sum: f32 = 0.0;
     for (var r = 0u; r < params.rank; r = r + 1u) {
-        var ax: f32 = 0.0;
-        for (var j = 0u; j < params.n_embd; j = j + 1u) {
-            ax = ax + lora_a[r * params.n_embd + j] * input[j];
-        }
-        lora_sum = lora_sum + lora_b[i * params.rank + r] * ax;
+        lora_sum = lora_sum + lora_b[i * params.rank + r] * intermediate[r];
     }
     
     output[i] = base_sum + params.alpha * lora_sum;
@@ -390,57 +413,99 @@ fn lora_forward(
 
 ### 2.3 Cross-Entropy Loss
 
+Two-dispatch approach: Dispatch 1 computes per-sample softmax + loss in parallel. Dispatch 2 reduces to mean loss.
+
 ```wgsl
 // gpu/kernels/loss.wgsl
 
-// Cross-entropy loss: -log(softmax(logits)[target])
-// Two-pass: pass 1 computes max + sum for stable softmax, pass 2 computes loss
+// Dispatch 1: Per-sample softmax + cross-entropy (one workgroup invocation per sample)
+// Each invocation handles one position in [0, batch_seq) independently.
 
 @group(0) @binding(0) var<storage, read>       logits: array<f32>;      // [batch * seq * vocab]
 @group(0) @binding(1) var<storage, read>       targets: array<u32>;     // [batch * seq]
-@group(0) @binding(2) var<storage, read_write> loss: array<f32>;        // [1] output
+@group(0) @binding(2) var<storage, read_write> per_sample_loss: array<f32>;  // [batch_seq] output
 @group(0) @binding(3) var<storage, read_write> log_probs: array<f32>;   // [batch * seq * vocab] for backward
 @group(0) @binding(4) var<uniform>             params: LossParams;
 
 struct LossParams {
-    batch_seq: u32,   // batch_size * seq_len
+    batch_seq: u32,
     vocab_size: u32,
-    total_tokens: u32, // for mean reduction
+    total_tokens: u32,
 }
 
-@compute @workgroup_size(1, 1, 1)
-fn cross_entropy_loss() {
-    var total_loss: f32 = 0.0;
+@compute @workgroup_size(64, 1, 1)
+fn cross_entropy_per_sample(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+) {
+    let i = gid.x;
+    if (i >= params.batch_seq) { return; }
     
-    for (var i = 0u; i < params.batch_seq; i = i + 1u) {
-        let offset = i * params.vocab_size;
-        let target = targets[i];
-        
-        // Find max for numerical stability
-        var max_logit: f32 = logits[offset];
-        for (var v = 1u; v < params.vocab_size; v = v + 1u) {
-            let val = logits[offset + v];
-            if (val > max_logit) { max_logit = val; }
-        }
-        
-        // Compute sum of exp(logit - max)
-        var sum_exp: f32 = 0.0;
-        for (var v = 0u; v < params.vocab_size; v = v + 1u) {
-            let exp_val = exp(logits[offset + v] - max_logit);
-            log_probs[offset + v] = exp_val;
-            sum_exp = sum_exp + exp_val;
-        }
-        
-        // Normalize to get softmax probabilities
-        for (var v = 0u; v < params.vocab_size; v = v + 1u) {
-            log_probs[offset + v] = log_probs[offset + v] / sum_exp;
-        }
-        
-        // Cross-entropy: -log(p[target])
-        total_loss = total_loss - log(log_probs[offset + target] + 1e-10);
+    let offset = i * params.vocab_size;
+    let target = targets[i];
+    
+    // Find max for numerical stability
+    var max_logit: f32 = logits[offset];
+    for (var v = 1u; v < params.vocab_size; v = v + 1u) {
+        let val = logits[offset + v];
+        if (val > max_logit) { max_logit = val; }
     }
     
-    loss[0] = total_loss / f32(params.total_tokens);
+    // Compute sum of exp(logit - max) + normalize
+    var sum_exp: f32 = 0.0;
+    for (var v = 0u; v < params.vocab_size; v = v + 1u) {
+        let exp_val = exp(logits[offset + v] - max_logit);
+        log_probs[offset + v] = exp_val;
+        sum_exp = sum_exp + exp_val;
+    }
+    
+    // Normalize + compute loss
+    var target_prob: f32 = 0.0;
+    for (var v = 0u; v < params.vocab_size; v = v + 1u) {
+        log_probs[offset + v] = log_probs[offset + v] / sum_exp;
+        if (v == target) {
+            target_prob = log_probs[offset + v];
+        }
+    }
+    
+    per_sample_loss[i] = -log(target_prob + 1e-10);
+}
+
+// Dispatch 2: Tree reduction to compute mean loss from per-sample losses.
+// Called with workgroup_size=256. For batch_seq <= 256, single dispatch.
+// For larger, chain multiple dispatches (future optimization).
+
+@group(0) @binding(0) var<storage, read>       per_sample_loss: array<f32>;
+@group(0) @binding(1) var<storage, read_write> loss: array<f32>;        // [1] output
+@group(0) @binding(2) var<uniform>             params: LossParams;
+
+var<workgroup> shared_loss: array<f32, 256>;
+
+@compute @workgroup_size(256, 1, 1)
+fn cross_entropy_reduce(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let i = gid.x;
+    var val: f32 = 0.0;
+    if (i < params.batch_seq) {
+        val = per_sample_loss[i];
+    }
+    shared_loss[lid.x] = val;
+    workgroupBarrier();
+    
+    // Tree reduction
+    var stride = 128u;
+    while (stride > 0u) {
+        if (lid.x < stride) {
+            shared_loss[lid.x] = shared_loss[lid.x] + shared_loss[lid.x + stride];
+        }
+        stride = stride >> 1u;
+        workgroupBarrier();
+    }
+    
+    if (lid.x == 0u) {
+        loss[0] = shared_loss[0] / f32(params.total_tokens);
+    }
 }
 ```
 
@@ -676,7 +741,7 @@ impl GpuBackwardPass {
 ### 5.1 DataLoader
 
 ```rust
-// data/dataloader.rs
+// gpu/dataloader.rs
 
 /// Batches training samples from JSONL for GPU consumption.
 /// Handles shuffling, padding, and sequence length truncation.
@@ -896,7 +961,9 @@ Plan 007 redefines `Config` with BPE dimensions. Plan 008's GPU buffers must mat
 // types.rs — extended for LoRA + GPU
 
 pub struct Config {
-    // ... existing fields from plan 007 ...
+    // ... existing fields from plan 007 (vocab_size=4096, n_embd=32, n_layer=1) ...
+    
+    pub n_layer: usize,           // number of transformer layers (default: 1)
     
     // LoRA fields (new)
     pub lora_rank: usize,         // rank of LoRA adapters (default: 4)
@@ -909,6 +976,7 @@ impl Config {
     /// Micro config with LoRA defaults.
     pub fn micro_lora() -> Self {
         let mut c = Self::micro();
+        c.n_layer = 1;
         c.lora_rank = 4;
         c.lora_alpha = 8.0;
         c.lora_dropout = 0.0;
@@ -920,6 +988,10 @@ impl Config {
     }
 }
 ```
+
+**Note**: Plan 007 defines `vocab_size=4096` for `Config::bpe()`. Plan 008's GPU buffers must match this. The "32K vocab" mentioned in the parameter estimates table is for a future "cLoRA large" config that is NOT yet defined — it will be added when multi-layer support lands. All Plan 008 development and testing uses `vocab_size=4096` from Plan 007.
+
+**Note on multi-layer**: Current `TransformerWeights` is single-layer. Adding `n_layer > 1` support requires changing per-layer weights from `Vec<f32>` to `Vec<Vec<f32>>` and adding a layer loop in `forward()`. This is a prerequisite for cLoRA-scale configs (4-8 layers) but NOT needed for development/testing with `Config::micro_lora()` or `Config::bpe()`.
 
 ## Phase 8: Benchmarking
 
@@ -983,7 +1055,7 @@ impl Config {
 - [ ] 4.5 Benchmark: `bench_gpu_backward` vs forward time
 
 ### Phase 5: Training Loop
-- [ ] 5.1 Create `src/data/dataloader.rs` — JSONL loading, batching, shuffling
+- [ ] 5.1 Create `src/gpu/dataloader.rs` — JSONL loading, batching, shuffling (NOT src/data/ — that's Plan 009)
 - [ ] 5.2 Create `src/gpu/loss.rs` — cross-entropy loss dispatch
 - [ ] 5.3 Create `src/gpu/optimizer.rs` — AdamW state management, step dispatch
 - [ ] 5.4 Create `src/gpu/training_loop.rs` — `Trainer`, epoch loop, logging
@@ -994,13 +1066,14 @@ impl Config {
 ### Phase 6: LoRA Export/Import
 - [ ] 6.1 Implement `export_lora` — download A/B from GPU → safetensors file
 - [ ] 6.2 Implement `load_lora` — read safetensors → upload to GPU buffers
-- [ ] 6.3 Add `candle-core` or `safetensors` dependency for serialization
+- [ ] 6.3 Verify `safetensors` dependency resolves (already added in Phase 1 deps)
 - [ ] 6.4 Add test: export → load → forward pass produces same logits
 - [ ] 6.5 Add CLI command: `cargo run --features gpu -- train --data training.jsonl --output lora.bin`
 
 ### Phase 7: cLoRA Integration
 - [ ] 7.1 Update `Config` with LoRA fields (rank, alpha, dropout, targets)
-- [ ] 7.2 Verify GPU buffer sizes match plan 007's BPE dimensions (vocab_size=32K, n_embd=256+)
+- [ ] 7.2 Verify GPU buffer sizes match plan 007's BPE dimensions (vocab_size=4096, n_embd=32, n_layer=1)
+- [ ] 7.2.1 Note: cLoRA large configs (vocab=32K, n_embd=256+, n_layer=4+) require multi-layer TransformerWeights — deferred to separate refactor
 - [ ] 7.3 Add integration test: load plan 007's JSONL → train → export lora.bin
 - [ ] 7.4 Document the data flow: plan 007 JSONL → plan 008 training → lora.bin
 
@@ -1058,7 +1131,7 @@ full = ["leviathan", "sudoku", "clora", "training", "gpu"]
 
 | File | Action | Phase |
 |------|--------|-------|
-| `Cargo.toml` | Add `wgpu`, `bytemuck`, `pollster`, `safetensors` deps + `gpu` feature | 1 |
+| `Cargo.toml` | Add wgpu, bytemuck, pollster, safetensors deps + gpu feature | 1 |
 | `src/gpu/mod.rs` | New | 1 |
 | `src/gpu/context.rs` | New | 1 |
 | `src/gpu/buffer.rs` | New | 1 |
@@ -1075,7 +1148,7 @@ full = ["leviathan", "sudoku", "clora", "training", "gpu"]
 | `src/gpu/forward.rs` | New | 3 |
 | `src/gpu/lora.rs` | New | 3 |
 | `src/gpu/backward.rs` | New | 4 |
-| `src/data/dataloader.rs` | New | 5 |
+| `src/gpu/dataloader.rs` | New | 5 |
 | `src/gpu/loss.rs` | New | 5 |
 | `src/gpu/optimizer.rs` | New | 5 |
 | `src/gpu/training_loop.rs` | New | 5 |

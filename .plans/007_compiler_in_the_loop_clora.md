@@ -159,6 +159,9 @@ pub fn extract_parent_tokens(parent_path: u128, num_tokens: usize) -> Vec<usize>
 ```
 
 **Breaking change**: All code using `parent_path: u64` must update to `u128`. This affects:
+
+**Semantic change**: The encoding direction flips. Current code packs depth-0 in HIGH bits (MSB-first extract). New code packs depth-0 in LOW bits (LSB-first extract). This is simpler and more natural but means all `extract_parent_tokens` roundtrip tests must be rewritten.
+
 - `types.rs`: `TreeNode.parent_path` type
 - `dd_tree.rs`: `build_dd_tree_pruned` shift/mask, `extract_parent_tokens`
 - `sudoku_pruner.rs`: no change (only reads via `extract_parent_tokens`)
@@ -180,6 +183,7 @@ impl Config {
             n_embd: 32,
             n_head: 4,
             head_dim: 8,
+            n_layer: 1,         // single-layer; multi-layer needs Vec<Vec<f32>> weights (Plan 008)
             mlp_hidden: 128,
             bos_token: 0,       // BOS = token 0 in BPE vocab
             temperature: 0.8,
@@ -196,6 +200,7 @@ impl Config {
             n_embd: 8,
             n_head: 2,
             head_dim: 4,
+            n_layer: 1,
             mlp_hidden: 32,
             bos_token: 0,
             temperature: 0.8,
@@ -205,6 +210,13 @@ impl Config {
     }
 }
 ```
+
+**Note on multi-layer**: Both configs use `n_layer: 1` (single-layer). The current `TransformerWeights` struct is single-layer — all weight fields are flat `Vec<f32>`, not `Vec<Vec<f32>>`. Adding multi-layer support requires:
+1. Adding `n_layer: usize` to `Config`
+2. Changing `TransformerWeights` to hold `Vec<Vec<f32>>` for per-layer weights (`attn_wq/k/v/o`, `mlp_w1/w2`)
+3. Adding a layer loop in `forward()`
+
+This is a prerequisite for Plan 008 (wgpu LoRA training) at cLoRA scale, but NOT for Plan 007's BPE tokenizer + SynPruner. Multi-layer will be added as a Phase 0.5 task when needed for Plan 008 integration.
 
 **Memory estimates** for `Config::bpe()`:
 | Buffer | Size | Bytes |
@@ -254,21 +266,21 @@ rayon = "1.10"
 blake3 = "1"                       # fast hashing for corpus dedup + BPE cache
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+syn = { version = "2", features = ["full", "parsing"], optional = true }
+proc-macro2 = { version = "1", optional = true }
 
 [dev-dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
-syn = { version = "2", features = ["full", "parsing"] }   # test-only for validation
-proc-macro2 = "1"
 
 [features]
 default = []
 leviathan = []
 sudoku = []
-clora = []                         # gates clora/ module (syn becomes required dep)
+clora = ["syn", "proc-macro2"]     # gates clora/ module — syn becomes required dep
 ```
 
-**Note**: `syn` is only a required dependency when `clora` feature is enabled. For testing the tokenizer and training pipeline, we don't need `syn` at all.
+**Note**: `syn` and `proc-macro2` are **optional dependencies** gated behind the `clora` feature. They are NOT dev-dependencies. The tokenizer and BPE training work without them. Only the `SynPruner` (Phase 2) requires `syn`.
 
 ### PartialParser (Fixes Blocker 3 — Realistic Scope)
 
@@ -292,8 +304,22 @@ NOT a full Rust parser. A **bracket balancer + keyword acceptor**:
 /// - Whether types are valid (requires semantic analysis)
 /// - Borrow checker rules (requires full rustc)
 ///
-/// False positives: ALLOWED (target model + syn catch them later)
-/// False negatives: MINIMIZED (we don't want to prune valid code)
+/// ## Honest Assessment (vs Research Ambition)
+///
+/// The research describes a "Computable LoRA" using Percepta 2D convex-hull
+/// attention to execute an AST parser at O(log n) per token. This PartialParser
+/// is "Phase 0 cLoRA" — a pragmatic baseline that:
+/// - Catches ~10-20% of invalid branches (unbalanced delimiters)
+/// - Has near-zero false negatives (rarely prunes valid code)
+/// - Runs at ~50ns/tok (well within DDTree budget)
+///
+/// The remaining ~80-90% of invalid branches pass through to Tier 1 (syn)
+/// and Tier 2 (cargo check). This is acceptable because:
+/// 1. Tier 1 runs per-path (not per-token), so volume is bounded by tree_budget
+/// 2. Tier 2 runs offline during training data generation, not during inference
+///
+/// Future work: upgrade to keyword-aware DFA or actual Percepta integration
+/// for higher pruning rates in the DDTree hot loop.
 pub struct PartialParser {
     paren_depth: u32,
     brace_depth: u32,
@@ -571,6 +597,10 @@ The training data pipeline (`src/data/`) is deferred to plan 009 because:
 
 Plan 008 (wgpu LoRA Training) covers GPU-accelerated forward + backward pass for `lora.bin` fine-tuning.
 
+**Module ownership**: `src/data/` is owned by Plan 009. Plan 008 places its `DataLoader` in `src/gpu/dataloader.rs` (inside the `gpu/` module) to avoid ownership conflict. The split is:
+- `src/data/ingester.rs`, `src/data/filter.rs`, `src/data/exporter.rs` → Plan 009 (corpus processing)
+- `src/gpu/dataloader.rs` → Plan 008 (batch iteration for GPU training)
+
 Plan 009 will cover:
 - `data/ingester.rs` — walk dirs, read .rs, blake3 dedup
 - `data/filter.rs` — syn validation + cargo check gate
@@ -589,6 +619,8 @@ Plan 009 will cover:
 - [ ] 0.6 Run `cargo clippy --all-features` — zero warnings
 - [ ] 0.7 Run `cargo run --release` — benchmark unchanged (perf check)
 - [ ] 0.8 Commit with message `refactor: TreeNode path encoding 5-bit→16-bit for BPE vocab support`
+- [ ] 0.9 Add `n_layer: usize` field to `Config` in `types.rs` (default: 1 for all configs)
+- [ ] 0.10 Note: multi-layer `TransformerWeights` deferred until Plan 008 needs it
 
 ### Phase 1: BPE Tokenizer
 
