@@ -7,6 +7,10 @@ edition = "2024"
 plotters = "0.3"
 rayon = "1.10"
 
+[dev-dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+
 [features]
 default = []
 leviathan = []
@@ -18,4 +22,8 @@ required-features = ["sudoku"]
 
 [[example]]
 name = "sudoku_9x9"
+required-features = ["sudoku"]
+
+[[example]]
+name = "sudoku_tui"
 required-features = ["sudoku"]
