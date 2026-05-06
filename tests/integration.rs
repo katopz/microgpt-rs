@@ -217,7 +217,7 @@ fn test_forward_output_size() {
     let mut rng = types::Rng::new(42);
     let weights = transformer::TransformerWeights::new(&config, &mut rng);
     let mut ctx = transformer::ForwardContext::new(&config);
-    let mut cache = transformer::KVCache::new(&config);
+    let mut cache = transformer::MultiLayerKVCache::new(&config);
     let logits = transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &config);
     assert_eq!(logits.len(), config.vocab_size);
 }
@@ -228,7 +228,7 @@ fn test_forward_logits_finite() {
     let mut rng = types::Rng::new(42);
     let weights = transformer::TransformerWeights::new(&config, &mut rng);
     let mut ctx = transformer::ForwardContext::new(&config);
-    let mut cache = transformer::KVCache::new(&config);
+    let mut cache = transformer::MultiLayerKVCache::new(&config);
     let logits = transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &config);
     for (i, &l) in logits.iter().enumerate() {
         assert!(l.is_finite(), "logit {i} is not finite: {l}");
@@ -238,14 +238,14 @@ fn test_forward_logits_finite() {
 #[test]
 fn test_forward_cache_populated() {
     let config = types::Config::micro();
-    let n = config.n_embd;
+    let kvd = types::kv_dim(&config);
     let mut rng = types::Rng::new(42);
     let weights = transformer::TransformerWeights::new(&config, &mut rng);
     let mut ctx = transformer::ForwardContext::new(&config);
-    let mut cache = transformer::KVCache::new(&config);
+    let mut cache = transformer::MultiLayerKVCache::new(&config);
     transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &config);
-    let key_sum: f32 = cache.key[..n].iter().sum();
-    let val_sum: f32 = cache.value[..n].iter().sum();
+    let key_sum: f32 = cache.layers[0].key[..kvd].iter().sum();
+    let val_sum: f32 = cache.layers[0].value[..kvd].iter().sum();
     assert!(key_sum != 0.0, "K cache at pos 0 should be populated");
     assert!(val_sum != 0.0, "V cache at pos 0 should be populated");
 }
@@ -256,7 +256,7 @@ fn test_forward_positions_differ() {
     let mut rng = types::Rng::new(42);
     let weights = transformer::TransformerWeights::new(&config, &mut rng);
     let mut ctx = transformer::ForwardContext::new(&config);
-    let mut cache = transformer::KVCache::new(&config);
+    let mut cache = transformer::MultiLayerKVCache::new(&config);
     let logits_0 = transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &config).to_vec();
     let logits_1 = transformer::forward(&mut ctx, &weights, &mut cache, 0, 1, &config);
     let different = logits_0.iter().zip(logits_1).any(|(&a, b)| a != *b);
@@ -269,7 +269,7 @@ fn test_forward_draft_model() {
     let mut rng = types::Rng::new(42);
     let weights = transformer::TransformerWeights::new(&draft_config, &mut rng);
     let mut ctx = transformer::ForwardContext::new(&draft_config);
-    let mut cache = transformer::KVCache::new(&draft_config);
+    let mut cache = transformer::MultiLayerKVCache::new(&draft_config);
     let logits = transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &draft_config);
     assert_eq!(logits.len(), draft_config.vocab_size);
     assert!(logits.iter().all(|&l| l.is_finite()));
@@ -356,17 +356,19 @@ fn test_kv_cache_reset() {
     let mut rng = types::Rng::new(42);
     let weights = transformer::TransformerWeights::new(&config, &mut rng);
     let mut ctx = transformer::ForwardContext::new(&config);
-    let mut cache = transformer::KVCache::new(&config);
+    let mut cache = transformer::MultiLayerKVCache::new(&config);
     transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &config);
     cache.reset();
-    assert!(
-        cache.key.iter().all(|&v| v == 0.0),
-        "cache key should be zeroed after reset"
-    );
-    assert!(
-        cache.value.iter().all(|&v| v == 0.0),
-        "cache value should be zeroed after reset"
-    );
+    for (i, layer) in cache.layers.iter().enumerate() {
+        assert!(
+            layer.key.iter().all(|&v| v == 0.0),
+            "layer {i} cache key should be zeroed after reset"
+        );
+        assert!(
+            layer.value.iter().all(|&v| v == 0.0),
+            "layer {i} cache value should be zeroed after reset"
+        );
+    }
 }
 
 #[test]
@@ -375,7 +377,7 @@ fn test_forward_context_reuse() {
     let mut rng = types::Rng::new(42);
     let weights = transformer::TransformerWeights::new(&config, &mut rng);
     let mut ctx = transformer::ForwardContext::new(&config);
-    let mut cache = transformer::KVCache::new(&config);
+    let mut cache = transformer::MultiLayerKVCache::new(&config);
 
     let l1 = transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &config).to_vec();
     let l2 = transformer::forward(&mut ctx, &weights, &mut cache, 0, 0, &config);

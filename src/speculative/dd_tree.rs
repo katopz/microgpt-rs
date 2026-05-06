@@ -107,6 +107,75 @@ pub fn extract_best_path(tree: &[TreeNode]) -> Vec<usize> {
     path
 }
 
+/// Inject retrieved token sequences into the DDTree as candidate branches.
+///
+/// Each retrieved sequence becomes a path with blended score.
+/// Score blending: `(1-w) * log(draft_prob) + w * log(similarity)`
+///
+/// This is a pure computation function — no feature gating needed.
+/// The REST feature provides the data; this function processes it.
+pub fn merge_retrieved_branches(
+    tree: &mut Vec<TreeNode>,
+    marginals: &[Vec<f32>],
+    config: &crate::types::Config,
+    token_sequences: &[Vec<usize>],
+    scores: &[f32],
+    rest_weight: f32,
+) {
+    if token_sequences.is_empty() || rest_weight <= 0.0 {
+        return;
+    }
+
+    let inv_weight = 1.0 - rest_weight;
+
+    for (seq_idx, seq) in token_sequences.iter().enumerate() {
+        let similarity = scores.get(seq_idx).copied().unwrap_or(0.0);
+        if similarity <= 0.0 {
+            continue;
+        }
+
+        for (depth, &token_idx) in seq.iter().enumerate() {
+            if depth >= marginals.len() {
+                break;
+            }
+            if token_idx >= config.vocab_size {
+                break;
+            }
+
+            let base_prob = marginals[depth].get(token_idx).copied().unwrap_or(0.0);
+            if base_prob <= 0.0 {
+                continue;
+            }
+
+            let blended = (base_prob.ln() * inv_weight) + (similarity.ln() * rest_weight);
+
+            // Reconstruct parent_path from sequence prefix up to current depth
+            let parent_path = seq[..=depth].iter().enumerate().fold(0u64, |acc, (d, &t)| {
+                if d == 0 {
+                    t as u64
+                } else {
+                    (acc << 5) | (t as u64)
+                }
+            });
+
+            tree.push(TreeNode {
+                score: blended,
+                depth,
+                token_idx,
+                parent_path,
+            });
+        }
+    }
+
+    // Re-sort by score descending
+    tree.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    tree.truncate(config.tree_budget);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,7 +199,8 @@ mod tests {
         assert_eq!(extract_parent_tokens(path_d0, 1), vec![3]);
         assert_eq!(extract_parent_tokens(path_d1, 2), vec![3, 7]);
         assert_eq!(extract_parent_tokens(path_d2, 3), vec![3, 7, 1]);
-        assert_eq!(extract_parent_tokens(0, 0), vec![]);
+        let empty: Vec<usize> = extract_parent_tokens(0, 0);
+        assert!(empty.is_empty());
     }
 
     #[test]
@@ -223,5 +293,102 @@ mod tests {
         let pruner = NoPruner;
         let tree = build_dd_tree_pruned(&[], &config, &pruner);
         assert!(tree.is_empty(), "empty marginals should produce empty tree");
+    }
+
+    // ── merge_retrieved_branches Tests ─────────────────────────
+
+    #[test]
+    fn test_merge_empty_retrieval_noop() {
+        let config = Config::draft();
+        let marginals = vec![vec![0.5; config.vocab_size]];
+        let mut tree = vec![TreeNode {
+            score: 1.0,
+            depth: 0,
+            token_idx: 0,
+            parent_path: 0,
+        }];
+        let original_len = tree.len();
+
+        merge_retrieved_branches(&mut tree, &marginals, &config, &[], &[], 0.5);
+
+        assert_eq!(
+            tree.len(),
+            original_len,
+            "empty retrieval should not change tree"
+        );
+    }
+
+    #[test]
+    fn test_merge_preserves_budget() {
+        let config = Config::draft();
+        let marginals = vec![vec![0.1; config.vocab_size]; 4];
+        let mut tree = build_dd_tree(&marginals, &config);
+
+        // Create many sequences that would exceed budget
+        let sequences: Vec<Vec<usize>> = (0..100)
+            .map(|i| vec![i % config.vocab_size, (i + 1) % config.vocab_size])
+            .collect();
+        let scores: Vec<f32> = (0..100).map(|_| 0.9).collect();
+
+        merge_retrieved_branches(&mut tree, &marginals, &config, &sequences, &scores, 0.3);
+
+        assert!(
+            tree.len() <= config.tree_budget,
+            "tree should not exceed budget, got {}",
+            tree.len()
+        );
+    }
+
+    #[test]
+    fn test_merge_sorts_by_score() {
+        let config = Config::draft();
+        let marginals = vec![vec![0.1; config.vocab_size]; 2];
+        let mut tree = Vec::new();
+
+        let sequences = vec![vec![0, 1], vec![2, 3]];
+        let scores = vec![0.5, 0.9];
+
+        merge_retrieved_branches(&mut tree, &marginals, &config, &sequences, &scores, 0.5);
+
+        for window in tree.windows(2) {
+            assert!(
+                window[0].score >= window[1].score,
+                "tree should be sorted by score descending"
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_with_empty_tree_adds_nodes() {
+        let config = Config::draft();
+        // Marginals with non-zero prob at specific tokens
+        let mut m0 = vec![0.0; config.vocab_size];
+        m0[5] = 0.8;
+        let mut m1 = vec![0.0; config.vocab_size];
+        m1[10] = 0.6;
+        let marginals = vec![m0, m1];
+        let mut tree = Vec::new();
+
+        let sequences = vec![vec![5, 10]];
+        let scores = vec![0.7];
+
+        merge_retrieved_branches(&mut tree, &marginals, &config, &sequences, &scores, 0.3);
+
+        assert_eq!(tree.len(), 2, "should add 2 nodes for 2-depth sequence");
+        assert_eq!(tree[0].token_idx, 5, "first node should be token 5");
+    }
+
+    #[test]
+    fn test_merge_zero_weight_is_noop() {
+        let config = Config::draft();
+        let marginals = vec![vec![0.5; config.vocab_size]];
+        let mut tree = Vec::new();
+
+        let sequences = vec![vec![0]];
+        let scores = vec![0.9];
+
+        merge_retrieved_branches(&mut tree, &marginals, &config, &sequences, &scores, 0.0);
+
+        assert!(tree.is_empty(), "zero rest_weight should be no-op");
     }
 }

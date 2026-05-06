@@ -2,7 +2,7 @@ use crate::speculative::{
     SimulatedVerifier, build_dd_tree, dflash_predict, dflash_predict_ar, sample_from_distribution,
     speculative_step_verifier,
 };
-use crate::transformer::{ForwardContext, KVCache, TransformerWeights, forward};
+use crate::transformer::{ForwardContext, MultiLayerKVCache, TransformerWeights, forward};
 use crate::types::{Config, Rng, softmax};
 use std::time::Instant;
 
@@ -72,7 +72,7 @@ fn bench_ar(
     iters: usize,
 ) -> BenchResult {
     let mut ctx = ForwardContext::new(config);
-    let mut cache = KVCache::new(config);
+    let mut cache = MultiLayerKVCache::new(config);
 
     for _ in 0..warmup {
         cache.reset();

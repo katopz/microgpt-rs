@@ -1,6 +1,6 @@
 use crate::speculative::sampling::sample_from_distribution;
 use crate::speculative::types::DraftResult;
-use crate::transformer::{ForwardContext, KVCache, TransformerWeights, forward};
+use crate::transformer::{ForwardContext, MultiLayerKVCache, TransformerWeights, forward};
 use crate::types::{Config, Rng, softmax};
 use rayon::prelude::*;
 
@@ -19,7 +19,7 @@ pub fn dflash_predict(
 
     let mut marginals = Vec::with_capacity(max_steps);
     for step in 0..max_steps {
-        let mut cache = KVCache::new(draft_config);
+        let mut cache = MultiLayerKVCache::new(draft_config);
         let draft_pos = pos + step;
         let logits = forward(
             &mut ctx,
@@ -61,7 +61,7 @@ pub fn dflash_predict_parallel(
             || {
                 (
                     ForwardContext::new(draft_config),
-                    KVCache::new(draft_config),
+                    MultiLayerKVCache::new(draft_config),
                 )
             },
             |(ctx, cache), step| {
@@ -91,7 +91,7 @@ pub fn dflash_predict_ar(
     rng: &mut Rng,
 ) -> DraftResult {
     let mut ctx = ForwardContext::new(draft_config);
-    let mut cache = KVCache::new(draft_config);
+    let mut cache = MultiLayerKVCache::new(draft_config);
     let max_steps = draft_config
         .draft_lookahead
         .min(draft_config.block_size.saturating_sub(pos));

@@ -197,35 +197,35 @@ rest = ["reqwest", "tokio"]   # Retrieval-based speculative decoding
 ## Tasks
 
 ### Phase 1: Hidden State Extraction
-- [ ] 1.1 Add `pub hidden_state: Vec<f32>` field to `ForwardContext` in `transformer.rs`
-- [ ] 1.2 Initialize in `ForwardContext::new()` with `vec![0.0; config.n_embd]`
-- [ ] 1.3 Add `ctx.hidden_state[..n].copy_from_slice(&ctx.x[..n])` before lm_head matmul in `forward()`
-- [ ] 1.4 Verify existing tests still pass (zero-alloc guarantee unchanged)
-- [ ] 1.5 Add test: `hidden_state` differs from `logits` (different dimensionality)
-- [ ] 1.6 Add test: `hidden_state` at same pos/token is deterministic
+- [x] 1.1 Add `pub hidden_state: Vec<f32>` field to `ForwardContext` in `transformer.rs`
+- [x] 1.2 Initialize in `ForwardContext::new()` with `vec![0.0; config.n_embd]`
+- [x] 1.3 Add `ctx.hidden_state[..n].copy_from_slice(&ctx.x[..n])` before lm_head matmul in `forward()`
+- [x] 1.4 Verify existing tests still pass (zero-alloc guarantee unchanged)
+- [x] 1.5 Add test: `hidden_state` differs from `logits` (different dimensionality)
+- [x] 1.6 Add test: `hidden_state` at same pos/token is deterministic
 
 ### Phase 2: REST Client Module
-- [ ] 2.1 Add `reqwest` and `tokio` to `Cargo.toml` behind `rest` feature
-- [ ] 2.2 Create `src/rest/mod.rs` with feature gate
-- [ ] 2.3 Create `src/rest/client.rs` — `RestClient`, `RetrievalResult`
-- [ ] 2.4 Create `src/rest/types.rs` — request/response types matching anyrag API
-- [ ] 2.5 Add `pub mod rest;` to `src/lib.rs` behind `#[cfg(feature = "rest")]`
-- [ ] 2.6 Add tests: mock REST response parsing
+- [x] 2.1 Add `reqwest` and `tokio` to `Cargo.toml` behind `rest` feature
+- [x] 2.2 Create `src/rest/mod.rs` with feature gate
+- [x] 2.3 Create `src/rest/client.rs` — `RestClient`, `RetrievalResult`
+- [x] 2.4 Create `src/rest/types.rs` — request/response types matching anyrag API
+- [x] 2.5 Add `pub mod rest;` to `src/lib.rs` behind `#[cfg(feature = "rest")]`
+- [x] 2.6 Add tests: mock REST response parsing
 
 ### Phase 3: DDTree Merge
-- [ ] 3.1 Add `merge_retrieved_branches()` to `speculative/dd_tree.rs`
-- [ ] 3.2 Implement score blending: `(1-w) * log(draft_prob) + w * log(retrieval_score)`
-- [ ] 3.3 Implement path reconstruction from retrieved sequences
-- [ ] 3.4 Add test: merge preserves tree_budget
-- [ ] 3.5 Add test: merge sorts by blended score
-- [ ] 3.6 Add test: merge with empty retrieval is no-op
+- [x] 3.1 Add `merge_retrieved_branches()` to `speculative/dd_tree.rs`
+- [x] 3.2 Implement score blending: `(1-w) * log(draft_prob) + w * log(retrieval_score)`
+- [x] 3.3 Implement path reconstruction from retrieved sequences
+- [x] 3.4 Add test: merge preserves tree_budget
+- [x] 3.5 Add test: merge sorts by blended score
+- [x] 3.6 Add test: merge with empty retrieval is no-op
 
 ### Phase 4: Integration
-- [ ] 4.1 Create `speculative_step_rest()` in `speculative/step.rs`
-- [ ] 4.2 Wire: DFlash → DDTree → target forward → REST query → merge → verify
-- [ ] 4.3 Add benchmark: `Speculative (REST)` vs `Speculative (Simulated)` acceptance rate
-- [ ] 4.4 Add example: `examples/rest_demo.rs` (behind `rest` feature)
-- [ ] 4.5 Run full benchmark suite
+- [x] 4.1 Create `speculative_step_rest()` in `speculative/step.rs`
+- [x] 4.2 Wire: DFlash → DDTree → target forward → REST query → merge → verify
+- [x] 4.3 Add benchmark: `Speculative (REST)` vs `Speculative (Simulated)` acceptance rate
+- [x] 4.4 Add example: `examples/rest_demo.rs` (behind `rest` feature)
+- [x] 4.5 Run full benchmark suite
 
 ## Feature Flags
 

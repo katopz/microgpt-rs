@@ -7,6 +7,8 @@ pub struct Config {
     pub n_head: usize,
     pub head_dim: usize,
     pub mlp_hidden: usize,
+    pub n_layer: usize,
+    pub n_kv_head: usize,
     pub bos_token: usize,
     pub temperature: f32,
     pub draft_lookahead: usize,
@@ -25,6 +27,8 @@ impl Config {
             n_head: 4,
             head_dim: 4,
             mlp_hidden: 64,
+            n_layer: 1,
+            n_kv_head: 4,
             bos_token: 26,
             temperature: 0.5,
             draft_lookahead: 8,
@@ -42,11 +46,74 @@ impl Config {
             n_head: 2,
             head_dim: 2,
             mlp_hidden: 16,
+            n_layer: 1,
+            n_kv_head: 2,
             bos_token: 26,
             temperature: 0.5,
             draft_lookahead: 8,
             tree_budget: 16,
         }
+    }
+
+    /// Small target model for multi-layer testing.
+    /// vocab=4096, block=256, n_layer=4, n_head=4, n_embd=64, head_dim=16,
+    /// MLP hidden=256.
+    pub fn small_target() -> Self {
+        Self {
+            vocab_size: 4096,
+            block_size: 256,
+            n_embd: 64,
+            n_head: 4,
+            head_dim: 16,
+            mlp_hidden: 256,
+            n_layer: 4,
+            n_kv_head: 4,
+            bos_token: 0,
+            temperature: 0.8,
+            draft_lookahead: 5,
+            tree_budget: 32,
+        }
+    }
+
+    /// GQA draft config: 8 Q heads, 2 KV heads (4:1 ratio, 4× KV cache reduction).
+    pub fn gqa_draft() -> Self {
+        Self {
+            vocab_size: 4096,
+            block_size: 256,
+            n_embd: 64,
+            n_head: 8,
+            head_dim: 8,
+            mlp_hidden: 256,
+            n_layer: 4,
+            n_kv_head: 2,
+            bos_token: 0,
+            temperature: 0.8,
+            draft_lookahead: 5,
+            tree_budget: 32,
+        }
+    }
+
+    /// Validate config consistency. Returns Err with message on invalid config.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.n_head.is_multiple_of(self.n_kv_head) {
+            return Err(format!(
+                "n_head ({}) must be divisible by n_kv_head ({})",
+                self.n_head, self.n_kv_head
+            ));
+        }
+        if self.n_head * self.head_dim != self.n_embd {
+            return Err(format!(
+                "n_head ({}) * head_dim ({}) must equal n_embd ({})",
+                self.n_head, self.head_dim, self.n_embd
+            ));
+        }
+        if self.n_kv_head * self.head_dim > self.n_embd {
+            return Err(format!(
+                "n_kv_head ({}) * head_dim ({}) must not exceed n_embd ({})",
+                self.n_kv_head, self.head_dim, self.n_embd
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -54,6 +121,12 @@ impl Default for Config {
     fn default() -> Self {
         Self::micro()
     }
+}
+
+/// KV dimension: total float count per token in KV cache.
+#[inline(always)]
+pub fn kv_dim(config: &Config) -> usize {
+    config.n_kv_head * config.head_dim
 }
 
 /// XorShift64 PRNG — deterministic per seed.

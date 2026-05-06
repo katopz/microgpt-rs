@@ -1,7 +1,7 @@
 use crate::speculative::dd_tree::{build_dd_tree, extract_best_path};
 use crate::speculative::dflash::{dflash_predict, dflash_predict_ar};
 use crate::speculative::sampling::{sample_from_distribution, sample_residual_distribution};
-use crate::transformer::{ForwardContext, KVCache, TransformerWeights, forward};
+use crate::transformer::{ForwardContext, MultiLayerKVCache, TransformerWeights, forward};
 use crate::types::{Config, Rng, softmax};
 
 // ── Speculative Verifier: Strategy Pattern ──────────────────
@@ -88,7 +88,7 @@ pub struct LeviathanVerifier<'a> {
     pub target_weights: &'a TransformerWeights,
     pub target_config: &'a Config,
     target_ctx: ForwardContext,
-    target_cache: KVCache,
+    target_cache: MultiLayerKVCache,
 }
 
 #[cfg(feature = "leviathan")]
@@ -98,7 +98,7 @@ impl<'a> LeviathanVerifier<'a> {
             target_weights,
             target_config,
             target_ctx: ForwardContext::new(target_config),
-            target_cache: KVCache::new(target_config),
+            target_cache: MultiLayerKVCache::new(target_config),
         }
     }
 }

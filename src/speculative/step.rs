@@ -2,6 +2,17 @@ use crate::speculative::verifier::{SimulatedVerifier, SpeculativeVerifier};
 use crate::transformer::TransformerWeights;
 use crate::types::{Config, Rng};
 
+#[cfg(feature = "rest")]
+use crate::rest::{RestClient, RetrievalResult};
+#[cfg(feature = "rest")]
+use crate::speculative::dd_tree::{build_dd_tree, extract_best_path, merge_retrieved_branches};
+#[cfg(feature = "rest")]
+use crate::speculative::dflash::dflash_predict;
+#[cfg(feature = "rest")]
+use crate::speculative::sampling::sample_from_distribution;
+#[cfg(feature = "rest")]
+use crate::transformer::{ForwardContext, MultiLayerKVCache, forward};
+
 /// Speculative decoding step with a custom verifier.
 /// Pass any `SpeculativeVerifier` to control how drafts are verified.
 pub fn speculative_step_verifier(
@@ -28,6 +39,87 @@ pub fn speculative_step(
 ) -> (Vec<usize>, usize) {
     let mut verifier = SimulatedVerifier::new(0.75);
     speculative_step_verifier(draft_weights, draft_config, token, pos, rng, &mut verifier)
+}
+
+// ── REST Speculative Step ─────────────────────────────────────
+
+/// Speculative decoding step with REST retrieval augmentation.
+///
+/// Pipeline: DFlash → DDTree → target forward → REST query → merge → verify.
+///
+/// The hidden state from the target model forward pass is sent to anyrag,
+/// which returns historical token continuations. These are merged into the
+/// DDTree with blended scores, potentially improving acceptance rate.
+#[cfg(feature = "rest")]
+#[allow(clippy::too_many_arguments)]
+pub async fn speculative_step_rest(
+    draft_weights: &TransformerWeights,
+    draft_config: &Config,
+    target_weights: &TransformerWeights,
+    target_config: &Config,
+    token: usize,
+    pos: usize,
+    rng: &mut Rng,
+    rest_client: &RestClient,
+    rest_weight: f32,
+) -> Vec<usize> {
+    // 1. Draft marginals via DFlash
+    let marginals = dflash_predict(draft_weights, draft_config, token, pos);
+
+    // 2. Build initial DDTree
+    let mut tree = build_dd_tree(&marginals, draft_config);
+
+    // 3. Run target model forward to get hidden state
+    let mut target_ctx = ForwardContext::new(target_config);
+    let mut target_cache = MultiLayerKVCache::new(target_config);
+    let _logits = forward(
+        &mut target_ctx,
+        target_weights,
+        &mut target_cache,
+        token,
+        pos,
+        target_config,
+    );
+
+    // 4. Query anyrag with hidden state embedding
+    let retrieved = rest_client
+        .retrieve(&target_ctx.hidden_state, 5)
+        .await
+        .unwrap_or(RetrievalResult::default());
+
+    // 5. Merge retrieved branches into DDTree
+    merge_retrieved_branches(
+        &mut tree,
+        &marginals,
+        draft_config,
+        &retrieved.token_sequences,
+        &retrieved.scores,
+        rest_weight,
+    );
+
+    // 6. Extract best path
+    let path = extract_best_path(&tree);
+    if path.is_empty() {
+        return vec![sample_from_distribution(
+            marginals.first().map(|m| m.as_slice()).unwrap_or(&[1.0]),
+            rng,
+        )];
+    }
+
+    // 7. Simulated acceptance (same as SimulatedVerifier)
+    let acceptance_rate = 0.75;
+    let max_accept = ((path.len() as f32) * acceptance_rate).ceil() as usize;
+    let accepted: Vec<usize> = path.into_iter().take(max_accept.max(1)).collect();
+
+    if accepted.len() == max_accept && !marginals.is_empty() {
+        let last_marginal = marginals.last().unwrap();
+        let bonus = sample_from_distribution(last_marginal, rng);
+        let mut result = accepted;
+        result.push(bonus);
+        return result;
+    }
+
+    accepted
 }
 
 #[cfg(test)]

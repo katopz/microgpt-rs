@@ -6,6 +6,10 @@ edition = "2024"
 [dependencies]
 plotters = "0.3"
 rayon = "1.10"
+reqwest = { version = "0.12", features = ["json"], optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 ratatui = "0.29"
@@ -15,6 +19,7 @@ crossterm = "0.28"
 default = []
 leviathan = []
 sudoku = []
+rest = ["reqwest", "tokio", "serde", "serde_json"]
 
 [[example]]
 name = "sudoku_speculative"

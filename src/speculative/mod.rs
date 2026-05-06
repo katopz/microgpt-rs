@@ -9,7 +9,10 @@ pub mod verifier;
 pub mod sudoku_pruner;
 
 // Re-exports — preserves existing import paths like `speculative::build_dd_tree`
-pub use dd_tree::{build_dd_tree, build_dd_tree_pruned, extract_best_path, extract_parent_tokens};
+pub use dd_tree::{
+    build_dd_tree, build_dd_tree_pruned, extract_best_path, extract_parent_tokens,
+    merge_retrieved_branches,
+};
 pub use dflash::{dflash_predict, dflash_predict_ar, dflash_predict_parallel};
 pub use sampling::{sample_from_distribution, sample_residual_distribution};
 pub use step::{speculative_step, speculative_step_verifier};
@@ -21,3 +24,6 @@ pub use verifier::LeviathanVerifier;
 
 #[cfg(feature = "sudoku")]
 pub use sudoku_pruner::SudokuPruner;
+
+#[cfg(feature = "rest")]
+pub use step::speculative_step_rest;

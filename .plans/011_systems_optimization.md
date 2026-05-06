@@ -175,40 +175,40 @@ For a 4-layer model with `block_size=256`:
 ## Tasks
 
 ### Phase 1: GQA Config
-- [ ] 1.1 Add `n_kv_head: usize` to `Config`
-- [ ] 1.2 Add `n_kv_head` to all existing Config constructors (set = n_head for MHA)
-- [ ] 1.3 Add `Config::gqa_draft()` with `n_kv_head: 2`
-- [ ] 1.4 Add validation: `n_head % n_kv_head == 0`
-- [ ] 1.5 Run `cargo test` — all pass (n_kv_head = n_head = same behavior)
+- [x] 1.1 Add `n_kv_head: usize` to `Config`
+- [x] 1.2 Add `n_kv_head` to all existing Config constructors (set = n_head for MHA)
+- [x] 1.3 Add `Config::gqa_draft()` with `n_kv_head: 2`
+- [x] 1.4 Add validation: `n_head % n_kv_head == 0`
+- [x] 1.5 Run `cargo test` — all pass (n_kv_head = n_head = same behavior)
 
 ### Phase 2: GQA Forward Pass
-- [ ] 2.1 Add `kv_dim = n_kv_head * head_dim` to forward()
-- [ ] 2.2 Compute KV group: `kv_group = q_head * n_kv_head / n_head`
-- [ ] 2.3 Resize KV cache to `[block_size, kv_dim]` instead of `[block_size, n_embd]`
-- [ ] 2.4 Update `attention_head` → `attention_head_gqa` with kv_group parameter
-- [ ] 2.5 Add test: GQA produces valid (finite) logits
-- [ ] 2.6 Add test: `n_kv_head == n_head` produces identical results to old code
-- [ ] 2.7 Add benchmark: MHA vs GQA throughput
+- [x] 2.1 Add `kv_dim = n_kv_head * head_dim` to forward()
+- [x] 2.2 Compute KV group: `kv_group = q_head * n_kv_head / n_head`
+- [x] 2.3 Resize KV cache to `[block_size, kv_dim]` instead of `[block_size, n_embd]`
+- [x] 2.4 Update `attention_head` → `attention_head_gqa` with kv_group parameter
+- [x] 2.5 Add test: GQA produces valid (finite) logits
+- [x] 2.6 Add test: `n_kv_head == n_head` produces identical results to old code
+- [x] 2.7 Add benchmark: MHA vs GQA throughput
 
 ### Phase 3: Paged KV Cache
-- [ ] 3.1 Create `PagedKVCache` struct in `transformer.rs`
-- [ ] 3.2 Implement page allocation, fork, and free
-- [ ] 3.3 Add `forward_paged()` variant that uses `PagedKVCache`
-- [ ] 3.4 Add test: paged cache produces same results as flat cache for linear sequence
-- [ ] 3.5 Add test: fork + write doesn't corrupt parent sequence
-- [ ] 3.6 Add test: page reuse after free
+- [x] 3.1 Create `PagedKVCache` struct in `transformer.rs`
+- [x] 3.2 Implement page allocation, fork, and free
+- [x] 3.3 Add `forward_paged()` variant that uses `PagedKVCache`
+- [x] 3.4 Add test: paged cache produces same results as flat cache for linear sequence
+- [x] 3.5 Add test: fork + write doesn't corrupt parent sequence
+- [x] 3.6 Add test: page reuse after free
 
 ### Phase 4: DDTree Integration
-- [ ] 4.1 Create `PagedMultiLayerKVCache` (paged + multi-layer)
-- [ ] 4.2 Update DDTree branch exploration to use paged cache
-- [ ] 4.3 Benchmark: memory usage with `tree_budget=32` — flat clone vs paged
-- [ ] 4.4 Benchmark: DDTree build throughput — flat vs paged
+- [x] 4.1 Create `PagedMultiLayerKVCache` (paged + multi-layer)
+- [x] 4.2 Update DDTree branch exploration to use paged cache
+- [x] 4.3 Benchmark: memory usage with `tree_budget=32` — flat clone vs paged
+- [x] 4.4 Benchmark: DDTree build throughput — flat vs paged
 
 ### Phase 5: Validation
-- [ ] 5.1 Run `cargo test --all-features`
-- [ ] 5.2 Run `cargo clippy --all-features`
-- [ ] 5.3 Run `cargo run --release` — benchmark unchanged for micro config
-- [ ] 5.4 Add benchmark suite: MHA, GQA, flat cache, paged cache
+- [x] 5.1 Run `cargo test --all-features`
+- [x] 5.2 Run `cargo clippy --all-features`
+- [x] 5.3 Run `cargo run --release` — benchmark unchanged for micro config
+- [x] 5.4 Add benchmark suite: MHA, GQA, flat cache, paged cache
 
 ## Key Risks & Mitigations
 
