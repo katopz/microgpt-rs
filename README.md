@@ -86,6 +86,23 @@ Static-Only: 100 nodes,  84 accumulated-valid (84.0%)   ← misses cross-depth c
 Path-Aware:  100 nodes, 100 accumulated-valid (100.0%)   ← catches everything
 ```
 
+### SpeculativeVerifier (Strategy Pattern)
+
+Based on [Algorithm 1 from Leviathan et al. 2022](https://arxiv.org/pdf/2211.17192) — the verification strategy is swappable via trait:
+
+```rust
+pub trait SpeculativeVerifier: Send + Sync {
+    fn speculate(&mut self, draft_weights, draft_config, token, pos, rng) -> Vec<usize>;
+}
+```
+
+| Verifier | Feature Flag | What it does |
+|----------|-------------|--------------|
+| `SimulatedVerifier` | always available | DFlash/AR draft → DDTree → simulated acceptance cap → bonus token from last marginal |
+| `LeviathanVerifier` | `--features leviathan` | AR draft → target model p/q scoring → rejection sampling → residual distribution → bonus from target p(x) |
+
+`SimulatedVerifier` is fast (no target model). `LeviathanVerifier` is the full Algorithm 1 — mathematically proven distribution-preserving, but needs large model asymmetry to be faster than pure AR.
+
 ## 🧠 Computable LoRA: Neuro-Symbolic Intercept
 
 The core idea: LLMs draft tokens from semantic probability, but can't natively enforce hard constraints. A deterministic rules engine sits between draft and verification:
@@ -145,17 +162,20 @@ Run on Apple Silicon (single-threaded, `--release` profile, 50k iterations):
 **Models:** Target (embd=16, heads=4, mlp=64) · Draft (embd=4, heads=2, mlp=16)
 
 ```
-Method                    Throughput         μs/step  Avg Accept Len
-───────────────────────────────────────────────────────────────────────────
-Transformer AR             882,099 tok/s         1.13            1.00
-DFlash                    2,891,011 tok/s         2.77            8.00
-DDTree Build               383,372 trees/s       2.61            —
-Speculative Decoding       739,714 tok/s         5.41            4.00
-
-📈 Speedup: 0.84x (Speculative Decoding vs AR)
+Method                       Throughput         μs/step  Avg Accept Len
+───────────────────────────────────────────────────────────────────────────────
+Transformer AR                813,714 tok/s         1.23            1.00
+DFlash                       3,196,001 tok/s         2.50            8.00
+DDTree Build                   321,060 trees/s       3.11            —
+Speculative (Simulated)        876,517 tok/s         5.70            5.00
+Speculative (AR Draft)       1,250,138 tok/s         5.60            7.00
+Leviathan (Algorithm 1)  †    107,157 tok/s        11.00            1.18
+───────────────────────────────────────────────────────────────────────────────
+📈 Best speedup: 1.08x (Speculative vs AR)
+† Requires --features leviathan
 ```
 
-![Benchmark Chart](bench/007_bench_result.png)
+![Benchmark Chart](bench/011_bench_result.png)
 
 ### What each benchmark measures
 
@@ -164,32 +184,51 @@ Speculative Decoding       739,714 tok/s         5.41            4.00
 | **Transformer AR** | 1 target model forward pass | tok/s (1 token per step) |
 | **DFlash** | 8 draft model forward passes (block-parallel prediction) | draft tok/s (8 tokens per step) |
 | **DDTree Build** | Tree construction from DFlash marginals | trees/s |
-| **Speculative Decoding** | DFlash + DDTree + accept (~75% of draft tokens) | effective tok/s (4 tokens accepted per step) |
+| **Speculative (Simulated)** | DFlash + DDTree + simulated 75% acceptance + bonus token | effective tok/s |
+| **Speculative (AR Draft)** | Autoregressive draft + DDTree + simulated acceptance + bonus token | effective tok/s |
+| **Leviathan (Algorithm 1)** † | AR draft + real target model p/q verification + residual sampling | effective tok/s |
 
-> DFlash is the draft. "DFlash Draft" was a redundant label — DFlash IS the drafting mechanism.
+> † `Leviathan (Algorithm 1)` requires `--features leviathan`. It runs the full Algorithm 1 from [Leviathan et al. 2022](https://arxiv.org/pdf/2211.17192).
 
-### Per-Step Cost Breakdown
+### Speculative Decoding: Distilled from Leviathan et al. 2022
+
+Based on ["Fast Inference from Transformers via Speculative Decoding"](https://arxiv.org/pdf/2211.17192) (Leviathan et al., 2022, Algorithm 1):
 
 ```
-Transformer AR:    1.13μs × 1 forward pass  = 1.13μs/token
-
-Speculative:       0.35μs × 8 draft passes  = 2.77μs  (DFlash)
-                  + 2.61μs tree build        = 2.61μs  (DDTree)
-                  ─────────────────────────────────────
-                  = 5.38μs / 4 accepted tokens = 1.35μs/token
+Phase 1: DRAFT — Run small model M_q autoregressively for γ tokens.
+         Sample each token, feed back as input for next. Save q(x) distributions.
+Phase 2: TARGET SCORING — Run large model M_p on all drafted tokens (+1 for bonus).
+         Save p(x) distributions.
+Phase 3: REJECTION SAMPLING — Accept token i with prob min(1, p_i/q_i).
+         On reject: sample replacement from residual max(0, p−q), break.
+Phase 4: BONUS TOKEN — If all γ accepted, sample +1 token from p(x) at position γ (free).
 ```
 
-| Component | Time | vs Draft Forward (0.35μs) |
-|-----------|------|--------------------------|
-| 1 Draft forward | 0.35μs | 1× |
-| 8 Draft forwards (DFlash) | 2.77μs | 8× |
-| DDTree build | 2.61μs | 7.5× |
+**Key insight: Model size ratio matters.** The paper assumes ~10× target/draft cost ratio (e.g., 70B/7B). Our ratio is ~4× (embd=16/4), so real target verification is a net loss:
 
-### Why the speedup is marginal
+| Verifier | How it verifies | Target model? | Perf |
+|----------|----------------|---------------|------|
+| `SimulatedVerifier` | Accepts ceil(γ × rate) tokens + bonus from last marginal | ❌ No | 876K tok/s |
+| `SimulatedVerifier` (AR) | Same, but autoregressive drafting (conditional q(x\|x<t)) | ❌ No | 1.25M tok/s |
+| `LeviathanVerifier` † | Real p/q rejection + residual distribution + bonus from target p(x) | ✅ Yes | 107K tok/s |
 
-The draft model is **3.3× faster** per forward pass than the target (2.9M vs 882K tok/s). But the **DDTree build costs as much as ~7.5 draft forward passes** — tree overhead dominates because the model is tiny.
+The `SpeculativeVerifier` trait makes them swappable — same `speculate()` interface, different verification strategy. When LoRA fine-tuning improves draft/target alignment, real verification becomes viable.
 
-With real models (e.g., LLaMA-70B target / 7B draft), forward passes take milliseconds while tree construction stays in microseconds — tree becomes <0.1% overhead and speculative decoding wins decisively. The framework is ready for real models.
+> **`LeviathanVerifier` proves Algorithm 1 works end-to-end** — mathematically correct, distribution-preserving, but 8× slower than simulated at our 4× model ratio. This is the expected result: speculative decoding needs large model asymmetry to win.
+
+### Why Leviathan is slow here (and when it won't be)
+
+```
+Leviathan cost:  γ × draft_cost + (γ+1) × target_cost
+              =  8 × 0.31μs      + 9 × 1.23μs
+              =  2.5μs            + 11.1μs  = 13.6μs / 1.18 accepted = 11.5μs/token
+
+Simulated cost:  γ × draft_cost + tree_cost
+              =  8 × 0.31μs      + 3.1μs
+              =  2.5μs            + 3.1μs  = 5.6μs / 7 accepted = 0.8μs/token
+```
+
+With random weights the draft and target distributions are poorly aligned → low acceptance rate (1.18/8 = 15%). After LoRA fine-tuning, acceptance should approach 80%+ and Leviathan becomes competitive at larger model sizes.
 
 ### Transformer Proof of Correctness
 
@@ -302,7 +341,7 @@ The Percepta team demonstrated **full in-model computation** (33K tok/s, 7K line
 
 ### Prerequisites
 
-- Rust 1.85+ (edition 2024)
+- Rust 1.85+ (edition 2024, 1.93+ recommended)
 
 ### Build & Run
 
@@ -310,11 +349,15 @@ The Percepta team demonstrated **full in-model computation** (33K tok/s, 7K line
 # Build with optimizations
 cargo build --release
 
-# Run benchmark + generate plot
+# Run benchmark + generate plot (5 benchmarks: AR, DFlash, DDTree, Speculative, AR Draft)
 cargo run --release
 
-# Run all tests (157 tests: 77 unit + 80 integration)
-cargo test --quiet --workspace
+# Run with Leviathan Algorithm 1 verification (6 benchmarks, includes real p/q rejection)
+cargo run --release --features leviathan
+
+# Run all tests (173 tests with --all-features: 93 unit + 80 integration)
+# Without leviathan: 169 tests (89 unit + 80 integration)
+cargo test --quiet --workspace --all-features
 
 # Run Sudoku solver example (streaming "thinking" output)
 cargo run --example sudoku_9x9
@@ -323,7 +366,7 @@ cargo run --example sudoku_9x9
 cargo run --example sudoku_speculative
 
 # Lint
-cargo clippy --all-targets
+cargo clippy --all-targets --all-features
 ```
 
 ### Output
@@ -340,12 +383,15 @@ src/
   types.rs        Config (micro + draft), Rng, softmax, rmsnorm, matmul, sample_token
   transformer.rs  TransformerWeights, KVCache, ForwardContext, forward, generate
   speculative.rs  ConstraintPruner, SudokuPruner, NoPruner, TreeNode,
-                  extract_parent_tokens, build_dd_tree_pruned,
-                  dflash_predict, speculative_step
+                  SpeculativeVerifier (trait), SimulatedVerifier, LeviathanVerifier †,
+                  dflash_predict, dflash_predict_ar, build_dd_tree_pruned,
+                  sample_from_distribution, sample_residual_distribution,
+                  speculative_step, speculative_step_verifier
   percepta.rs     Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
                   Sudoku9x9, ComputableLora, StreamingSolver, SolveEvent
-  benchmark.rs    BenchResult, run_all (AR / DFlash / DDTree / Speculative Decoding)
+  benchmark.rs    BenchResult, run_all (AR / DFlash / DDTree / Speculative / AR Draft / Leviathan †)
   plot.rs         plot_results → PNG bar chart
+  † behind --features leviathan
 examples/
   sudoku_9x9.rs          Streaming solver with "thinking" output + hull compression stats
   sudoku_speculative.rs  3-column DDTree comparison: Unpruned / Static-Only / Path-Aware
@@ -353,13 +399,13 @@ tests/
   integration.rs  80 integration tests (adversarial + DFA + arithmetic + backtracking + geometry
                   + Sudoku9x9 + ComputableLora + StreamingSolver)
 bench/
-  001_bench_result.png
-  002_bench_result.png  ...
+  001_bench_result.png  ...  012_bench_result.png (auto-numbered)
 ```
 
 ## 📜 References
 
 - [microgpt-c](https://github.com/nicholasgasior/microgpt-c) by Vishal Baraiya
 - [talos-vs-macbook](https://github.com/alexcb123/talos-vs-macbook) by Alex Cheema
-- Speculative Decoding papers (Leviathan et al., Chen et al.)
+- [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/pdf/2211.17192) — Leviathan et al., 2022 (Algorithm 1: draft → target scoring → p/q rejection → residual sampling → bonus token)
+- SpecInfer — tree-based speculative verification (inspiration for DDTree)
 - [Percepta: Can LLMs Be Computers?](https://www.percepta.ai/blog/can-llms-be-computers) — 2D convex hull attention for in-model execution

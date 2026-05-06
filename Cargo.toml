@@ -6,3 +6,7 @@ edition = "2024"
 [dependencies]
 plotters = "0.3"
 rayon = "1.10"
+
+[features]
+default = []
+leviathan = []

@@ -128,6 +128,284 @@ impl ConstraintPruner for SudokuPruner {
     }
 }
 
+// ── Speculative Verifier: Strategy Pattern ──────────────────
+
+/// Strategy for verifying drafted tokens against a target distribution.
+///
+/// Same pattern as `ConstraintPruner` — trait-based swap point.
+/// - `SimulatedVerifier`: fast, no target model needed (default).
+/// - `LeviathanVerifier`: real p/q rejection sampling with target model
+///   (behind `leviathan` feature flag).
+pub trait SpeculativeVerifier: Send + Sync {
+    /// Run one speculative decoding step end-to-end.
+    /// Returns accepted tokens (always ≥ 1, up to γ + 1 with bonus).
+    fn speculate(
+        &mut self,
+        draft_weights: &TransformerWeights,
+        draft_config: &Config,
+        token: usize,
+        pos: usize,
+        rng: &mut Rng,
+    ) -> Vec<usize>;
+}
+
+/// Simulated verification: DDTree path + acceptance cap + bonus token.
+/// No target model needed — fast, used by default.
+pub struct SimulatedVerifier {
+    pub acceptance_rate: f32,
+}
+
+impl SimulatedVerifier {
+    pub fn new(acceptance_rate: f32) -> Self {
+        Self {
+            acceptance_rate: acceptance_rate.clamp(0.0, 1.0),
+        }
+    }
+}
+
+impl SpeculativeVerifier for SimulatedVerifier {
+    fn speculate(
+        &mut self,
+        draft_weights: &TransformerWeights,
+        draft_config: &Config,
+        token: usize,
+        pos: usize,
+        rng: &mut Rng,
+    ) -> Vec<usize> {
+        // 1. Sequential DFlash draft (avoids rayon overhead for tiny model)
+        let marginals = dflash_predict(draft_weights, draft_config, token, pos);
+
+        // 2. DDTree build
+        let tree = build_dd_tree(&marginals, draft_config);
+
+        // 3. Extract best path (highest-scored token at each depth)
+        let path = extract_best_path(&tree);
+
+        if path.is_empty() {
+            return vec![sample_from_distribution(
+                marginals.first().map(|m| m.as_slice()).unwrap_or(&[1.0]),
+                rng,
+            )];
+        }
+
+        // 4. Simulate acceptance: cap at rate
+        let max_accept = ((path.len() as f32) * self.acceptance_rate).ceil() as usize;
+        let accepted: Vec<usize> = path.into_iter().take(max_accept.max(1)).collect();
+
+        // 5. Bonus token: if all accepted, sample +1 from last marginal
+        if accepted.len() == max_accept && !marginals.is_empty() {
+            let last_marginal = marginals.last().unwrap();
+            let bonus = sample_from_distribution(last_marginal, rng);
+            let mut result = accepted;
+            result.push(bonus);
+            return result;
+        }
+
+        accepted
+    }
+}
+
+/// Extract best-scored token at each depth from a DDTree.
+fn extract_best_path(tree: &[TreeNode]) -> Vec<usize> {
+    if tree.is_empty() {
+        return Vec::new();
+    }
+    let max_depth = tree.iter().map(|n| n.depth).max().unwrap_or(0);
+    let mut path = Vec::with_capacity(max_depth + 1);
+    for depth in 0..=max_depth {
+        let best = tree
+            .iter()
+            .filter(|n| n.depth == depth)
+            .max_by_key(|n| (n.score * 1e6) as i64);
+        match best {
+            Some(node) => path.push(node.token_idx),
+            None => break,
+        }
+    }
+    path
+}
+
+/// CDF-based sampling from a probability distribution.
+pub(crate) fn sample_from_distribution(probs: &[f32], rng: &mut Rng) -> usize {
+    let r = rng.uniform();
+    let mut cdf = 0.0;
+    for (i, &p) in probs.iter().enumerate() {
+        cdf += p;
+        if r <= cdf {
+            return i;
+        }
+    }
+    probs.len().saturating_sub(1)
+}
+
+/// Residual distribution sampling (Equation 3 from Leviathan et al. 2022).
+///
+/// `p'(x) = normalize(max(0, p(x) - q(x)))`
+///
+/// Samples from tokens the target model likes *more* than the draft model.
+/// Falls back to `sample_from_distribution(p)` if distributions are identical.
+#[cfg_attr(not(feature = "leviathan"), allow(dead_code))]
+pub(crate) fn sample_residual_distribution(p: &[f32], q: &[f32], rng: &mut Rng) -> usize {
+    let mut residual: Vec<f32> = p
+        .iter()
+        .zip(q.iter())
+        .map(|(&p_val, &q_val)| (p_val - q_val).max(0.0))
+        .collect();
+
+    let sum: f32 = residual.iter().sum();
+
+    if sum > 0.0 {
+        let inv_sum = 1.0 / sum;
+        for val in &mut residual {
+            *val *= inv_sum;
+        }
+        sample_from_distribution(&residual, rng)
+    } else {
+        // Distributions identical — fallback to target distribution
+        sample_from_distribution(p, rng)
+    }
+}
+
+// ── LeviathanVerifier: Real p/q rejection sampling (Algorithm 1) ──
+
+#[cfg(feature = "leviathan")]
+pub struct LeviathanVerifier<'a> {
+    pub target_weights: &'a TransformerWeights,
+    pub target_config: &'a Config,
+    target_ctx: ForwardContext,
+    target_cache: KVCache,
+}
+
+#[cfg(feature = "leviathan")]
+impl<'a> LeviathanVerifier<'a> {
+    pub fn new(target_weights: &'a TransformerWeights, target_config: &'a Config) -> Self {
+        Self {
+            target_weights,
+            target_config,
+            target_ctx: ForwardContext::new(target_config),
+            target_cache: KVCache::new(target_config),
+        }
+    }
+}
+
+#[cfg(feature = "leviathan")]
+impl SpeculativeVerifier for LeviathanVerifier<'_> {
+    fn speculate(
+        &mut self,
+        draft_weights: &TransformerWeights,
+        draft_config: &Config,
+        token: usize,
+        pos: usize,
+        rng: &mut Rng,
+    ) -> Vec<usize> {
+        // Phase 1: Autoregressive draft (Algorithm 1, line 2–5)
+        let draft_result = dflash_predict_ar(draft_weights, draft_config, token, pos, rng);
+        let draft_tokens = &draft_result.sampled_tokens;
+        let q_dists = &draft_result.marginals;
+        let gamma = draft_tokens.len();
+
+        if gamma == 0 {
+            // No draft tokens — run target once, return 1 token
+            self.target_cache.reset();
+            let logits = forward(
+                &mut self.target_ctx,
+                self.target_weights,
+                &mut self.target_cache,
+                token,
+                pos,
+                self.target_config,
+            );
+            for logit in logits.iter_mut() {
+                *logit /= self.target_config.temperature;
+            }
+            softmax(logits);
+            return vec![sample_from_distribution(logits, rng)];
+        }
+
+        // Phase 2: Target scoring (Algorithm 1, line 7–8)
+        // Run target model on [last_token, draft_1, ..., draft_gamma]
+        // to get p(x) for positions 0..=gamma
+        self.target_cache.reset();
+        let mut p_distributions: Vec<Vec<f32>> = Vec::with_capacity(gamma + 1);
+
+        // Score the initial token → p(x) at position 0
+        let logits = forward(
+            &mut self.target_ctx,
+            self.target_weights,
+            &mut self.target_cache,
+            token,
+            pos,
+            self.target_config,
+        );
+        for logit in logits.iter_mut() {
+            *logit /= self.target_config.temperature;
+        }
+        softmax(logits);
+        p_distributions.push(logits.to_vec());
+
+        // Score each drafted token → p(x) at positions 1..=gamma
+        for (i, &draft_tok) in draft_tokens.iter().enumerate() {
+            let logits = forward(
+                &mut self.target_ctx,
+                self.target_weights,
+                &mut self.target_cache,
+                draft_tok,
+                pos + 1 + i,
+                self.target_config,
+            );
+            for logit in logits.iter_mut() {
+                *logit /= self.target_config.temperature;
+            }
+            softmax(logits);
+            p_distributions.push(logits.to_vec());
+        }
+
+        // Phase 3: Rejection sampling (Algorithm 1, line 10–16)
+        let mut accepted = Vec::with_capacity(gamma + 1);
+        let mut all_accepted = true;
+
+        for i in 0..gamma {
+            let p_dist = &p_distributions[i];
+            let q_dist = &q_dists[i];
+            let drafted_token = draft_tokens[i];
+
+            let p_i = p_dist[drafted_token];
+            let q_i = q_dist[drafted_token];
+
+            // Accept with prob min(1, p/q)
+            let acceptance_prob = if q_i > 0.0 {
+                (p_i / q_i).min(1.0)
+            } else {
+                1.0 // q=0 means draft didn't propose this; accept if target likes it
+            };
+            let r = rng.uniform();
+
+            if r <= acceptance_prob {
+                accepted.push(drafted_token);
+            } else {
+                // Reject: sample replacement from residual max(0, p - q)
+                let replacement = sample_residual_distribution(p_dist, q_dist, rng);
+                accepted.push(replacement);
+                all_accepted = false;
+                break;
+            }
+        }
+
+        // Phase 4: Bonus token (Algorithm 1, line 18–19)
+        if all_accepted && p_distributions.len() > gamma {
+            let bonus = sample_from_distribution(&p_distributions[gamma], rng);
+            accepted.push(bonus);
+        }
+
+        // Safety: always return at least 1 token
+        if accepted.is_empty() {
+            accepted.push(sample_from_distribution(&p_distributions[0], rng));
+        }
+
+        accepted
+    }
+}
+
 /// DDTree node for Best-First Search.
 #[derive(Copy, Clone, PartialEq)]
 pub struct TreeNode {
@@ -246,6 +524,62 @@ pub fn dflash_predict_parallel(
         .collect()
 }
 
+/// Result of autoregressive drafting: marginals + sampled tokens.
+pub struct DraftResult {
+    pub marginals: Vec<Vec<f32>>,
+    pub sampled_tokens: Vec<usize>,
+}
+
+/// Autoregressive DFlash: Predict marginals by sampling and feeding back tokens.
+///
+/// Unlike `dflash_predict` (which feeds the same token/pos to every step),
+/// this samples a token at each step and feeds it back as input for the next.
+/// Produces conditional q(x|x_{<i}) distributions instead of independent marginals.
+pub fn dflash_predict_ar(
+    draft_weights: &TransformerWeights,
+    draft_config: &Config,
+    token: usize,
+    pos: usize,
+    rng: &mut Rng,
+) -> DraftResult {
+    let mut ctx = ForwardContext::new(draft_config);
+    let mut cache = KVCache::new(draft_config);
+    let max_steps = draft_config
+        .draft_lookahead
+        .min(draft_config.block_size.saturating_sub(pos));
+
+    let mut marginals = Vec::with_capacity(max_steps);
+    let mut sampled_tokens = Vec::with_capacity(max_steps);
+    let mut cur_token = token;
+
+    for step in 0..max_steps {
+        let logits = forward(
+            &mut ctx,
+            draft_weights,
+            &mut cache,
+            cur_token,
+            pos + step,
+            draft_config,
+        );
+        let mut probs = logits.to_vec();
+        for p in probs.iter_mut() {
+            *p /= draft_config.temperature;
+        }
+        softmax(&mut probs);
+
+        // Sample next token and feed back
+        let next_token = sample_from_distribution(&probs, rng);
+        marginals.push(probs);
+        sampled_tokens.push(next_token);
+        cur_token = next_token;
+    }
+
+    DraftResult {
+        marginals,
+        sampled_tokens,
+    }
+}
+
 /// DDTree: Build verification tree from marginals using Best-First Search.
 /// Returns tree nodes ordered by score (best first).
 ///
@@ -314,42 +648,32 @@ pub fn build_dd_tree_pruned(
 
 /// One step of speculative decoding with draft model + parallel DFlash.
 /// Returns (accepted_token_ids, acceptance_length).
+/// Speculative decoding step with a custom verifier.
+/// Pass any `SpeculativeVerifier` to control how drafts are verified.
+pub fn speculative_step_verifier(
+    draft_weights: &TransformerWeights,
+    draft_config: &Config,
+    token: usize,
+    pos: usize,
+    rng: &mut Rng,
+    verifier: &mut dyn SpeculativeVerifier,
+) -> (Vec<usize>, usize) {
+    let accepted = verifier.speculate(draft_weights, draft_config, token, pos, rng);
+    let len = accepted.len();
+    (accepted, len)
+}
+
+/// Speculative decoding step with simulated verification (backward compat).
+/// Uses `SimulatedVerifier` with 75% acceptance rate + DDTree.
 pub fn speculative_step(
     draft_weights: &TransformerWeights,
     draft_config: &Config,
     token: usize,
     pos: usize,
-    _rng: &mut Rng,
+    rng: &mut Rng,
 ) -> (Vec<usize>, usize) {
-    // 1. Parallel DFlash draft using lightweight model
-    let marginals = dflash_predict_parallel(draft_weights, draft_config, token, pos);
-
-    // 2. DDTree build from marginals
-    let tree = build_dd_tree(&marginals, draft_config);
-
-    // 3. Extract best path from tree (highest-scored token at each depth)
-    let max_depth = tree.iter().map(|n| n.depth).max().unwrap_or(0);
-    let mut path = Vec::with_capacity(max_depth + 1);
-
-    for depth in 0..=max_depth {
-        let best_at_depth = tree
-            .iter()
-            .filter(|n| n.depth == depth)
-            .max_by_key(|n| (n.score * 1e6) as i64);
-
-        if let Some(node) = best_at_depth {
-            path.push(node.token_idx);
-        } else {
-            break;
-        }
-    }
-
-    // 4. Simulate verification: accept ~75% of draft tokens
-    let acceptance_rate = 0.75;
-    let max_accept = ((path.len() as f32) * acceptance_rate).ceil() as usize;
-    let accepted: Vec<usize> = path.into_iter().take(max_accept.max(1)).collect();
-
-    (accepted.clone(), accepted.len())
+    let mut verifier = SimulatedVerifier::new(0.75);
+    speculative_step_verifier(draft_weights, draft_config, token, pos, rng, &mut verifier)
 }
 
 #[cfg(test)]
@@ -952,5 +1276,316 @@ mod tests {
             aware_invalid, 0,
             "path-aware tree should have zero cross-depth conflicts"
         );
+    }
+
+    // ── SpeculativeVerifier + AR Drafting Tests ────────────────
+
+    #[test]
+    fn test_sample_from_distribution() {
+        let mut rng = Rng::new(42);
+        let probs = vec![0.1, 0.2, 0.5, 0.2];
+        for _ in 0..100 {
+            let t = sample_from_distribution(&probs, &mut rng);
+            assert!(t < 4, "token should be 0-3, got {t}");
+        }
+    }
+
+    #[test]
+    fn test_sample_from_distribution_degenerate() {
+        let mut rng = Rng::new(42);
+        let probs = vec![0.0, 0.0, 1.0, 0.0];
+        for _ in 0..50 {
+            let t = sample_from_distribution(&probs, &mut rng);
+            assert_eq!(t, 2, "should always sample token 2");
+        }
+    }
+
+    #[test]
+    fn test_residual_distribution_sums_to_one() {
+        let mut rng = Rng::new(42);
+        let p = vec![0.3, 0.5, 0.1, 0.1];
+        let q = vec![0.1, 0.6, 0.2, 0.1];
+        // residual = [0.2, 0.0, 0.0, 0.0] → normalized [1.0, 0.0, 0.0, 0.0]
+        for _ in 0..50 {
+            let token = sample_residual_distribution(&p, &q, &mut rng);
+            assert_eq!(token, 0, "residual should only pick token 0");
+        }
+    }
+
+    #[test]
+    fn test_residual_distribution_fallback_on_identical() {
+        let mut rng = Rng::new(42);
+        let p = vec![0.25, 0.25, 0.25, 0.25];
+        let q = vec![0.25, 0.25, 0.25, 0.25];
+        let token = sample_residual_distribution(&p, &q, &mut rng);
+        assert!(token < 4, "token should be valid, got {token}");
+    }
+
+    #[test]
+    fn test_residual_distribution_multiple_positive() {
+        let mut rng = Rng::new(42);
+        let p = vec![0.5, 0.1, 0.3, 0.1];
+        let q = vec![0.1, 0.5, 0.1, 0.3];
+        // residual = [0.4, 0.0, 0.2, 0.0] → normalized [0.667, 0.0, 0.333, 0.0]
+        let mut counts = [0usize; 4];
+        for _ in 0..1000 {
+            let token = sample_residual_distribution(&p, &q, &mut rng);
+            counts[token] += 1;
+        }
+        assert!(counts[0] > counts[2], "token 0 should be more frequent");
+        assert_eq!(counts[1], 0, "token 1 should never be picked");
+        assert_eq!(counts[3], 0, "token 3 should never be picked");
+    }
+
+    #[test]
+    fn test_simulated_verifier_returns_at_least_one() {
+        let (weights, config) = make_draft();
+        let mut verifier = SimulatedVerifier::new(0.75);
+        let mut rng = Rng::new(42);
+        let (accepted, len) =
+            speculative_step_verifier(&weights, &config, 0, 0, &mut rng, &mut verifier);
+        assert!(!accepted.is_empty(), "should return at least 1 token");
+        assert!(len >= 1);
+        for &t in &accepted {
+            assert!(t < config.vocab_size, "token {t} out of range");
+        }
+    }
+
+    #[test]
+    fn test_simulated_verifier_deterministic() {
+        let (weights, config) = make_draft();
+
+        let (a1, l1) = {
+            let mut verifier = SimulatedVerifier::new(0.75);
+            speculative_step_verifier(&weights, &config, 0, 0, &mut Rng::new(77), &mut verifier)
+        };
+        let (a2, l2) = {
+            let mut verifier = SimulatedVerifier::new(0.75);
+            speculative_step_verifier(&weights, &config, 0, 0, &mut Rng::new(77), &mut verifier)
+        };
+
+        assert_eq!(a1, a2, "same seed should produce same accepted tokens");
+        assert_eq!(l1, l2, "same seed should produce same acceptance length");
+    }
+
+    #[test]
+    fn test_simulated_verifier_bonus_token() {
+        let (weights, config) = make_draft();
+        let mut saw_bonus = false;
+        for seed in 0..200u64 {
+            let mut verifier = SimulatedVerifier::new(0.95);
+            let (accepted, _) = speculative_step_verifier(
+                &weights,
+                &config,
+                0,
+                0,
+                &mut Rng::new(seed),
+                &mut verifier,
+            );
+            if accepted.len() > 1 {
+                // Bonus token = more tokens than the capped acceptance alone
+                saw_bonus = true;
+                break;
+            }
+        }
+        assert!(
+            saw_bonus,
+            "should see bonus token at least once with high acceptance rate"
+        );
+    }
+
+    #[test]
+    fn test_dflash_ar_produces_marginals() {
+        let (weights, config) = make_draft();
+        let result = dflash_predict_ar(&weights, &config, 0, 0, &mut Rng::new(42));
+        assert!(!result.marginals.is_empty(), "should produce marginals");
+        assert!(
+            !result.sampled_tokens.is_empty(),
+            "should produce sampled tokens"
+        );
+        assert_eq!(result.marginals.len(), result.sampled_tokens.len());
+        for probs in &result.marginals {
+            assert_eq!(probs.len(), config.vocab_size);
+            let sum: f32 = probs.iter().sum();
+            assert!(
+                (sum - 1.0).abs() < 0.01,
+                "probs should sum to ~1.0, got {sum}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dflash_ar_is_autoregressive() {
+        let (weights, config) = make_draft();
+        // AR drafting feeds back sampled tokens, so different seeds → different tokens
+        let r1 = dflash_predict_ar(&weights, &config, 0, 0, &mut Rng::new(1));
+        let r2 = dflash_predict_ar(&weights, &config, 0, 0, &mut Rng::new(2));
+        // Very unlikely to be identical with different seeds
+        assert_ne!(
+            r1.sampled_tokens, r2.sampled_tokens,
+            "different seeds should produce different AR tokens"
+        );
+    }
+
+    #[test]
+    fn test_dflash_ar_deterministic() {
+        let (weights, config) = make_draft();
+        let r1 = dflash_predict_ar(&weights, &config, 0, 0, &mut Rng::new(42));
+        let r2 = dflash_predict_ar(&weights, &config, 0, 0, &mut Rng::new(42));
+        assert_eq!(
+            r1.sampled_tokens, r2.sampled_tokens,
+            "same seed should produce same tokens"
+        );
+        for (a, b) in r1.marginals.iter().zip(r2.marginals.iter()) {
+            for (pa, pb) in a.iter().zip(b.iter()) {
+                assert!((pa - pb).abs() < 1e-6, "marginals should be identical");
+            }
+        }
+    }
+
+    #[test]
+    fn test_extract_best_path() {
+        let (weights, config) = make_draft();
+        let marginals = dflash_predict(&weights, &config, 0, 0);
+        let tree = build_dd_tree(&marginals, &config);
+        let path = extract_best_path(&tree);
+        if !tree.is_empty() {
+            assert!(!path.is_empty(), "non-empty tree should produce a path");
+            for &t in &path {
+                assert!(t < config.vocab_size, "token {t} out of range");
+            }
+        }
+    }
+
+    // ── LeviathanVerifier Tests (feature-gated) ───────────────
+
+    #[cfg(feature = "leviathan")]
+    #[test]
+    fn test_leviathan_verifier_returns_at_least_one() {
+        let config = Config::micro();
+        let draft_config = Config::draft();
+        let mut rng = Rng::new(42);
+        let target_weights = TransformerWeights::new(&config, &mut rng);
+        let mut draft_rng = Rng::new(99);
+        let draft_weights = TransformerWeights::new(&draft_config, &mut draft_rng);
+
+        let mut verifier = LeviathanVerifier::new(&target_weights, &config);
+        let mut rng = Rng::new(100);
+        let accepted =
+            verifier.speculate(&draft_weights, &draft_config, config.bos_token, 0, &mut rng);
+
+        assert!(!accepted.is_empty(), "should return at least 1 token");
+        assert!(
+            accepted.len() <= draft_config.draft_lookahead + 1,
+            "should return at most gamma+1"
+        );
+        for &t in &accepted {
+            assert!(t < config.vocab_size, "token {t} out of range");
+        }
+    }
+
+    #[cfg(feature = "leviathan")]
+    #[test]
+    fn test_leviathan_verifier_deterministic() {
+        let config = Config::micro();
+        let draft_config = Config::draft();
+        let mut rng = Rng::new(42);
+        let target_weights = TransformerWeights::new(&config, &mut rng);
+        let mut draft_rng = Rng::new(99);
+        let draft_weights = TransformerWeights::new(&draft_config, &mut draft_rng);
+
+        let r1 = {
+            let mut verifier = LeviathanVerifier::new(&target_weights, &config);
+            verifier.speculate(
+                &draft_weights,
+                &draft_config,
+                config.bos_token,
+                0,
+                &mut Rng::new(100),
+            )
+        };
+        let r2 = {
+            let mut verifier = LeviathanVerifier::new(&target_weights, &config);
+            verifier.speculate(
+                &draft_weights,
+                &draft_config,
+                config.bos_token,
+                0,
+                &mut Rng::new(100),
+            )
+        };
+
+        assert_eq!(r1, r2, "same seed should produce same results");
+    }
+
+    #[cfg(feature = "leviathan")]
+    #[test]
+    fn test_leviathan_verifier_bonus_token() {
+        let config = Config::micro();
+        let draft_config = Config::draft();
+        let mut rng = Rng::new(42);
+        let target_weights = TransformerWeights::new(&config, &mut rng);
+        let mut draft_rng = Rng::new(99);
+        let draft_weights = TransformerWeights::new(&draft_config, &mut draft_rng);
+
+        let mut saw_bonus = false;
+        for seed in 0..200u64 {
+            let mut verifier = LeviathanVerifier::new(&target_weights, &config);
+            let accepted = verifier.speculate(
+                &draft_weights,
+                &draft_config,
+                config.bos_token,
+                0,
+                &mut Rng::new(seed),
+            );
+            // gamma=1 → max 2 tokens with bonus
+            if accepted.len() >= 2 {
+                saw_bonus = true;
+                break;
+            }
+        }
+        assert!(
+            saw_bonus,
+            "should see bonus token (gamma+1) at least once in 200 tries"
+        );
+    }
+
+    #[cfg(feature = "leviathan")]
+    #[test]
+    fn test_leviathan_verifier_acceptance_decreases_with_gamma() {
+        let config = Config::micro();
+        let draft_config = Config::draft();
+        let mut rng = Rng::new(42);
+        let target_weights = TransformerWeights::new(&config, &mut rng);
+        let mut draft_rng = Rng::new(99);
+        let draft_weights = TransformerWeights::new(&draft_config, &mut draft_rng);
+
+        let avg_for_gamma = |gamma: usize| -> f64 {
+            let mut total = 0usize;
+            let iters = 100;
+            // Temporarily override draft_lookahead via a modified config
+            let mut gc = Config::draft();
+            gc.draft_lookahead = gamma;
+            for seed in 0..iters as u64 {
+                let mut verifier = LeviathanVerifier::new(&target_weights, &config);
+                let accepted = verifier.speculate(
+                    &draft_weights,
+                    &gc,
+                    config.bos_token,
+                    0,
+                    &mut Rng::new(seed),
+                );
+                total += accepted.len();
+            }
+            total as f64 / iters as f64
+        };
+
+        let avg_1 = avg_for_gamma(1);
+        let avg_4 = avg_for_gamma(4);
+        let avg_8 = avg_for_gamma(8);
+
+        assert!(avg_1 >= 1.0, "gamma=1 should give >=1 token, got {avg_1}");
+        assert!(avg_4 >= 1.0, "gamma=4 should give >=1 token, got {avg_4}");
+        assert!(avg_8 >= 1.0, "gamma=8 should give >=1 token, got {avg_8}");
     }
 }
