@@ -4,6 +4,61 @@
 
 Build a complete neuro-symbolic inference system where `rustc`/`syn` acts as the deterministic referee inside the speculative decoding loop. This is NOT a 27-token character-level toy — we target a real BPE tokenizer trained on the entire Rust ecosystem, a `SynPruner` that validates drafted token sequences against the Rust AST, and a training data pipeline that ingests Rust docs + GitHub repos via `anyrag` to produce a `lora.bin` with an astronomically high zero-shot compilation rate.
 
+## Verdict Against Current Codebase (Critical Findings)
+
+Before implementation, I audited every file in `src/`. Here are the blockers the original plan missed:
+
+### Blocker 1: `parent_path` bitfield overflows with BPE vocab (SHOWSTOPPER)
+
+```mini-dllm/src/speculative/dd_tree.rs#L19-20
+    .map(|k| ((parent_path >> ((num_tokens - 1 - k) * 5)) & 0x1F) as usize)
+```
+
+The `parent_path` packs **5 bits per depth** (`<< 5`, `& 0x1F`). This means **max token index = 31**. A 32K BPE vocab would overflow immediately — token ID 32768 can't fit in 5 bits. Also, max depth = `64/5 = 12`, which is already tight for the current `draft_lookahead=8`.
+
+**Resolution**: Redesign `TreeNode.parent_path` encoding. See §Architecture → Path Encoding.
+
+### Blocker 2: `TransformerWeights` scales linearly with `vocab_size`
+
+```mini-dllm/src/transformer.rs#L25-35
+        Self {
+            wte: init(config.vocab_size * n),      // [vocab_size * n_embd]
+            lm_head: init(config.vocab_size * n),  // [vocab_size * n_embd]
+            ...
+        }
+```
+
+With `vocab_size=32768` and the current `n_embd=16`:
+- `wte`: 32768 × 16 = 524K floats = **2 MB** (fine)
+- `lm_head`: another **2 MB** (fine)
+- `ForwardContext.logits`: 32768 × 4 = 128 KB (fine)
+
+The plan must specify a concrete `Config::bpe()` that keeps weights in the low-MB range for the educational/perf profile of this project.
+
+**Resolution**: `Config::bpe()` uses `n_embd=32, vocab_size=4096, block_size=256`. See §Config.
+
+### Blocker 3: `syn` parse is not partial — DFA scope is underspecified
+
+`syn::parse_str::<Stmt>("let mu")` returns `Err`. The `PartialParser` DFA is the right idea, but "state machine for Rust syntax" is massively underspecified — Rust's grammar is one of the most complex of any programming language.
+
+**Resolution**: Start with a **bracket balancer** (balanced `{}`, `()`, `[]`, `<>`) + keyword acceptance table. NOT a full Rust parser. See §PartialParser.
+
+### Blocker 4: Plan creates 3 new top-level modules at once
+
+The project's pattern is incremental: one module per plan, behind feature flags (sudoku → plan 002/005/006, leviathan → plan 004). The original plan proposed `clora/`, `tokenizer/`, `data/` simultaneously.
+
+**Resolution**: Phase per module. Phase 1 = `tokenizer/` only. Phase 2 = `clora/` only. Phase 3 = `data/` = separate plan 009. Plan 008 is now wgpu LoRA training.
+
+### Non-Blocker: `ConstraintPruner::is_valid` doesn't carry tokenizer
+
+```mini-dllm/src/speculative/types.rs#L15-20
+pub trait ConstraintPruner: Send + Sync {
+    fn is_valid(&self, depth: usize, token_idx: usize, parent_tokens: &[usize]) -> bool;
+}
+```
+
+The `SynPruner` needs to decode tokens → string. Solution: `SynPruner` holds `Arc<BpeTokenizer>` internally. Trait signature unchanged. Clean.
+
 ## The Grand Vision (from Research)
 
 ```
@@ -17,9 +72,12 @@ Build a complete neuro-symbolic inference system where `rustc`/`syn` acts as the
 │                          ┌───────────▼───────────┐              │
 │                          │   SynPruner (cLoRA)    │              │
 │                          │   ┌─────────────────┐  │              │
-│                          │   │ syn AST parse    │  │              │
-│                          │   │ partial tokenize │  │              │
-│                          │   │ borrow-check DFA │  │              │
+│                          │   │ bracket balance  │  │  Tier 0 DFA │
+│                          │   │ keyword accept   │  │  ~100ns/tok │
+│                          │   └─────────────────┘  │              │
+│                          │   ┌─────────────────┐  │              │
+│                          │   │ syn full parse   │  │  Tier 1 AST │
+│                          │   │ (completed paths)│  │  ~1-10μs    │
 │                          │   └─────────────────┘  │              │
 │                          └───────────┬───────────┘              │
 │                                      │                           │
@@ -41,11 +99,11 @@ Build a complete neuro-symbolic inference system where `rustc`/`syn` acts as the
 │                    TRAINING (Offline Batch)                      │
 │                                                                  │
 │  Rust Docs ──┐                                                   │
-│  GitHub ────┼──► anyrag ingest ──► BPE tokenize ──► syn filter  │
+│  GitHub ────┼──► ingester ──► BPE tokenize ──► syn filter       │
 │  Crates.io ─┘       │                │                │         │
 │                     │                │                ▼         │
 │              concept sharding    vocab build    only valid AST   │
-│              embeddings store    merge + train   0 errors/warns  │
+│              via anyrag          merge + train   0 errors/warns  │
 │                     │                │                │         │
 │                     ▼                ▼                ▼         │
 │              Turso episodic    tokenizer.json    clean.jsonl     │
@@ -61,53 +119,131 @@ Build a complete neuro-symbolic inference system where `rustc`/`syn` acts as the
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## Why Not 27 Tokens
+## Architecture
 
-The current `Config::micro()` uses `vocab_size=27` (a-z + bos). This is fine for proving the DDTree/pruning architecture works. But for real Rust code generation, we need:
+### Path Encoding Redesign (Fixes Blocker 1)
 
-| Aspect | Current (27-token) | Target (BPE) |
-|--------|-------------------|--------------|
-| Vocabulary | a-z characters | ~32K BPE tokens from Rust corpus |
-| Token meaning | single letter | subword: `fn `, `mut `, `::`, `Result<`, `impl` |
-| Block size | 16 tokens | 256-1024 tokens |
-| What model sees | `"f" "n" " "` | `"fn "` (one token) |
-| SynPruner input | useless single char | meaningful subword sequences |
-| Training data | random chars | actual Rust source code |
+Current: `u64` bitfield, 5 bits per depth → max token 31, max depth 12.
 
-**The key insight**: BPE tokenization compresses common Rust patterns (`pub fn `, `let mut `, `impl `, `Result<`, `Option<`, `async fn `, `#[derive(`) into single tokens. This means the draft model proposes *syntactically meaningful chunks*, and `syn` can validate *partial sequences* at subword boundaries.
+New: `u128` bitfield, 16 bits per depth → max token 65535, max depth 8.
 
-## Architecture Overview
+```rust
+// speculative/types.rs — updated TreeNode
 
-### New Modules
+/// DDTree node for Best-First Search.
+///
+/// Path encoding: 16 bits per depth, packed LSB-first into u128.
+/// - Depth 0 token: bits 0–15
+/// - Depth 1 token: bits 16–31
+/// - Depth k token: bits (k*16) to (k*16+15)
+///
+/// Limits: max token index = 65535, max depth = 128/16 = 8.
+/// Sufficient for vocab ≤ 65K and draft_lookahead ≤ 8.
+#[derive(Copy, Clone, PartialEq)]
+pub struct TreeNode {
+    pub score: f32,
+    pub depth: usize,
+    pub token_idx: usize,
+    pub parent_path: u128,
+}
+
+// Updated extract:
+pub fn extract_parent_tokens(parent_path: u128, num_tokens: usize) -> Vec<usize> {
+    (0..num_tokens)
+        .map(|k| ((parent_path >> (k * 16)) & 0xFFFF) as usize)
+        .collect()
+}
+
+// Updated push:
+// parent_path: (best.parent_path << 16) | (i as u128)
+```
+
+**Breaking change**: All code using `parent_path: u64` must update to `u128`. This affects:
+- `types.rs`: `TreeNode.parent_path` type
+- `dd_tree.rs`: `build_dd_tree_pruned` shift/mask, `extract_parent_tokens`
+- `sudoku_pruner.rs`: no change (only reads via `extract_parent_tokens`)
+
+### Config (Fixes Blocker 2)
+
+```rust
+// types.rs — new Config constructor
+
+impl Config {
+    /// BPE model for Rust code generation.
+    /// vocab=4096 subword tokens, block=256, embd=32, heads=4, mlp=128.
+    /// Weight sizes: wte=512KB, lm_head=512KB — fits in L2 cache.
+    /// Targets CPU inference at ~1000+ tok/s for draft model.
+    pub fn bpe() -> Self {
+        Self {
+            vocab_size: 4096,
+            block_size: 256,
+            n_embd: 32,
+            n_head: 4,
+            head_dim: 8,
+            mlp_hidden: 128,
+            bos_token: 0,       // BOS = token 0 in BPE vocab
+            temperature: 0.8,
+            draft_lookahead: 5,
+            tree_budget: 32,
+        }
+    }
+
+    /// BPE draft model — 4× smaller than target.
+    pub fn bpe_draft() -> Self {
+        Self {
+            vocab_size: 4096,
+            block_size: 256,
+            n_embd: 8,
+            n_head: 2,
+            head_dim: 4,
+            mlp_hidden: 32,
+            bos_token: 0,
+            temperature: 0.8,
+            draft_lookahead: 5,
+            tree_budget: 32,
+        }
+    }
+}
+```
+
+**Memory estimates** for `Config::bpe()`:
+| Buffer | Size | Bytes |
+|--------|------|-------|
+| `wte` | 4096 × 32 | 512 KB |
+| `wpe` | 256 × 32 | 32 KB |
+| `attn_wq/k/v/o` | 4 × (32 × 32) | 16 KB each |
+| `mlp_w1` | 128 × 32 | 16 KB |
+| `mlp_w2` | 32 × 128 | 16 KB |
+| `lm_head` | 4096 × 32 | 512 KB |
+| **Total** | | **~1.1 MB** |
+
+Draft model (`Config::bpe_draft()`): **~130 KB** total. Both fit comfortably in L2 cache.
+
+### Module Layout (Fixes Blocker 4 — Incremental)
+
+Phase 1 (this plan) creates `tokenizer/` only:
 
 ```
 src/
-├── clora/                          # NEW: Compiler-in-the-Loop cLoRA
+├── tokenizer/                      # NEW (Phase 1)
 │   ├── mod.rs                      # Re-exports
-│   ├── types.rs                    # SynPruner, PruneResult, CompilerFeedback
-│   ├── syn_pruner.rs               # ConstraintPruner impl using syn
-│   ├── partial_parser.rs           # Incremental/partial AST validation
-│   ├── error_feedback.rs           # rustc error → steering context
-│   └── training_filter.rs          # cargo check gate for training data
-├── tokenizer/                      # NEW: BPE tokenizer for Rust
+│   ├── types.rs                    # BpeTokenizer, MergeRule, SpecialTokens
+│   └── bpe.rs                      # encode(), decode(), train()
+├── clora/                          # NEW (Phase 2 — same plan, later task)
 │   ├── mod.rs                      # Re-exports
-│   ├── types.rs                    # Tokenizer struct, Vocab, Merge
-│   ├── bpe.rs                      # BPE encode/decode algorithm
-│   ├── trainer.rs                  # Train BPE from Rust corpus
-│   └── rust_vocab.rs               # Pre-trained vocab + special tokens
-├── data/                           # NEW: Training data pipeline
-│   ├── mod.rs                      # Re-exports
-│   ├── types.rs                    # CorpusEntry, TrainingSample, QualityReport
-│   ├── ingester.rs                 # Walk Rust repos/docs, extract .rs files
-│   ├── filter.rs                   # cargo check + syn validation gate
-│   └── exporter.rs                 # JSONL export for LoRA fine-tuning
-├── speculative/                    # EXISTING (extended)
-│   ├── ...
-│   └── syn_pruner.rs              # NEW: implements ConstraintPruner via clora
-├── transformer.rs                  # EXISTING (extended for BPE vocab)
-├── types.rs                        # EXISTING (Config gains tokenizer fields)
-└── lib.rs                          # EXISTING (add mod clora, tokenizer, data)
+│   ├── types.rs                    # PruneResult, ErrorKind, CompilerFeedback
+│   ├── syn_pruner.rs               # ConstraintPruner impl — bracket balancer + syn
+│   └── partial_parser.rs           # DFA: bracket balance + keyword acceptance
+├── speculative/                    # EXISTING (modified)
+│   ├── types.rs                    # TreeNode.parent_path: u64 → u128
+│   ├── dd_tree.rs                  # shift 5 → 16, mask 0x1F → 0xFFFF
+│   └── ...
+├── transformer.rs                  # EXISTING (unchanged — already parameterized)
+├── types.rs                        # EXISTING (add Config::bpe(), Config::bpe_draft())
+└── lib.rs                          # EXISTING (add mod tokenizer, mod clora)
 ```
+
+Plan 009 creates `data/` for the training data pipeline. Plan 008 covers wgpu GPU-accelerated LoRA training.
 
 ### Dependency Additions (`Cargo.toml`)
 
@@ -115,839 +251,428 @@ src/
 [dependencies]
 plotters = "0.3"
 rayon = "1.10"
-syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
-proc-macro2 = "1"
-blake3 = "1"           # fast hashing for corpus dedup
+blake3 = "1"                       # fast hashing for corpus dedup + BPE cache
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"        # JSONL export
-walkdir = "2"           # recursive dir walking for corpus
-rayon = "1.10"          # parallel corpus processing (already present)
+serde_json = "1"
+
+[dev-dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+syn = { version = "2", features = ["full", "parsing"] }   # test-only for validation
+proc-macro2 = "1"
 
 [features]
 default = []
 leviathan = []
 sudoku = []
-clora = ["syn"]         # gate syn-dependent code
+clora = []                         # gates clora/ module (syn becomes required dep)
 ```
 
-## Phase 1: BPE Tokenizer for Rust
+**Note**: `syn` is only a required dependency when `clora` feature is enabled. For testing the tokenizer and training pipeline, we don't need `syn` at all.
 
-### 1.1 Tokenizer Core
+### PartialParser (Fixes Blocker 3 — Realistic Scope)
 
-Train a Byte-Pair Encoding tokenizer on a Rust corpus. The tokenizer:
+NOT a full Rust parser. A **bracket balancer + keyword acceptor**:
 
-- Starts from byte-level (256 base tokens)
-- Learns merges from Rust source code
-- Produces ~32K tokens optimized for Rust syntax
-- Includes special tokens: `<BOS>`, `<EOS>`, `<PAD>`, `<MASK>`
+```rust
+// clora/partial_parser.rs
+
+/// Incremental bracket balancer for Rust syntax.
+/// Fast enough for per-token DDTree validation (~50ns per call).
+///
+/// Tracks:
+/// - Balanced delimiters: { } ( ) [ ] < >
+/// - String literal state (inside "..." → accept anything)
+/// - Char literal state (inside '...' → accept anything)
+/// - Block comment state (inside /* ... */ → accept anything)
+/// - Line comment state (after // → accept anything until \n)
+///
+/// Does NOT track:
+/// - Whether keywords are in correct order (too complex for DFA)
+/// - Whether types are valid (requires semantic analysis)
+/// - Borrow checker rules (requires full rustc)
+///
+/// False positives: ALLOWED (target model + syn catch them later)
+/// False negatives: MINIMIZED (we don't want to prune valid code)
+pub struct PartialParser {
+    paren_depth: u32,
+    brace_depth: u32,
+    bracket_depth: u32,
+    angle_depth: u32,
+    in_string: bool,
+    in_char: bool,
+    in_block_comment: bool,
+    in_line_comment: bool,
+}
+
+impl PartialParser {
+    /// Check if appending `token_str` keeps the code plausibly valid.
+    /// Returns false only for CLEARLY invalid states:
+    /// - Negative bracket depth (more closes than opens)
+    /// - Unfinished string/char at end of chunk
+    pub fn is_plausible(&mut self, token_str: &str) -> bool {
+        for ch in token_str.chars() {
+            if self.in_line_comment {
+                if ch == '\n' { self.in_line_comment = false; }
+                continue;
+            }
+            if self.in_block_comment {
+                if ch == '*' && /* peek */ false { self.in_block_comment = false; }
+                continue;
+            }
+            if self.in_string {
+                if ch == '"' { self.in_string = false; }
+                continue;
+            }
+            if self.in_char {
+                if ch == '\'' { self.in_char = false; }
+                continue;
+            }
+            match ch {
+                '(' => self.paren_depth += 1,
+                ')' => { self.paren_depth = self.paren_depth.saturating_sub(1); }
+                '{' => self.brace_depth += 1,
+                '}' => { self.brace_depth = self.brace_depth.saturating_sub(1); }
+                '[' => self.bracket_depth += 1,
+                ']' => { self.bracket_depth = self.bracket_depth.saturating_sub(1); }
+                '<' => self.angle_depth += 1,
+                '>' => { self.angle_depth = self.angle_depth.saturating_sub(1); }
+                '"' => self.in_string = true,
+                '\'' => self.in_char = true,
+                '/' => { /* peek for // or /* */ }
+                _ => {}
+            }
+        }
+        // Only reject clearly broken state
+        self.paren_depth != u32::MAX
+            && self.brace_depth != u32::MAX
+            && self.bracket_depth != u32::MAX
+    }
+}
+```
+
+### SynPruner Implementation
+
+```rust
+// clora/syn_pruner.rs
+
+/// Compiler-in-the-Loop pruner — two-tier validation.
+///
+/// Tier 0 (per-token in DDTree): PartialParser bracket balance — ~50ns
+/// Tier 1 (per-path after DDTree): syn full parse — ~1-10μs
+///
+/// Implements the same ConstraintPruner trait as SudokuPruner.
+/// Plugs directly into build_dd_tree_pruned().
+pub struct SynPruner {
+    tokenizer: Arc<BpeTokenizer>,
+}
+
+impl SynPruner {
+    pub fn new(tokenizer: Arc<BpeTokenizer>) -> Self {
+        Self { tokenizer }
+    }
+
+    /// Full validation of a completed code string.
+    /// Called AFTER DDTree produces candidate paths, BEFORE target verification.
+    pub fn validate_path(&self, token_ids: &[usize]) -> PruneResult {
+        let code = self.tokenizer.decode(token_ids);
+        // Try parsing as various Rust AST nodes (most to least specific)
+        if syn::parse_str::<syn::File>(&code).is_ok() { return PruneResult::Valid; }
+        if syn::parse_str::<syn::Item>(&code).is_ok() { return PruneResult::Valid; }
+        if syn::parse_str::<syn::Stmt>(&code).is_ok() { return PruneResult::Valid; }
+        if syn::parse_str::<syn::Expr>(&code).is_ok() { return PruneResult::Valid; }
+        if syn::parse_str::<syn::Type>(&code).is_ok() { return PruneResult::Valid; }
+        PruneResult::Invalid { reason: "syn parse failed".into() }
+    }
+}
+
+impl ConstraintPruner for SynPruner {
+    fn is_valid(&self, _depth: usize, token_idx: usize, parent_tokens: &[usize]) -> bool {
+        // Tier 0: bracket balance check (fast, no allocation)
+        let mut parser = PartialParser::new();
+        for &tid in parent_tokens {
+            let s = self.tokenizer.decode_single(tid);
+            if !parser.is_plausible(&s) { return false; }
+        }
+        let s = self.tokenizer.decode_single(token_idx);
+        parser.is_plausible(&s)
+    }
+}
+```
+
+### Performance Strategy
+
+| Validation Tier | When | Method | Latency |
+|----------------|------|--------|---------|
+| **Tier 0: DFA** | Per-token in DDTree hot loop | PartialParser bracket balance | ~50ns |
+| **Tier 1: syn** | Per-path after DDTree build | `syn::parse_str` | ~1-10μs |
+| **Tier 2: cargo check** | Post-generation, offline | `cargo check` subprocess | ~100ms-1s |
+| **Tier 3: clippy** | Training data gate only | `cargo clippy` subprocess | ~200ms-2s |
+
+DDTree only uses Tier 0. Tier 1 runs on the top-K paths. Tiers 2-3 run offline only.
+
+## Phase 1: BPE Tokenizer
+
+### 1.1 Core Types
 
 ```rust
 // tokenizer/types.rs
+
+/// BPE tokenizer for Rust source code.
 pub struct BpeTokenizer {
-    /// Token → string mapping
-    pub vocab: Vec<String>,
-    /// String → token ID mapping
-    pub token_to_id: HashMap<String, usize>,
-    /// Ordered merge rules (pair → new token)
+    /// Token string → token ID
+    pub vocab_to_id: HashMap<String, usize>,
+    /// Token ID → token string
+    pub id_to_vocab: Vec<String>,
+    /// Ordered merge rules
     pub merges: Vec<MergeRule>,
     /// Special token IDs
     pub bos_id: usize,
     pub eos_id: usize,
     pub pad_id: usize,
-    pub mask_id: usize,
 }
 
+/// A single BPE merge rule: (left_id, right_id) → merged_id.
 pub struct MergeRule {
     pub left: usize,
     pub right: usize,
-    pub result: usize,
+    pub merged: usize,
 }
 ```
 
-### 1.2 Training the BPE
+### 1.2 BPE Algorithm
 
 ```rust
-// tokenizer/trainer.rs
-impl BpeTrainer {
+// tokenizer/bpe.rs
+impl BpeTokenizer {
+    /// Encode a string into BPE token IDs.
+    /// 1. Convert string to byte-level tokens
+    /// 2. Iteratively apply merge rules (most frequent first)
+    pub fn encode(&self, text: &str) -> Vec<usize> { /* ... */ }
+
+    /// Decode token IDs back to string.
+    pub fn decode(&self, ids: &[usize]) -> String { /* ... */ }
+
+    /// Decode a single token ID to its string representation.
+    pub fn decode_single(&self, id: usize) -> String {
+        self.id_to_vocab.get(id).cloned().unwrap_or_else(|| "<UNK>".into())
+    }
+}
+```
+
+### 1.3 BPE Training
+
+```rust
+// tokenizer/bpe.rs
+impl BpeTokenizer {
     /// Train BPE from a directory of .rs files.
+    ///
+    /// Algorithm:
     /// 1. Read all .rs files → byte sequences
-    /// 2. Count byte-pair frequencies
-    /// 3. Merge most frequent pair → new token
-    /// 4. Repeat until vocab_size reached
-    pub fn train(corpus_dir: &Path, vocab_size: usize, num_merges: usize) -> BpeTokenizer {
-        // ...
+    /// 2. Initialize vocab = 256 byte-level tokens
+    /// 3. Count all adjacent byte-pair frequencies
+    /// 4. Merge most frequent pair → new token, add to vocab
+    /// 5. Repeat until target vocab_size reached
+    ///
+    /// Special tokens: <BOS>=vocab_size-4, <EOS>=vocab_size-3,
+    ///                 <PAD>=vocab_size-2, <UNK>=vocab_size-1
+    pub fn train(corpus_dir: &Path, target_vocab_size: usize) -> Self { /* ... */ }
+}
+```
+
+### 1.4 Corpus Sources
+
+| Source | Estimated .rs files | Estimated lines |
+|--------|--------------------:|----------------:|
+| `rust-lang/rust` (compiler + std) | ~30K | ~15M |
+| Top 100 crates.io (tokio, serde, clap, etc.) | ~20K | ~10M |
+| Rust docs/examples (book, by example, nomicon) | ~5K | ~2M |
+| **Phase 1 total** | **~55K** | **~27M** |
+
+At 27M lines, BPE training takes ~30-60 minutes on a modern CPU. Output: ~4096 tokens.
+
+Common merges expected: `fn `, `pub `, `let `, `mut `, `impl `, ` ->`, `::`, `use `, `Result<`, `Option<`, `self::`, `Vec<`, `String`, `async `, `#[`, `fn(`, `return`, `match `, `struct `, `enum `, `trait `.
+
+## Phase 2: SynPruner (cLoRA Core)
+
+### 2.1 Module Structure
+
+```
+src/clora/
+├── mod.rs              # pub mod types; pub mod partial_parser; pub mod syn_pruner;
+├── types.rs            # PruneResult, ErrorKind, CompilerFeedback
+├── partial_parser.rs   # Bracket balancer DFA (~150 lines)
+└── syn_pruner.rs       # ConstraintPruner impl (~100 lines)
+```
+
+### 2.2 How It Connects to Existing Code
+
+```rust
+// Usage in speculative step:
+use crate::clora::syn_pruner::SynPruner;
+
+let tokenizer = Arc::new(BpeTokenizer::load("rust_bpe.json")?);
+let pruner = SynPruner::new(tokenizer);
+let tree = build_dd_tree_pruned(&marginals, &config, &pruner);
+
+// Validate top paths with syn (Tier 1)
+for path in extract_best_path(&tree) {
+    match pruner.validate_path(&path) {
+        PruneResult::Valid => { /* send to target model */ },
+        PruneResult::Invalid { reason } => { /* feed back error */ },
     }
 }
 ```
 
-**Corpus sources** (ranked by quality):
-1. `rust-lang/rust` — compiler + std library (canonical Rust)
-2. `tokio-rs/tokio` — async runtime patterns
-3. `serde-rs/serde` — derive macro patterns
-4. `hyperium/hyper` — HTTP/networking patterns
-5. `bevyengine/bevy` — ECS/game patterns
-6. All crates in `crates.io` top-1000 by downloads
-7. The Rust Reference (`rust-lang/reference`)
-8. Rust by Example (`rust-lang/rust-by-example`)
-9. The Rustonomicon (`rust-lang/nomicon`)
-
-### 1.3 Pre-trained Vocabulary
-
-Ship a pre-trained `rust_vocab.rs` so users don't need to run BPE training:
+### 2.3 Error Feedback (Self-Correction Loop)
 
 ```rust
-// tokenizer/rust_vocab.rs
-/// Pre-trained BPE vocabulary from ~50M lines of Rust source.
-/// 32,768 tokens covering Rust syntax patterns.
-pub const RUST_VOCAB: &[&str] = &[
-    // Byte-level (0-255)
-    "\0", "\x01", /* ... */, "\xff",
-    // Common Rust merges (256+)
-    " ", "  ", "\n", "fn ", "pub ", "let ", "mut ",
-    "impl ", "struct ", "enum ", "trait ", "type ",
-    "use ", "mod ", "crate", "self", "super",
-    "Result<", "Option<", "Vec<", "Box<", "Arc<",
-    "String", "&str", "bool", "usize", "i32", "u8",
-    "async ", "await", "fn(", " -> ", "impl<",
-    "#[derive(", "#[cfg(", "#[test]", "macro_rules!",
-    "::", "::std", "std::", "core::", "alloc::",
-    "unsafe ", "extern ", "where ", "for<",
-    // ... thousands more from BPE training
-];
-```
+// clora/types.rs
 
-### 1.4 Config Update
-
-```rust
-// types.rs — extended Config
-pub struct Config {
-    // ... existing fields ...
-    
-    // Tokenizer fields
-    pub vocab_size: usize,        // was 27, now 32768
-    pub tokenizer_vocab: Option<Vec<String>>,  // BPE vocab
-    
-    // cLoRA fields
-    pub syn_prune_enabled: bool,  // enable syn-based pruning
-    pub cargo_check_enabled: bool, // enable cargo check gate
-}
-```
-
-## Phase 2: SynPruner (cLoRA for DDTree)
-
-### 2.1 The Core Problem: Partial Validation
-
-The `ConstraintPruner` trait operates at token-level during DDTree construction:
-
-```rust
-pub trait ConstraintPruner: Send + Sync {
-    fn is_valid(&self, depth: usize, token_idx: usize, parent_tokens: &[usize]) -> bool;
-}
-```
-
-With BPE tokens, each token is a subword like `fn `, `mut `, `Result<`. We can:
-
-1. **Decode parent_tokens → string** using the BPE tokenizer
-2. **Append the candidate token** to get the partial code string
-3. **Validate incrementally** using a partial parser
-
-### 2.2 Partial Parsing Strategy
-
-`syn` requires complete syntax. For partial validation during DDTree:
-
-```rust
-// clora/partial_parser.rs
-
-/// Incremental Rust syntax validator.
-/// Maintains a state machine for partial Rust code.
-/// Much faster than full syn parse for per-token validation.
-pub struct PartialParser {
-    /// Accumulated code buffer (decoded from BPE tokens)
-    buffer: String,
-    /// Current parser state (what we expect next)
-    state: ParseState,
-    /// Brace/bracket/paren depth tracking
-    depth: DepthTracker,
-}
-
-#[derive(Clone, Debug)]
-pub enum ParseState {
-    /// Start of file — expect item or attribute
-    TopLevel,
-    /// After `fn` keyword — expect identifier or generics
-    FnSignature,
-    /// Inside function body — expect statement or expression
-    FnBody,
-    /// After `let` — expect pattern
-    LetBinding,
-    /// After `impl` — expect trait or type
-    ImplBlock,
-    /// Inside type annotation — expect type tokens
-    TypeAnnotation,
-    /// Inside expression — expect operands/operators
-    Expression,
-    /// Inside string literal — expect chars or closing quote
-    StringLiteral,
-    /// Inside block comment
-    BlockComment,
-    /// After `#` — expect attribute
-    Attribute,
-    /// Error state — cannot recover
-    Invalid,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct DepthTracker {
-    pub paren: u32,    // ( )
-    pub brace: u32,    // { }
-    pub bracket: u32,  // [ ]
-    pub angle: u32,    // < > (approximation — Rust's <> is context-dependent)
-}
-
-impl PartialParser {
-    /// Validate whether appending `token_str` to the current buffer is syntactically plausible.
-    /// Returns true if the resulting partial code could be valid Rust.
-    /// 
-    /// This is a FAST heuristic check — not a full AST parse.
-    /// False positives are allowed (target model catches them).
-    /// False negatives are minimized (we don't want to prune valid branches).
-    pub fn is_plausible(&self, token_str: &str) -> bool {
-        // ... state machine logic
-    }
-    
-    /// Full validation using syn — for completed paths only.
-    /// Called after DDTree produces candidate paths, before target verification.
-    pub fn full_validate(code: &str) -> Result<(), SynError> {
-        // Try parsing as various Rust AST nodes
-        if parse_str::<syn::File>(code).is_ok() { return Ok(()); }
-        if parse_str::<syn::Item>(code).is_ok() { return Ok(()); }
-        if parse_str::<syn::Stmt>(code).is_ok() { return Ok(()); }
-        if parse_str::<syn::Expr>(code).is_ok() { return Ok(()); }
-        parse_str::<syn::Type>(code).map(|_| ()).map_err(|e| e)
-    }
-}
-```
-
-### 2.3 SynPruner Implementation
-
-```rust
-// clora/syn_pruner.rs
-
-/// Compiler-in-the-Loop pruner using syn for Rust syntax validation.
-/// 
-/// Two-tier validation:
-/// 1. FAST (per-token): PartialParser state machine — microsecond-scale
-/// 2. SLOW (per-path): syn full parse — after DDTree produces candidate paths
-///
-/// This pruner goes into the DDTree hot loop via ConstraintPruner trait.
-pub struct SynPruner {
-    tokenizer: Arc<BpeTokenizer>,
-    /// Per-path parsers — cloned from template for each DDTree branch
-    parser_template: PartialParser,
-    /// Enable full syn validation on completed paths
-    full_validation: bool,
-}
-
-impl SynPruner {
-    /// Create a new SynPruner with the given tokenizer.
-    pub fn new(tokenizer: Arc<BpeTokenizer>) -> Self {
-        Self {
-            tokenizer,
-            parser_template: PartialParser::new(),
-            full_validation: true,
-        }
-    }
-    
-    /// Full validation of a completed code string.
-    /// Used after DDTree produces candidate paths.
-    pub fn validate_path(&self, token_ids: &[usize]) -> PruneResult {
-        let code = self.tokenizer.decode(token_ids);
-        match PartialParser::full_validate(&code) {
-            Ok(()) => PruneResult::Valid,
-            Err(e) => PruneResult::Invalid {
-                error: e.to_string(),
-                error_kind: classify_error(&e),
-            },
-        }
-    }
-}
-
-impl ConstraintPruner for SynPruner {
-    fn is_valid(&self, depth: usize, token_idx: usize, parent_tokens: &[usize]) -> bool {
-        // Decode parent tokens + candidate into string
-        let mut all_tokens = parent_tokens.to_vec();
-        all_tokens.push(token_idx);
-        let partial_code = self.tokenizer.decode(&all_tokens);
-        
-        // Fast partial validation — state machine check
-        let mut parser = self.parser_template.clone();
-        for token_id in &all_tokens {
-            let token_str = self.tokenizer.decode(&[*token_id]);
-            if !parser.is_plausible(&token_str) {
-                return false;
-            }
-        }
-        true
-    }
-}
-
-#[derive(Debug)]
-pub enum PruneResult {
-    Valid,
-    Invalid { error: String, error_kind: ErrorKind },
-}
-
-#[derive(Debug)]
-pub enum ErrorKind {
-    SyntaxError,
-    UnexpectedToken,
-    UnclosedDelimiter,
-    InvalidExpression,
-    Other,
-}
-
-fn classify_error(error: &syn::Error) -> ErrorKind {
-    let msg = error.to_string();
-    if msg.contains("unexpected token") { ErrorKind::UnexpectedToken }
-    else if msg.contains("expected") { ErrorKind::SyntaxError }
-    else if msg.contains("unclosed") { ErrorKind::UnclosedDelimiter }
-    else { ErrorKind::Other }
-}
-```
-
-### 2.4 Performance Strategy
-
-| Validation Tier | When | Method | Latency |
-|----------------|------|--------|---------|
-| **Tier 0: DFA** | Per-token in DDTree hot loop | PartialParser state machine | ~100ns |
-| **Tier 1: syn** | Per-path after DDTree build | `syn::parse_str` | ~1-10μs |
-| **Tier 2: cargo check** | Post-generation, batch | `cargo check` subprocess | ~100ms-1s |
-| **Tier 3: clippy** | Training data gate | `cargo clippy` subprocess | ~200ms-2s |
-
-The DDTree only uses Tier 0 (fast). Tier 1 runs on the top-K paths. Tier 2-3 run offline.
-
-## Phase 3: Training Data Pipeline
-
-### 3.1 Data Flow
-
-```
-┌──────────────────────────────────────────────────────────┐
-│                   DATA SOURCES                           │
-│                                                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐ │
-│  │ Rust Doc │  │ GitHub   │  │ Crates   │  │ Rust    │ │
-│  │ (std)    │  │ repos    │  │ .io top  │  │ Book    │ │
-│  │          │  │          │  │ 1000     │  │ Ref     │ │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬────┘ │
-│       │              │              │              │      │
-└───────┼──────────────┼──────────────┼──────────────┼──────┘
-        │              │              │              │
-        ▼              ▼              ▼              ▼
-┌──────────────────────────────────────────────────────────┐
-│              INGESTER (data/ingester.rs)                  │
-│                                                          │
-│  1. Walk directories, find .rs files                     │
-│  2. Read + normalize (strip comments, normalize ws)      │
-│  3. Deduplicate via blake3 hash                          │
-│  4. Split into training chunks (256-1024 tokens)         │
-│  5. BPE encode each chunk                                │
-│                                                          │
-│  Output: Vec<CorpusEntry>                                │
-│    { file_path, blake3_hash, bpe_tokens, raw_source }    │
-└──────────────────────┬───────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────┐
-│              FILTER (data/filter.rs)                      │
-│                                                          │
-│  Tier 1: syn validation                                  │
-│    parse_str::<File>(source) → must succeed              │
-│                                                          │
-│  Tier 2: cargo check (optional, slow)                    │
-│    Create temp crate, write source, cargo check          │
-│    Must pass with 0 errors, 0 warnings                   │
-│                                                          │
-│  Tier 3: Quality heuristics                              │
-│    - Min 10 lines, max 500 lines per chunk               │
-│    - Must contain at least 1 function definition         │
-│    - No TODO/FIXME/HACK comments                         │
-│    - No unsafe blocks (unless explicitly opted in)       │
-│    - blake3 dedup (skip identical chunks)                │
-│                                                          │
-│  Output: Vec<TrainingSample>                              │
-│    { bpe_tokens, source, quality_score, syn_valid }      │
-└──────────────────────┬───────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────┐
-│              EXPORTER (data/exporter.rs)                  │
-│                                                          │
-│  Format 1: JSONL for LoRA fine-tuning                    │
-│    {"input": "<BOS> pub fn hello() { ...",               │
-│     "output": "pub fn hello() -> String { ..."}          │
-│                                                          │
-│  Format 2: Binary for microgpt-rs direct training        │
-│    [token_ids: u32] packed                               │
-│                                                          │
-│  Format 3: anyrag/Turso ingestion payload                │
-│    POST /ingest/text with structured chunks               │
-│                                                          │
-│  Output: training.jsonl, tokens.bin, anyrag_payload.json │
-└──────────────────────────────────────────────────────────┘
-```
-
-### 3.2 CorpusEntry & TrainingSample Types
-
-```rust
-// data/types.rs
-
-/// A single entry from the Rust corpus (pre-filter).
-pub struct CorpusEntry {
-    /// Source file path (relative to corpus root)
-    pub file_path: String,
-    /// blake3 hash for deduplication
-    pub content_hash: [u8; 32],
-    /// Raw source text
-    pub source: String,
-    /// BPE-encoded token IDs
-    pub bpe_tokens: Vec<usize>,
-    /// Source repository/package
-    pub origin: String,
-    /// Line count
-    pub line_count: usize,
-}
-
-/// A training sample that passed quality filters.
-pub struct TrainingSample {
-    /// BPE token IDs (input sequence)
-    pub tokens: Vec<usize>,
-    /// Original source (for debugging)
-    pub source: String,
-    /// Quality score (0.0-1.0, based on complexity + idiomacy)
-    pub quality_score: f32,
-    /// Whether syn full-parse succeeded
-    pub syn_valid: bool,
-    /// Whether cargo check succeeded (if run)
-    pub cargo_check_valid: Option<bool>,
-    /// Classification for concept sharding
-    pub concepts: Vec<RustConcept>,
-}
-
-/// Concept tags for anyrag concept sharding.
-#[derive(Clone, Debug, PartialEq)]
-pub enum RustConcept {
-    AsyncAwait,
-    Traits,
-    Lifetimes,
-    ErrorHandling,
-    SmartPointers,
-    Concurrency,
-    Unsafe,
-    Macros,
-    FFi,
-    Generics,
-    Pattern,
-    Iterators,
-    Closures,
-    BuildSystem,
-    Testing,
-    Serialization,
-    Networking,
-    Collections,
-}
-
-/// Quality report from the filter pipeline.
-pub struct QualityReport {
-    pub total_entries: usize,
-    pub syn_valid: usize,
-    pub cargo_check_valid: usize,
-    pub deduplicated: usize,
-    pub final_samples: usize,
-    pub rejection_reasons: HashMap<String, usize>,
-}
-```
-
-### 3.3 Cargo Check Gate
-
-```rust
-// data/filter.rs
-
-impl TrainingFilter {
-    /// Run cargo check on a source snippet.
-    /// Creates a temporary crate, writes the source, runs cargo check.
-    /// Returns stdout/stderr for error feedback.
-    pub fn cargo_check(source: &str) -> CargoCheckResult {
-        let temp_dir = TempDir::new("clora_check").unwrap();
-        
-        // Write Cargo.toml
-        let cargo_toml = r#"
-[package]
-name = "check"
-version = "0.1.0"
-edition = "2024"
-"#;
-        fs::write(temp_dir.path().join("Cargo.toml"), cargo_toml)?;
-        
-        // Write source as src/lib.rs
-        fs::create_dir_all(temp_dir.path().join("src"))?;
-        fs::write(temp_dir.path().join("src/lib.rs"), source)?;
-        
-        // Run cargo check
-        let output = Command::new("cargo")
-            .args(["check", "--quiet", "--message-format=short"])
-            .current_dir(temp_dir.path())
-            .output()?;
-        
-        CargoCheckResult {
-            success: output.status.success(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        }
-    }
-}
-```
-
-### 3.4 Scale Estimates
-
-| Source | Estimated .rs files | Estimated lines | After dedup |
-|--------|--------------------:|----------------:|------------:|
-| `rust-lang/rust` | ~30K | ~15M | ~10M |
-| Top 1000 crates.io | ~200K | ~100M | ~60M |
-| GitHub Rust repos (top 10K) | ~2M | ~500M | ~200M |
-| Rust docs/examples | ~5K | ~2M | ~1.5M |
-| **Total** | **~2.2M** | **~617M** | **~271M** |
-
-At 256 tokens per training sample (avg ~100 lines), this yields:
-- **~2.7M training samples** from 271M lines
-- After filtering (estimated 70% pass rate): **~1.9M high-quality samples**
-- JSONL size: ~10-20 GB
-
-## Phase 4: Error Feedback Loop (Self-Correction)
-
-### 4.1 Compiler Errors as Steering Signals
-
-When `syn` or `cargo check` rejects a drafted path, the error message becomes context for the next draft iteration:
-
-```rust
-// clora/error_feedback.rs
-
-/// Converts compiler errors into steering context for the LLM.
-pub struct ErrorFeedback {
-    /// The error message from syn or cargo check
+/// Compiler error → steering context for next LLM draft.
+pub struct CompilerFeedback {
     pub error_message: String,
-    /// The code that caused the error
     pub failing_code: String,
-    /// The error kind (for classification)
-    pub error_kind: ErrorKind,
-    /// Suggested fix (if extractable from error message)
     pub suggestion: Option<String>,
 }
 
-impl ErrorFeedback {
-    /// Format as a context string to prepend to the next LLM prompt.
-    pub fn to_context(&self) -> String {
-        format!(
-            "/* COMPILER ERROR: {}\n   In code: {}\n   Suggestion: {} */\n",
-            self.error_message,
-            self.failing_code.lines().next().unwrap_or(""),
-            self.suggestion.as_deref().unwrap_or("review the error above")
-        )
-    }
-    
+impl CompilerFeedback {
     /// Extract suggestion from common rustc error patterns.
     pub fn extract_suggestion(error: &str) -> Option<String> {
-        // E0382: use of moved value → "consider cloning or using a reference"
         if error.contains("E0382") || error.contains("use of moved value") {
-            return Some("consider .clone() or using a reference (&T)".to_string());
+            return Some("consider .clone() or using a reference (&T)".into());
         }
-        // E0495: lifetime may not live long enough → "add explicit lifetime"
         if error.contains("E0495") || error.contains("lifetime") {
-            return Some("add explicit lifetime annotation".to_string());
+            return Some("add explicit lifetime annotation".into());
         }
-        // E0277: the trait bound is not satisfied → "implement the trait"
         if error.contains("E0277") || error.contains("trait bound") {
-            return Some("implement the required trait or add a where clause".to_string());
+            return Some("implement the required trait or add a where clause".into());
         }
         None
     }
-}
-```
 
-### 4.2 Feedback Integration with DDTree
-
-```rust
-// In speculative step — when all branches are pruned:
-
-if valid_branches.is_empty() {
-    // Take the best pruned branch's error and feed it back
-    let feedback = pruned_branches
-        .iter()
-        .max_by(|a, b| a.log_prob.partial_cmp(&b.log_prob).unwrap())
-        .and_then(|b| b.compiler_feedback.clone());
-    
-    if let Some(error) = feedback {
-        let steering = ErrorFeedback {
-            error_message: error,
-            failing_code: current_context.to_string(),
-            error_kind: ErrorKind::Other,
-            suggestion: ErrorFeedback::extract_suggestion(&error),
-        };
-        // Inject steering context into the next draft iteration
-        context.push_str(&steering.to_context());
+    /// Format as context to prepend to the next LLM prompt.
+    pub fn to_context(&self) -> String {
+        format!(
+            "/* COMPILER ERROR: {}\n   Suggestion: {} */\n",
+            self.error_message,
+            self.suggestion.as_deref().unwrap_or("review the error above")
+        )
     }
 }
 ```
 
-## Phase 5: anyrag Integration (Self-Improving Loop)
+## Phase 3: Training Data Pipeline (Separate Plan 009)
 
-### 5.1 The 32-Day Cycle (from Research)
+The training data pipeline (`src/data/`) is deferred to plan 009 because:
+1. It depends on `tokenizer/` and `clora/` being complete
+2. It introduces new dependencies (`walkdir`, `tempfile`)
+3. The pipeline is a batch tool, not a runtime component
 
-```
-Day 1-29: RAG Operation
-  ├── User submits Python → Rust translation request
-  ├── anyrag retrieves relevant examples from Turso
-  ├── microgpt-rs drafts code (DDTree + SynPruner)
-  ├── Target model verifies semantics
-  ├── cargo check validates final output
-  └── IF valid: INSERT hidden_state + code INTO Turso episodic
+Plan 008 (wgpu LoRA Training) covers GPU-accelerated forward + backward pass for `lora.bin` fine-tuning.
 
-Day 30: Synthesis
-  ├── anyrag batch analyzes episodic database
-  ├── Groups similar translation patterns
-  ├── Generates structured Q&A pairs
-  └── Exports to JSONL
-
-Day 31: LoRA Fine-Tuning
-  ├── Train LoRA adapter on accumulated JSONL
-  ├── Validate zero-shot compilation rate on held-out test set
-  └── Save as lora.bin
-
-Day 32: Base Upgrade
-  ├── Load new lora.bin into draft model
-  ├── Higher acceptance rate → faster inference
-  ├── Wipe episodic memory (patterns internalized)
-  └── Begin new cycle collecting edge cases
-```
-
-### 5.2 anyrag API Integration Points
-
-```rust
-// In the inference pipeline:
-
-/// After successful cargo check, save to anyrag for RAG.
-pub fn save_successful_compile(
-    anyrag_url: &str,
-    hidden_state: &[f32],
-    source_code: &str,
-    concepts: &[RustConcept],
-) -> Result<(), anyhow::Error> {
-    let client = reqwest::Client::new();
-    
-    // POST /ingest/text — save as episodic memory
-    client.post(format!("{anyrag_url}/ingest/text"))
-        .json(&serde_json::json!({
-            "text": source_code,
-            "owner_id": "clora-pipeline",
-            "metadata": {
-                "type": "validated_rust",
-                "concepts": concepts.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>(),
-                "hidden_state_dim": hidden_state.len(),
-            }
-        }))
-        .send()
-        .await?;
-    
-    Ok(())
-}
-
-/// Before drafting, query anyrag for similar patterns.
-pub fn retrieve_similar_patterns(
-    anyrag_url: &str,
-    hidden_state: &[f32],
-    top_k: usize,
-) -> Result<Vec<String>, anyhow::Error> {
-    let client = reqwest::Client::new();
-    
-    // POST /search/vector — retrieve similar compiled code
-    let response = client.post(format!("{anyrag_url}/search/vector"))
-        .json(&serde_json::json!({
-            "query_vector": hidden_state,
-            "top_k": top_k,
-            "filter": {"type": "validated_rust"}
-        }))
-        .send()
-        .await?;
-    
-    // Extract source code from results
-    let results: Vec<String> = response.json().await?;
-    Ok(results)
-}
-```
-
-### 5.3 Concept Sharding for Rust
-
-Map Rust concepts to anyrag's concept shards for sub-millisecond retrieval:
-
-| Shard | Rust Concepts | Example Patterns |
-|-------|--------------|-----------------|
-| `async` | AsyncAwait, Concurrency | `async fn`, `.await`, `tokio::spawn` |
-| `types` | Traits, Lifetimes, Generics | `impl Trait`, `where T:`, `<'a>` |
-| `memory` | SmartPointers, Unsafe | `Arc<Mutex<>>`, `Box::new`, `unsafe` |
-| `errors` | ErrorHandling | `Result<T,E>`, `?`, `anyhow` |
-| `meta` | Macros, BuildSystem | `macro_rules!`, `#[derive(`, `build.rs` |
-| `data` | Collections, Iterators | `Vec::new`, `.map()`, `.collect()` |
-| `ffi` | FFi, Serialization | `extern "C"`, `#[no_mangle]`, `serde` |
-
-## Phase 6: Benchmarking Strategy
-
-### 6.1 Benchmarks Before/After
-
-| Benchmark | What It Measures | Baseline (no cLoRA) | Target (with cLoRA) |
-|-----------|-----------------|--------------------|--------------------|
-| `bench_ddtree_build` | DDTree construction speed | Current speed | ≤5% slower (pruner overhead) |
-| `bench_syn_prune` | SynPruner per-token speed | N/A | <1μs/token |
-| `bench_full_validate` | syn full-parse per-path | N/A | <10μs/path |
-| `bench_inference` | End-to-end tok/s | X tok/s | ≥0.9X tok/s (pruning saves target verify) |
-| `bench_compilation_rate` | % outputs passing cargo check | ~60-70% (LLM baseline) | **>95%** (cLoRA goal) |
-| `bench_acceptance_rate` | Draft acceptance rate | ~75% | **>85%** (after LoRA) |
-
-### 6.2 Quality Metrics
-
-```
-Zero-Shot Compilation Rate:
-  ┌──────────────────────────────────────────────────┐
-  │ Without cLoRA:  ~60-70% of LLM outputs compile   │
-  │ With SynPruner: ~80-85% (syntax-only filter)     │
-  │ With cargo check: ~95%+ (full validation)        │
-  │ After LoRA:     ~98%+ (internalized patterns)    │
-  └──────────────────────────────────────────────────┘
-```
+Plan 009 will cover:
+- `data/ingester.rs` — walk dirs, read .rs, blake3 dedup
+- `data/filter.rs` — syn validation + cargo check gate
+- `data/exporter.rs` — JSONL output for LoRA fine-tuning
+- anyrag integration via `/ingest/text` and `/search/vector`
 
 ## Tasks
 
+### Phase 0: Path Encoding Fix (Prerequisite)
+
+- [ ] 0.1 Change `TreeNode.parent_path` from `u64` to `u128` in `speculative/types.rs`
+- [ ] 0.2 Update `extract_parent_tokens` to use 16-bit shifts (`<< 16`, `& 0xFFFF`)
+- [ ] 0.3 Update `build_dd_tree_pruned` shift from `<< 5` to `<< 16`
+- [ ] 0.4 Update all tests in `dd_tree.rs` for new encoding
+- [ ] 0.5 Run `cargo test --all-features` — all 176 tests pass
+- [ ] 0.6 Run `cargo clippy --all-features` — zero warnings
+- [ ] 0.7 Run `cargo run --release` — benchmark unchanged (perf check)
+- [ ] 0.8 Commit with message `refactor: TreeNode path encoding 5-bit→16-bit for BPE vocab support`
+
 ### Phase 1: BPE Tokenizer
 
-- [ ] 1.1 Create `src/tokenizer/` module with `mod.rs`, `types.rs`, `bpe.rs`, `trainer.rs`, `rust_vocab.rs`
-- [ ] 1.2 Implement `BpeTokenizer` struct with encode/decode
-- [ ] 1.3 Implement `BpeTrainer` that trains from a directory of .rs files
-- [ ] 1.4 Create `src/data/ingester.rs` that walks directories and extracts .rs files
-- [ ] 1.5 Run BPE training on initial corpus (rust-lang/rust + top 100 crates)
-- [ ] 1.6 Generate `rust_vocab.rs` with pre-trained vocabulary
-- [ ] 1.7 Update `Config` with tokenizer fields and new defaults
-- [ ] 1.8 Add tests: encode/decode roundtrip, vocab coverage, special tokens
-- [ ] 1.9 Benchmark: BPE encode/decode throughput
+- [ ] 1.1 Add `blake3`, `serde`, `serde_json` to `Cargo.toml` dependencies
+- [ ] 1.2 Create `src/tokenizer/mod.rs` with re-exports
+- [ ] 1.3 Create `src/tokenizer/types.rs` with `BpeTokenizer`, `MergeRule`
+- [ ] 1.4 Create `src/tokenizer/bpe.rs` with `encode()`, `decode()`, `decode_single()`, `train()`
+- [ ] 1.5 Add `Config::bpe()` and `Config::bpe_draft()` to `src/types.rs`
+- [ ] 1.6 Add `pub mod tokenizer;` to `src/lib.rs`
+- [ ] 1.7 Add tests: encode/decode roundtrip, special tokens, vocab coverage
+- [ ] 1.8 Add benchmark: BPE encode/decode throughput (in `src/benchmark.rs`)
+- [ ] 1.9 Run `cargo clippy --all-features`, `cargo test --all-features`
+- [ ] 1.10 Commit with message `feat: BPE tokenizer for Rust source code`
 
 ### Phase 2: SynPruner (cLoRA Core)
 
-- [ ] 2.1 Create `src/clora/` module with `mod.rs`, `types.rs`, `syn_pruner.rs`, `partial_parser.rs`
-- [ ] 2.2 Implement `PartialParser` state machine for Rust syntax
-- [ ] 2.3 Implement `SynPruner` that implements `ConstraintPruner` trait
-- [ ] 2.4 Add `syn` and `proc-macro2` dependencies behind `clora` feature flag
-- [ ] 2.5 Implement `PruneResult` and `ErrorKind` classification
-- [ ] 2.6 Integrate SynPruner into DDTree via `build_dd_tree_pruned`
-- [ ] 2.7 Implement `error_feedback.rs` — extract suggestions from rustc errors
-- [ ] 2.8 Add tests: partial parser accepts valid fragments, rejects invalid
+- [ ] 2.1 Add `syn` and `proc-macro2` to `Cargo.toml` under `[dependencies]` with `optional = true`
+- [ ] 2.2 Add `clora = ["syn", "proc-macro2"]` to `[features]`
+- [ ] 2.3 Create `src/clora/mod.rs` with re-exports (behind `#[cfg(feature = "clora")]`)
+- [ ] 2.4 Create `src/clora/types.rs` with `PruneResult`, `ErrorKind`, `CompilerFeedback`
+- [ ] 2.5 Create `src/clora/partial_parser.rs` with bracket balancer DFA
+- [ ] 2.6 Create `src/clora/syn_pruner.rs` with `SynPruner` implementing `ConstraintPruner`
+- [ ] 2.7 Add `pub mod clora;` to `src/lib.rs` (behind `#[cfg(feature = "clora")]`)
+- [ ] 2.8 Add tests: partial parser accepts valid fragments, rejects unbalanced
 - [ ] 2.9 Add tests: SynPruner prunes invalid Rust, accepts valid Rust
-- [ ] 2.10 Benchmark: SynPruner overhead vs NoPruner on DDTree build
+- [ ] 2.10 Add benchmark: SynPruner overhead vs NoPruner on DDTree build
+- [ ] 2.11 Run `cargo test --features clora`, `cargo clippy --features clora`
+- [ ] 2.12 Commit with message `feat: SynPruner cLoRA — bracket balance + syn validation`
 
-### Phase 3: Training Data Pipeline
+### Phase 3: Integration & Validation
 
-- [ ] 3.1 Create `src/data/` module with `mod.rs`, `types.rs`, `ingester.rs`, `filter.rs`, `exporter.rs`
-- [ ] 3.2 Implement `CorpusIngester` — walk dirs, read .rs, hash with blake3, dedup
-- [ ] 3.3 Implement `TrainingFilter` — syn validation, quality heuristics
-- [ ] 3.4 Implement `cargo_check` gate (temp crate creation + subprocess)
-- [ ] 3.5 Implement `ConceptClassifier` — tag samples with RustConcept
-- [ ] 3.6 Implement `TrainingExporter` — JSONL output, binary token output
-- [ ] 3.7 Add `walker` and `blake3` dependencies
-- [ ] 3.8 Add `serde` + `serde_json` dependencies for JSONL
-- [ ] 3.9 Add tests: corpus ingestion, dedup, filter, export
-- [ ] 3.10 Add CLI command: `cargo run --bin clora-ingest -- /path/to/corpus`
-
-### Phase 4: Error Feedback Loop
-
-- [ ] 4.1 Implement `ErrorFeedback` struct with `to_context()` and `extract_suggestion()`
-- [ ] 4.2 Add feedback injection into speculative step (when all branches pruned)
-- [ ] 4.3 Add feedback context to DDTree re-draft cycle
-- [ ] 4.4 Add tests: error classification, suggestion extraction
-- [ ] 4.5 Benchmark: acceptance rate improvement with feedback loop
-
-### Phase 5: anyrag Integration
-
-- [ ] 5.1 Add `reqwest` dependency (behind `anyrag` feature flag)
-- [ ] 5.2 Implement `save_successful_compile()` — POST to anyrag /ingest/text
-- [ ] 5.3 Implement `retrieve_similar_patterns()` — POST to anyrag /search/vector
-- [ ] 5.4 Implement concept shard mapping (RustConcept → anyrag metadata)
-- [ ] 5.5 Implement `/knowledge/export` JSONL → LoRA training data conversion
-- [ ] 5.6 Add integration tests with mock anyrag server
-- [ ] 5.7 Document anyrag setup for cLoRA pipeline
-
-### Phase 6: Benchmarking & Validation
-
-- [ ] 6.1 Add `bench_syn_prune` to benchmark suite
-- [ ] 6.2 Add `bench_full_validate` to benchmark suite
-- [ ] 6.3 Add `bench_compilation_rate` — generate N samples, cargo check each
-- [ ] 6.4 Run baseline benchmarks (no cLoRA) → `bench/015_bench_baseline.png`
-- [ ] 6.5 Run cLoRA benchmarks (with SynPruner) → `bench/016_bench_clora.png`
-- [ ] 6.6 Measure compilation rate improvement
-- [ ] 6.7 Run on larger model (BPE vocab, bigger draft) → `bench/017_bench_bpe.png`
+- [ ] 3.1 Create example: `examples/clora_demo.rs` (behind `clora` feature)
+- [ ] 3.2 Demo shows: BPE encode → draft → SynPruner → syn validate → output
+- [ ] 3.3 Run baseline benchmark (no cLoRA) → `bench/015_bench_baseline.png`
+- [ ] 3.4 Run cLoRA benchmark (with SynPruner) → `bench/016_bench_clora.png`
+- [ ] 3.5 Measure DDTree build time overhead: target ≤5%
+- [ ] 3.6 Commit with message `feat: cLoRA demo + benchmark`
 
 ## Feature Flags
 
 ```toml
 [features]
 default = []
-leviathan = []           # Real p/q verification with target model
-sudoku = []              # Sudoku constraint pruner
-clora = ["syn"]          # Compiler-in-the-loop pruning
-training = ["serde", "serde_json", "walkdir"]  # Training data pipeline
-anyrag-integration = ["reqwest"]  # anyrag REST API client
-full = ["leviathan", "sudoku", "clora", "training"]
+leviathan = []
+sudoku = []
+clora = ["syn", "proc-macro2"]
 ```
 
 ## Key Risks & Mitigations
 
-| Risk | Impact | Mitigation |
-|------|--------|-----------|
-| `syn` too slow for per-token pruning | DDTree build time 10x | PartialParser DFA for hot loop, syn only for paths |
-| BPE vocab doesn't align with syn tokens | Pruner rejects valid code | Test with partial sequences; allow false positives |
-| Training corpus too noisy | Low-quality lora.bin | Multi-tier filtering: syn → cargo check → clippy |
-| Memory overhead of large vocab | OOM on small devices | Configurable vocab size; 4K/8K/16K/32K options |
-| Partial parser false negatives | Valid branches pruned | Tune DFA to be permissive; only prune obvious errors |
-| cargo check latency | Training pipeline too slow | Parallel temp crate checking with rayon |
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|-----------|-----------|
+| `u128` slower than `u64` for path encoding | DDTree build 5-10% slower | Low | Benchmark; u128 is single register on x86-64 |
+| BPE vocab 4096 too small for Rust | Uncommon tokens split into bytes | Medium | Configurable: test with 8192, 16384 |
+| PartialParser false negatives | Valid branches pruned | Medium | Tune to be permissive; only reject clearly broken |
+| `syn` compile time adds ~10s | Slower dev cycle | High | Behind feature flag; not required for tokenizer work |
+| Bracket balancer too simple | Most invalid code passes Tier 0 | Expected | That's fine — Tier 1 syn catches it, Tier 2 cargo check catches the rest |
 
 ## Expected Outcomes
 
-1. **SynPruner**: A `ConstraintPruner` implementation that uses incremental Rust syntax validation to prune invalid DDTree branches before target verification
-2. **BPE Tokenizer**: A ~32K token vocabulary trained on the Rust ecosystem, enabling meaningful code generation
-3. **Training Pipeline**: A data pipeline that ingests Rust docs + GitHub repos → filters through syn + cargo check → exports clean JSONL
-4. **Error Feedback Loop**: Self-correction mechanism that feeds compiler errors back into the drafting context
-5. **anyrag Integration**: Episodic memory of successful compiles → concept-sharded retrieval → LoRA fine-tuning cycle
-6. **Quality Metrics**: >95% zero-shot compilation rate (up from ~60-70% without cLoRA)
+1. **BPE Tokenizer**: ~4096 token vocabulary trained on Rust corpus, enabling meaningful code generation
+2. **Path Encoding**: `u128` with 16-bit slots supporting vocabs up to 65K (future-proof)
+3. **SynPruner**: `ConstraintPruner` implementation with two-tier validation (DFA + syn)
+4. **Config**: `Config::bpe()` / `Config::bpe_draft()` for BPE-based models
+5. **Quality**: Foundation for >95% zero-shot compilation rate after LoRA training (plan 008 wgpu + plan 009 data pipeline)
 
 ## Files to Create/Modify
 
-| File | Action | Phase |
-|------|--------|-------|
-| `Cargo.toml` | Add deps + feature flags | 1-5 |
-| `src/tokenizer/mod.rs` | New | 1 |
-| `src/tokenizer/types.rs` | New | 1 |
-| `src/tokenizer/bpe.rs` | New | 1 |
-| `src/tokenizer/trainer.rs` | New | 1 |
-| `src/tokenizer/rust_vocab.rs` | New (generated) | 1 |
-| `src/clora/mod.rs` | New | 2 |
-| `src/clora/types.rs` | New | 2 |
-| `src/clora/syn_pruner.rs` | New | 2 |
-| `src/clora/partial_parser.rs` | New | 2 |
-| `src/clora/error_feedback.rs` | New | 4 |
-| `src/clora/training_filter.rs` | New | 3 |
-| `src/data/mod.rs` | New | 3 |
-| `src/data/types.rs` | New | 3 |
-| `src/data/ingester.rs` | New | 3 |
-| `src/data/filter.rs` | New | 3 |
-| `src/data/exporter.rs` | New | 3 |
-| `src/types.rs` | Extend Config | 1 |
-| `src/lib.rs` | Add mod clora, tokenizer, data | 1-3 |
-| `src/speculative/mod.rs` | Add syn_pruner re-export | 2 |
-| `src/benchmark.rs` | Add clora benchmarks | 6 |
+| File | Action | Phase | Breaking? |
+|------|--------|-------|-----------|
+| `src/speculative/types.rs` | `u64` → `u128` in TreeNode | 0 | **Yes** — all tests update |
+| `src/speculative/dd_tree.rs` | shift/mask update | 0 | No (internal) |
+| `Cargo.toml` | Add deps + features | 1-2 | No |
+| `src/tokenizer/mod.rs` | New | 1 | No |
+| `src/tokenizer/types.rs` | New | 1 | No |
+| `src/tokenizer/bpe.rs` | New | 1 | No |
+| `src/types.rs` | Add Config::bpe() | 1 | No |
+| `src/lib.rs` | Add mod tokenizer | 1 | No |
+| `src/clora/mod.rs` | New | 2 | No |
+| `src/clora/types.rs` | New | 2 | No |
+| `src/clora/partial_parser.rs` | New | 2 | No |
+| `src/clora/syn_pruner.rs` | New | 2 | No |
+| `examples/clora_demo.rs` | New | 3 | No |
+| `src/benchmark.rs` | Add BPE + clora benches | 1-3 | No |
 
 ## References
 
@@ -955,4 +680,4 @@ full = ["leviathan", "sudoku", "clora", "training"]
 - `.research/00_Neuro-Symbolic LLM Architecture.md` — Original cLoRA concept
 - `.plans/004_leviathan_distill.md` — SpeculativeVerifier trait pattern
 - `.plans/005_speculative_module_refactor.md` — ConstraintPruner trait, DDTree pruning
-- `anyrag/README.md` — RAG pipeline, concept sharding, JSONL export
+- `anyrag/README.md` — RAG pipeline, concept sharding, JSONL export, `/knowledge/export`
