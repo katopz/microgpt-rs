@@ -120,7 +120,9 @@ fn run_nine_solver(initial: Sudoku9x9, tx: mpsc::Sender<Msg>, cancel: Arc<Atomic
         81 - state.clue_count()
     )));
 
-    let solved = solve_nine(&mut state, 0, &tx, &cancel);
+    let mut tries = 0usize;
+    let solved = solve_nine(&mut state, 0, &tx, &cancel, &mut tries);
+    let _ = tx.send(Msg::Tokens(tries));
 
     if solved {
         let _ = tx.send(Msg::Done(format!(
@@ -139,6 +141,7 @@ fn solve_nine(
     depth: usize,
     tx: &mpsc::Sender<Msg>,
     cancel: &AtomicBool,
+    tries: &mut usize,
 ) -> bool {
     if cancel.load(Ordering::Relaxed) {
         return false;
@@ -151,13 +154,7 @@ fn solve_nine(
         if cancel.load(Ordering::Relaxed) {
             return false;
         }
-        let _ = tx.send(Msg::Tokens(1));
-        let _ = tx.send(Msg::Cell {
-            row,
-            col,
-            digit,
-            kind: CellKind::Trying,
-        });
+        *tries += 1;
 
         if state.is_valid_move(row, col, digit) {
             state.grid[row][col] = digit;
@@ -168,17 +165,18 @@ fn solve_nine(
                 kind: CellKind::Accepted,
             });
             let _ = tx.send(Msg::Step(format!(
-                "d{depth:02} place {digit} at ({},{})  filled={}/81",
+                "d{depth:02} place {digit} at ({},{})  {}/81",
                 row + 1,
                 col + 1,
                 state.clue_count()
             )));
             let _ = tx.send(Msg::Trace(format!(
-                "d{depth:02} commit ({},{})={digit}",
+                "d{depth:02} ({},{})={digit}",
                 row + 1,
                 col + 1
             )));
-            if solve_nine(state, depth + 1, tx, cancel) {
+
+            if solve_nine(state, depth + 1, tx, cancel, tries) {
                 return true;
             }
 
@@ -189,18 +187,6 @@ fn solve_nine(
                 digit: 0,
                 kind: CellKind::Empty,
             });
-            let _ = tx.send(Msg::Step(format!(
-                "d{depth:02} backtrack from ({},{})",
-                row + 1,
-                col + 1
-            )));
-            let _ = tx.send(Msg::Trace(format!(
-                "d{depth:02} undo  ({},{})={digit}",
-                row + 1,
-                col + 1
-            )));
-        } else {
-            // no sleep: invalid digits stream at CPU speed, TUI samples at frame rate
         }
     }
     false
@@ -491,11 +477,8 @@ impl App {
     }
 
     fn drain(&mut self) {
-        for _ in 0..2048 {
-            match self.rx.try_recv() {
-                Ok(msg) => self.apply(msg),
-                Err(_) => break,
-            }
+        while let Ok(msg) = self.rx.try_recv() {
+            self.apply(msg);
         }
     }
 
@@ -519,7 +502,7 @@ impl App {
             }
             Msg::Tokens(n) => self.tokens += n,
             Msg::Done(s) => {
-                self.elapsed_secs = Some(self.started.elapsed().as_secs_f64().max(1e-3));
+                self.elapsed_secs = Some(self.started.elapsed().as_secs_f64().max(1e-9));
                 self.summary = Some(s);
             }
         }
@@ -703,20 +686,32 @@ fn format_cell(cell: Cell) -> (String, Style) {
     (cell.digit.to_string(), style)
 }
 
+fn fmt_elapsed(secs: f64) -> String {
+    if secs < 1e-6 {
+        format!("{:.1}ns", secs * 1e9)
+    } else if secs < 1e-3 {
+        format!("{:.1}µs", secs * 1e6)
+    } else if secs < 1.0 {
+        format!("{:.1}ms", secs * 1e3)
+    } else {
+        format!("{:.2}s", secs)
+    }
+}
+
 fn draw_stats(f: &mut Frame, area: Rect, app: &App) {
     let elapsed = app
         .elapsed_secs
-        .unwrap_or_else(|| app.started.elapsed().as_secs_f64().max(1e-3));
+        .unwrap_or_else(|| app.started.elapsed().as_secs_f64().max(1e-9));
     let lines = (app.steps.len() + app.trace.len()) as f64;
     let tps = app.tokens as f64 / elapsed;
     let lps = lines / elapsed;
     let summary = app.summary.as_deref().unwrap_or("running…");
     let txt = format!(
-        " {} tok/s │ {} tokens │ {} l/s │ {:.1}s │ {}",
+        " {} tok/s │ {} tokens │ {} l/s │ {} │ {}",
         thousands(tps as u64),
         thousands(app.tokens as u64),
         thousands(lps as u64),
-        elapsed,
+        fmt_elapsed(elapsed),
         summary,
     );
     let para = Paragraph::new(txt).block(Block::default().borders(Borders::ALL).title(" Stats "));
