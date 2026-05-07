@@ -31,10 +31,8 @@ pub use types::{
 };
 pub use verifier::{SimulatedVerifier, SpeculativeVerifier};
 
-#[cfg(feature = "leviathan")]
 pub use verifier::LeviathanVerifier;
 
-#[cfg(feature = "leviathan")]
 pub use step::{
     speculative_step_conditioned, speculative_step_conditioned_with, speculative_step_rollback,
     speculative_step_rollback_with,

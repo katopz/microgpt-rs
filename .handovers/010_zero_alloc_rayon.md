@@ -20,7 +20,7 @@ Key architectural change: introduced `SpeculativeContext` and `TreeBuilder` pre-
   - `src/speculative/mod.rs` — updated re-exports for all new types/functions
   - `src/transformer.rs` — `generate_into` + `generate_batch` (rayon parallel multi-sample)
   - `src/benchmark.rs` — all bench hot loops updated to use zero-alloc `_with` variants
-- **Tests**: 136 tests pass (`cargo test --lib --features leviathan`)
+- **Tests**: 136 tests pass (`cargo test --lib`)
 
 ## Benchmark Results (release, 50K iters)
 
@@ -58,17 +58,14 @@ No issues created during this implementation.
 
 ```bash
 # Build and run benchmarks
-cargo build --release --features leviathan --quiet
+cargo build --release --quiet
 ./target/release/microgpt-rs
 
 # Run all tests
-cargo test --lib --features leviathan --quiet
-
-# Run without leviathan feature
 cargo test --lib --quiet
 
 # Clippy check
-cargo clippy --features leviathan --fix --allow-dirty
+cargo clippy --fix --allow-dirty
 ```
 
 ## New Public API

@@ -5,13 +5,9 @@ use crate::speculative::types::{NoPruner, SpeculativeContext};
 use crate::transformer::TransformerWeights;
 use crate::types::{Config, Rng};
 
-#[cfg(feature = "leviathan")]
 use crate::speculative::dflash::dflash_predict_ar_with;
-#[cfg(feature = "leviathan")]
 use crate::speculative::sampling::sample_residual_distribution_into;
-#[cfg(feature = "leviathan")]
 use crate::transformer::{ForwardContext, MultiLayerKVCache, forward};
-#[cfg(feature = "leviathan")]
 use crate::types::softmax;
 
 // ── Speculative Verifier: Strategy Pattern ──────────────────
@@ -20,8 +16,7 @@ use crate::types::softmax;
 ///
 /// Same pattern as `ConstraintPruner` — trait-based swap point.
 /// - `SimulatedVerifier`: fast, no target model needed (default).
-/// - `LeviathanVerifier`: real p/q rejection sampling with target model
-///   (behind `leviathan` feature flag).
+/// - `LeviathanVerifier`: real p/q rejection sampling with target model.
 pub trait SpeculativeVerifier: Send + Sync {
     /// Run one speculative decoding step end-to-end.
     /// Returns accepted tokens (always ≥ 1, up to γ + 1 with bonus).
@@ -126,7 +121,6 @@ impl SpeculativeVerifier for SimulatedVerifier {
 
 // ── LeviathanVerifier: Real p/q rejection sampling (Algorithm 1) ──
 
-#[cfg(feature = "leviathan")]
 pub struct LeviathanVerifier<'a> {
     pub target_weights: &'a TransformerWeights,
     pub target_config: &'a Config,
@@ -137,7 +131,6 @@ pub struct LeviathanVerifier<'a> {
     tree_builder: TreeBuilder,
 }
 
-#[cfg(feature = "leviathan")]
 impl<'a> LeviathanVerifier<'a> {
     pub fn new(
         target_weights: &'a TransformerWeights,
@@ -155,7 +148,6 @@ impl<'a> LeviathanVerifier<'a> {
     }
 }
 
-#[cfg(feature = "leviathan")]
 impl SpeculativeVerifier for LeviathanVerifier<'_> {
     #[allow(clippy::needless_range_loop)]
     fn speculate(
@@ -369,7 +361,6 @@ mod tests {
 
     // ── LeviathanVerifier Tests (feature-gated) ───────────────
 
-    #[cfg(feature = "leviathan")]
     #[test]
     fn test_leviathan_verifier_returns_at_least_one() {
         let config = Config::micro();
@@ -394,7 +385,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "leviathan")]
     #[test]
     fn test_leviathan_verifier_deterministic() {
         let config = Config::micro();
@@ -428,7 +418,6 @@ mod tests {
         assert_eq!(r1, r2, "same seed should produce same results");
     }
 
-    #[cfg(feature = "leviathan")]
     #[test]
     fn test_leviathan_verifier_bonus_token() {
         let config = Config::micro();
@@ -460,7 +449,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "leviathan")]
     #[test]
     fn test_leviathan_verifier_acceptance_decreases_with_gamma() {
         let config = Config::micro();

@@ -122,7 +122,7 @@ A lightweight verifier that estimates acceptance without running the target mode
 **Configuration:**
 - `acceptance_rate: f32` — probability of accepting each draft token (default 0.75).
 
-### LeviathanVerifier (behind `"leviathan"` feature)
+### LeviathanVerifier
 
 Implements the full Algorithm 1 from Leviathan et al. 2022 ("Fast Inference from Transformers via Speculative Decoding").
 
@@ -311,8 +311,7 @@ pub trait PrefillScorer: Send + Sync {
 
 | Flag | Enables |
 |------|---------|
-| (default) | SimulatedVerifier, basic speculative decoding |
-| `"leviathan"` | `LeviathanVerifier` — full p/q rejection sampling |
+| (default) | SimulatedVerifier, LeviathanVerifier, basic speculative decoding |
 | `"rest"` | `RestClient`, REST-augmented tree merge |
 | `"sudoku"` | `SudokuPruner` — constrained decoding for Sudoku |
 | `"validator"` | `SynPruner` — syntax-aware constrained decoding |
@@ -324,4 +323,4 @@ pub trait PrefillScorer: Send + Sync {
 1. **Zero-allocation hot path:** All `_with` variants and `TreeBuilder` reuse pre-allocated buffers. No `Vec::push` in the inner loop — only `clear()` + index writes.
 2. **Separable pipeline stages:** DFlash → DDTree → Verifier are independent. Each can be swapped, benchmarked, or disabled independently.
 3. **Config-driven behavior:** `SpeculativeConfig` controls lookahead depth, tree budget, acceptance rates, and parallelism thresholds. No runtime branching on magic numbers.
-4. **Feature-gated complexity:** Leviathan verifier, REST bridge, and constraint pruners are behind feature flags. The default build stays lean.
+4. **Feature-gated complexity:** REST bridge and constraint pruners are behind feature flags. The default build stays lean.

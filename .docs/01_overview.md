@@ -55,24 +55,22 @@ src/
 ```toml
 [features]
 default = []
-leviathan = []                      # Real p/q rejection sampling with target model
 sudoku = []                         # SudokuPruner + sudoku examples
 validator = []                      # BPE tokenizer + SynPruner (planned: will add "syn" dep)
 rest = ["reqwest", "tokio"]         # REST bridge to anyrag
 training = []                       # Training mode (planned: will add "serde", "serde_json")
 gpu = []                            # wgpu LoRA training (planned: will add "wgpu", "bytemuck", "pollster", "safetensors")
-full = ["leviathan", "sudoku", "validator", "training", "gpu"]
+full = ["sudoku", "validator", "training", "gpu"]
 ```
 
 ## Quick Start
 
 ```bash
 cargo test --quiet                           # Run all 240+ tests
-cargo run --release                          # Run benchmark suite
+cargo run --release                          # Run benchmark suite (includes Leviathan verification)
 cargo run --example sudoku_9x9 --features sudoku               # Sudoku streaming solver
 cargo run --example sudoku_speculative --features sudoku       # DDTree pruning demo
 cargo run --example sudoku_tui --features sudoku               # TUI visualization
-cargo run --release --features leviathan                       # Include Leviathan verification benchmarks
 ```
 
 ## Config Presets

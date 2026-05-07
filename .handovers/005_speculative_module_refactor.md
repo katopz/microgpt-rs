@@ -73,17 +73,14 @@ sudoku = []      # SudokuPruner + sudoku examples/tests (new)
 
 ## How to Dev/Test
 ```bash
-# Core tests only (no sudoku, no leviathan)
+# Core tests only (no sudoku)
 cargo test --quiet
 
 # All features
 cargo test --quiet --all-features
 
-# Benchmark (default features)
+# Benchmark (includes Leviathan)
 cargo run --quiet --release
-
-# Benchmark with Leviathan Algorithm 1
-cargo run --quiet --release --features leviathan
 
 # Sudoku examples
 cargo run --example sudoku_speculative --features sudoku

@@ -5,32 +5,20 @@ use crate::types::{Config, Rng};
 #[cfg(feature = "rest")]
 use crate::rest::{RestClient, RetrievalResult};
 
-// Shared imports for rest and leviathan features
+// Shared imports for rest feature
 #[cfg(feature = "rest")]
 use crate::speculative::dd_tree::merge_retrieved_branches;
-#[cfg(any(feature = "rest", feature = "leviathan"))]
 use crate::speculative::dd_tree::{build_dd_tree, extract_best_path};
-#[cfg(any(feature = "rest", feature = "leviathan"))]
 use crate::speculative::dflash::dflash_predict;
-#[cfg(feature = "leviathan")]
 use crate::speculative::dflash::dflash_predict_conditioned;
-#[cfg(any(feature = "rest", feature = "leviathan"))]
-use crate::speculative::sampling::sample_from_distribution;
-#[cfg(feature = "leviathan")]
-use crate::speculative::sampling::sample_residual_distribution;
-#[cfg(any(feature = "rest", feature = "leviathan"))]
+use crate::speculative::sampling::{sample_from_distribution, sample_residual_distribution};
 use crate::transformer::{ForwardContext, MultiLayerKVCache, forward};
-#[cfg(feature = "leviathan")]
 use crate::types::softmax;
 
 // Zero-alloc _with imports
-#[cfg(feature = "leviathan")]
 use crate::speculative::dd_tree::TreeBuilder;
-#[cfg(feature = "leviathan")]
 use crate::speculative::dflash::{dflash_predict_conditioned_with, dflash_predict_with};
-#[cfg(feature = "leviathan")]
 use crate::speculative::sampling::sample_residual_distribution_into;
-#[cfg(feature = "leviathan")]
 use crate::speculative::types::{DDTreeBranchCache, NoPruner, SpeculativeContext};
 
 /// Speculative decoding step with a custom verifier.
@@ -154,8 +142,7 @@ pub async fn speculative_step_rest(
 ///
 /// Snapshot cost: O(n_layer × pos × kv_dim) — cheap at our model scale.
 ///
-/// Requires `--features leviathan` (target model forward pass needed).
-#[cfg(feature = "leviathan")]
+/// Requires target model forward pass.
 #[allow(clippy::too_many_arguments)]
 pub fn speculative_step_rollback(
     draft_weights: &TransformerWeights,
@@ -280,8 +267,7 @@ pub fn speculative_step_rollback(
 /// target features, producing higher-quality marginals. Uses simulated
 /// acceptance (no real p/q verification).
 ///
-/// Requires `--features leviathan` (target model forward pass needed).
-#[cfg(feature = "leviathan")]
+/// Requires target model forward pass.
 #[allow(clippy::too_many_arguments)]
 pub fn speculative_step_conditioned(
     draft_weights: &TransformerWeights,
@@ -352,7 +338,6 @@ pub fn speculative_step_conditioned(
 ///
 /// Reuses pre-allocated buffers from `SpeculativeContext`, `TreeBuilder`,
 /// `probs_buf`, and `residual_buf` to minimize allocations in the hot path.
-#[cfg(feature = "leviathan")]
 #[allow(clippy::too_many_arguments)]
 pub fn speculative_step_rollback_with(
     draft_sctx: &mut SpeculativeContext,
@@ -487,7 +472,6 @@ pub fn speculative_step_rollback_with(
 /// verification rollback (only a few candidate paths are verified).
 ///
 /// Falls back to `speculative_step_rollback` behavior when branch budget is exhausted.
-#[cfg(feature = "leviathan")]
 #[allow(clippy::too_many_arguments)]
 pub fn speculative_step_rollback_paged(
     draft_weights: &TransformerWeights,
@@ -664,7 +648,6 @@ pub fn speculative_step_rollback_paged(
 ///
 /// Reuses pre-allocated buffers from `SpeculativeContext`, `TreeBuilder`,
 /// and `probs_buf` to minimize allocations in the hot path.
-#[cfg(feature = "leviathan")]
 #[allow(clippy::too_many_arguments)]
 pub fn speculative_step_conditioned_with(
     draft_sctx: &mut SpeculativeContext,
@@ -748,7 +731,6 @@ pub fn speculative_step_conditioned_with(
 
 /// Extract candidate verification paths from DDTree (top-3 root branches).
 /// Each branch follows the best child at subsequent depths.
-#[cfg(feature = "leviathan")]
 fn extract_ddtree_paths(tree: &[crate::speculative::types::TreeNode]) -> Vec<Vec<usize>> {
     if tree.is_empty() {
         return Vec::new();
@@ -910,7 +892,6 @@ mod tests {
 
     // ── Leviathan: Rollback + Conditioned Draft Tests ─────────────
 
-    #[cfg(feature = "leviathan")]
     #[test]
     fn test_speculative_step_rollback_returns_at_least_one() {
         let target_config = Config::micro();
@@ -942,7 +923,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "leviathan")]
     #[test]
     fn test_speculative_step_rollback_deterministic() {
         let target_config = Config::micro();
@@ -988,7 +968,6 @@ mod tests {
         assert_eq!(l1, l2);
     }
 
-    #[cfg(feature = "leviathan")]
     #[test]
     fn test_speculative_step_conditioned_returns_at_least_one() {
         let target_config = Config::micro();
@@ -1020,7 +999,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "leviathan")]
     #[test]
     fn test_speculative_step_conditioned_deterministic() {
         let target_config = Config::micro();
@@ -1066,7 +1044,6 @@ mod tests {
         assert_eq!(l1, l2);
     }
 
-    #[cfg(feature = "leviathan")]
     #[test]
     fn test_speculative_step_conditioned_differs_from_unconditioned() {
         let target_config = Config::micro();
@@ -1110,7 +1087,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "leviathan")]
     #[test]
     fn test_extract_ddtree_paths() {
         let (weights, config) = make_draft();
@@ -1130,7 +1106,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "leviathan")]
     #[test]
     fn test_speculative_step_rollback_paged_returns_at_least_one() {
         let target_config = Config::micro();
@@ -1166,7 +1141,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "leviathan")]
     #[test]
     fn test_speculative_step_rollback_paged_deterministic() {
         let target_config = Config::micro();
@@ -1220,7 +1194,6 @@ mod tests {
         assert_eq!(l1, l2);
     }
 
-    #[cfg(feature = "leviathan")]
     #[test]
     fn test_speculative_step_rollback_paged_matches_flat_results() {
         // Both paged and flat should produce at least 1 valid token

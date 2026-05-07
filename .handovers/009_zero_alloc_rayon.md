@@ -36,7 +36,7 @@ Much of the foundation (SpeculativeContext, TreeBuilder, _with variants, generat
   - `src/transformer.rs` — `generate_into` added
   - `src/benchmark.rs` — all bench functions use zero-alloc APIs
   - `src/speculative/mod.rs` — re-exports all new types
-- **Tests**: 136 tests pass (`cargo test --lib --features leviathan`)
+- **Tests**: 136 tests pass (`cargo test --lib`)
 - **Benchmarks**: `bench/018_bench_result.png` (leviathan), `bench/017_bench_result.png` (default)
 
 ## Reflection: Struggling/Solved
@@ -69,15 +69,14 @@ cargo build --release --quiet
 # Run benchmarks (default features)
 ./target/release/microgpt-rs
 
-# Run benchmarks (with leviathan)
-cargo build --release --features leviathan --quiet
-./target/release/microgpt-rs
+# Run benchmarks
+cargo run --release
 
 # Run all tests
-cargo test --lib --features leviathan
+cargo test --lib
 
 # Clippy
-cargo clippy --features leviathan
+cargo clippy
 
 # Specific test
 cargo test -p microgpt-rs --lib -- speculative::verifier::tests

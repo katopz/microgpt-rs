@@ -12,7 +12,6 @@ use rayon::prelude::*;
 use std::io::Write;
 use std::time::Instant;
 
-#[cfg(feature = "leviathan")]
 use crate::speculative::{
     LeviathanVerifier, speculative_step_conditioned_with, speculative_step_rollback_with,
 };
@@ -99,7 +98,6 @@ pub fn run_all(config: &Config) -> Vec<BenchResult> {
     #[allow(unused_mut)]
     let mut results = vec![ar, dflash, ddtree, spec, spec_ar];
 
-    #[cfg(feature = "leviathan")]
     {
         let leviathan = bench_leviathan(
             &draft_weights,
@@ -532,8 +530,6 @@ pub fn bench_ddtree_budget_sweep(
 }
 
 /// Leviathan Algorithm 1: AR draft + real target p/q verification.
-/// Requires `--features leviathan` to run.
-#[cfg(feature = "leviathan")]
 fn bench_leviathan(
     draft_weights: &TransformerWeights,
     draft_config: &Config,
@@ -573,7 +569,6 @@ fn bench_leviathan(
 /// Task 3.8: Benchmark snapshot/rollback overhead vs no-rollback speculative step.
 /// Measures the cost of KV-Cache snapshot + restore per speculative step.
 /// Snapshot cost: O(n_layer × pos × kv_dim) — cheap at our model scale.
-#[cfg(feature = "leviathan")]
 fn bench_snapshot_rollback(
     draft_weights: &TransformerWeights,
     draft_config: &Config,
@@ -688,7 +683,6 @@ fn bench_snapshot_rollback(
 /// Measures acceptance length with target-conditioned draft (DFlash-inspired)
 /// vs standard unconditioned draft, using simulated acceptance.
 /// Also reports approximate KL divergence from the target distribution.
-#[cfg(feature = "leviathan")]
 fn bench_conditioned_vs_unconditioned(
     draft_weights: &TransformerWeights,
     draft_config: &Config,
@@ -1009,7 +1003,6 @@ pub fn run_all_parallel(config: &Config) -> Vec<BenchResult> {
         })
         .collect();
 
-    #[cfg(feature = "leviathan")]
     {
         let leviathan = bench_leviathan(
             &draft_weights,

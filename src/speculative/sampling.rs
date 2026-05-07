@@ -21,7 +21,6 @@ pub fn sample_from_distribution(probs: &[f32], rng: &mut Rng) -> usize {
 /// Falls back to `sample_from_distribution(p)` if distributions are identical.
 ///
 /// `scratch` must be `>= p.len()`. Written to but contents not meaningful after return.
-#[cfg_attr(not(feature = "leviathan"), allow(dead_code))]
 pub fn sample_residual_distribution_into(
     p: &[f32],
     q: &[f32],
@@ -51,7 +50,6 @@ pub fn sample_residual_distribution_into(
 ///
 /// Allocating wrapper around `sample_residual_distribution_into`.
 /// Prefer `_into` variant with `SpeculativeContext::residual_buf` for hot paths.
-#[cfg_attr(not(feature = "leviathan"), allow(dead_code))]
 pub fn sample_residual_distribution(p: &[f32], q: &[f32], rng: &mut Rng) -> usize {
     let mut scratch = vec![0.0f32; p.len()];
     sample_residual_distribution_into(p, q, &mut scratch, rng)

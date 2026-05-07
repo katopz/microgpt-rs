@@ -11,8 +11,8 @@ Inspired by [microgpt-c](https://github.com/nicholasgasior/microgpt-c), [talos-v
 - **Separate Draft Model** — Lightweight draft model (embd=4, heads=2, mlp=16) runs **3.6× faster** per forward pass than the target model.
 - **DFlash (Dynamic Flash)** — Block-parallel drafting that predicts `L` future tokens simultaneously via independent marginal distributions. Supports `rayon` parallelism. Also available in **autoregressive mode** (`dflash_predict_ar`) that samples and feeds back tokens for conditional q(x|x<t) distributions.
 - **DDTree (Dynamic Draft Tree)** — Best-First Search using a `BinaryHeap` to build a candidate token tree from marginal log-probabilities. Tree budget constrains exploration.
-- **SpeculativeVerifier (Strategy Pattern)** — Swappable verification via trait: `SimulatedVerifier` (fast, no target model) or `LeviathanVerifier` (real p/q rejection sampling with target model, behind `--features leviathan`).
-- **Leviathan Algorithm 1** † — Full implementation of [Leviathan et al. 2022](https://arxiv.org/pdf/2211.17192): AR draft → target model p/q scoring → rejection sampling → residual distribution `max(0, p−q)` → bonus token from target p(x). Distribution-preserving, proven correct, but needs large model asymmetry to be faster than pure AR.
+- **SpeculativeVerifier (Strategy Pattern)** — Swappable verification via trait: `SimulatedVerifier` (fast, no target model) or `LeviathanVerifier` (real p/q rejection sampling with target model).
+- **Leviathan Algorithm 1** — Full implementation of [Leviathan et al. 2022](https://arxiv.org/pdf/2211.17192): AR draft → target model p/q scoring → rejection sampling → residual distribution `max(0, p−q)` → bonus token from target p(x). Distribution-preserving, proven correct, but needs large model asymmetry to be faster than pure AR.
 - **Bonus Token** — When all γ draft tokens are accepted, sample +1 token for free from the last marginal (simulated) or target p(x) at position γ (Leviathan).
 - **Residual Distribution Sampling** — `max(0, p−q)` normalized distribution for sampling replacement tokens on rejection (Algorithm 1, Equation 3).
 - **Constraint Pruner** — Pluggable `ConstraintPruner` trait for neuro-symbolic intercept: deterministic rules engine prunes invalid branches before target verification.
@@ -21,12 +21,10 @@ Inspired by [microgpt-c](https://github.com/nicholasgasior/microgpt-c), [talos-v
 - **Streaming Solver** — `StreamingSolver` emits `Try`/`Accepted`/`Contradiction`/`Backtrack`/`Solved` events for real-time visualization of the search process.
 - **Percepta O(log N) Attention** — 2D convex hull KV cache with ternary search, proving LLMs can execute programs internally via geometric attention. Includes adversarial failure tests.
 - **TUI Visualization** — Ratatui-based terminal UI showing the Sudoku solver in real-time: color-coded grid, step/trace panels, speculative mode comparison (behind `--features sudoku`).
-- **Benchmarks + Plots** — 6-method benchmark suite (AR, DFlash, DDTree, Speculative, AR Draft, Leviathan †) with auto-numbered PNG output via `plotters`.
+- **Benchmarks + Plots** — 16-method benchmark suite (AR, DFlash, DDTree, Speculative, AR Draft, Leviathan, Prefill, forward) with auto-numbered PNG output via `plotters`. All benchmarks run by default — no feature flags needed.
 - **Chain-Seed DDTree** — Greedy chain backbone (argmax per depth) before best-first expansion, recovering high-confidence token spine. Inspired by [DFlash](https://arxiv.org/abs/2602.06036).
 - **Speculative Prefill** — PFlash-inspired prompt compression via attention-based importance scoring. Draft model scores token importance, compresses to top-`keep_ratio` spans before target prefill. Inspired by [Cross-Family Speculative Prefill](https://arxiv.org/abs/2603.02631).
 - **KV-Cache Snapshot/Rollback** — Cheap per-position KV cache snapshots for branch-level tree verification. Restore on rejection to try alternate DDTree paths without full recomputation.
-
-† Behind `--features leviathan`
 
 ## 🏗️ Architecture
 
@@ -119,7 +117,7 @@ pub trait SpeculativeVerifier: Send + Sync {
 | Verifier | Feature Flag | What it does |
 |----------|-------------|--------------|
 | `SimulatedVerifier` | always available | DFlash/AR draft → DDTree → simulated acceptance cap → bonus token from last marginal |
-| `LeviathanVerifier` | `--features leviathan` | AR draft → target model p/q scoring → rejection sampling → residual distribution → bonus from target p(x) |
+| `LeviathanVerifier` | always available | AR draft → target model p/q scoring → rejection sampling → residual distribution → bonus from target p(x). Proves Algorithm 1 works end-to-end. |
 
 `SimulatedVerifier` is fast (no target model). `LeviathanVerifier` is the full Algorithm 1 — mathematically proven distribution-preserving, but needs large model asymmetry to be faster than pure AR.
 
@@ -179,33 +177,32 @@ pub enum SolveEvent {
 
 Run on Apple Silicon (single-threaded, `--release` profile, 50k iterations, **zero-alloc hot paths**):
 
-**Models:** Target (embd=16, heads=4, mlp=64) · Draft (embd=4, heads=2, mlp=16) · Benchmark run `042` (commit `eb2daa9`)
+**Models:** Target (embd=16, heads=4, mlp=64) · Draft (embd=4, heads=2, mlp=16) · Benchmark run `044` (commit `0d52e11`)
 
 ```
 Method                         Throughput         μs/step  Avg Accept Len
 ───────────────────────────────────────────────────────────────────────────────
-Transformer AR                  1,183,952 tok/s       0.84            1.00
-DFlash                         4,103,213 tok/s       1.95            8.00
-DDTree Build                     359,998 trees/s      2.78            —
-Speculative (Simulated)        1,038,308 tok/s       4.82            5.00
-Speculative (AR Draft)         1,479,221 tok/s       4.73            7.00
-Leviathan (Algorithm 1)    †    110,710 tok/s      10.65            1.18
-Leviathan (no rollback)    †    110,560 tok/s      10.66            1.18
-Leviathan (w/ rollback)    †    190,535 tok/s       6.17            1.18
-Spec (unconditioned)           1,050,304 tok/s       4.76            5.00
-Spec (conditioned)    †        1,084,945 tok/s       6.22            6.74
-Prefill (no compress)         19,257,295 tok/s       3.32           64.00
-Prefill (compressed)           1,941,310 tok/s       3.61            7.00
-DDTree (no chain)                358,447 trees/s      2.79           16.00
-DDTree (chain-seed)              393,462 trees/s      2.54           16.00
-forward (flat)                 1,126,860 trees/s      0.89            —
-forward_paged                    980,192 trees/s      1.02            —
+Transformer AR                  1,153,065 tok/s       0.87            1.00
+DFlash                         3,854,077 tok/s       2.08            8.00
+DDTree Build                     361,662 trees/s      2.77            —
+Speculative (Simulated)        1,008,030 tok/s       4.96            5.00
+Speculative (AR Draft)         1,458,004 tok/s       4.80            7.00
+Leviathan (Algorithm 1)         110,259 tok/s      10.69            1.18
+Leviathan (no rollback)         109,930 tok/s      10.72            1.18
+Leviathan (w/ rollback)         185,353 tok/s       6.34            1.18
+Spec (unconditioned)           1,012,393 tok/s       4.94            5.00
+Spec (conditioned)              1,099,772 tok/s       6.13            6.74
+Prefill (no compress)         19,190,151 tok/s       3.34           64.00
+Prefill (compressed)           1,921,788 tok/s       3.64            7.00
+DDTree (no chain)                364,027 trees/s      2.75           16.00
+DDTree (chain-seed)              377,198 trees/s      2.65           16.00
+forward (flat)                 1,122,676 trees/s      0.89            —
+forward_paged                    942,262 trees/s      1.06            —
 ───────────────────────────────────────────────────────────────────────────────
-📈 Best speedup: 1.25x (Speculative AR Draft vs AR)
-† Requires --features leviathan
+📈 Best speedup: 1.26x (Speculative AR Draft vs AR)
 ```
 
-![Benchmark Chart](bench/042_bench_result.png)
+![Benchmark Chart](bench/044_bench_result.png)
 
 ### What each benchmark measures
 
@@ -226,15 +223,15 @@ The benchmarks progress from individual components to full pipelines:
 | **Speculative (Simulated)** | DFlash → DDTree → extract best path → simulated 75% acceptance cap → bonus token. No target model. "Simulated" means acceptance is artificially capped rather than using real p/q rejection. | Full speculative pipeline without expensive target verification. Measures the "ideal" case where draft quality is good. Avg 5 accepted tokens per step. |
 | **Speculative (AR Draft)** | Same pipeline but uses **autoregressive** drafting: each step feeds back the sampled token as input for the next. Produces conditional q(x\|x<t) distributions instead of independent marginals. | AR drafting produces more coherent sequences → better acceptance (7 tokens vs 5). The extra sampling cost pays off in longer accepted sequences. |
 | **Spec (unconditioned)** | Identical to "Speculative (Simulated)" — measured separately as the baseline for comparison with the conditioned variant below. | Control group: same draft model, same pipeline, no target information. |
-| **Spec (conditioned)** † | **Target-conditioned draft**: runs target model forward to capture hidden state → projects it into draft model's KV cache as initial seed → draft now "sees" target features → produces better-informed marginals → DDTree → simulated acceptance. | The draft model gains partial access to the target's representation. Higher avg acceptance (6.74 vs 5.0) shows conditioning helps, but the extra target forward pass adds latency. |
+| **Spec (conditioned)** | **Target-conditioned draft**: runs target model forward to capture hidden state → projects it into draft model's KV cache as initial seed → draft now "sees" target features → produces better-informed marginals → DDTree → simulated acceptance. | The draft model gains partial access to the target's representation. Higher avg acceptance (6.74 vs 5.0) shows conditioning helps, but the extra target forward pass adds latency. |
 
 #### Leviathan: Real Target Verification (Algorithm 1)
 
 | Benchmark | Pipeline | Why it matters |
 |-----------|----------|----------------|
-| **Leviathan (Algorithm 1)** † | Full [Algorithm 1](https://arxiv.org/pdf/2211.17192): AR draft → target model scores ALL drafted tokens → real p/q rejection sampling → residual distribution on rejection → bonus token. **Mathematically distribution-preserving** — output is identical to sampling from target alone. | Proves the algorithm works end-to-end. Slow here because our target is only 4× bigger than draft — needs ~10× for speculative to win. |
-| **Leviathan (no rollback)** † | Standard Leviathan that resets target KV cache each step. No branch recovery. | Baseline for rollback comparison. |
-| **Leviathan (w/ rollback)** † | Leviathan with KV cache **snapshot/rollback**: before each verification attempt, snapshots the target KV cache (cheap O(n_layer × pos × kv_dim) copy). On rejection, rolls back and tries the next candidate branch — avoids re-running target from scratch. | Snapshot cost is negligible; rollback saves re-running target. 73% faster than no-rollback (6.17 vs 10.66 μs). Essential for multi-branch verification. |
+| **Leviathan (Algorithm 1)** | Full [Algorithm 1](https://arxiv.org/pdf/2211.17192): AR draft → target model scores ALL drafted tokens → real p/q rejection sampling → residual distribution on rejection → bonus token. **Mathematically distribution-preserving** — output is identical to sampling from target alone. | Proves the algorithm works end-to-end. Slow here because our target is only 4× bigger than draft — needs ~10× for speculative to win. |
+| **Leviathan (no rollback)** | Standard Leviathan that resets target KV cache each step. No branch recovery. | Baseline for rollback comparison. |
+| **Leviathan (w/ rollback)** | Leviathan with KV cache **snapshot/rollback**: before each verification attempt, snapshots the target KV cache (cheap O(n_layer × pos × kv_dim) copy). On rejection, rolls back and tries the next candidate branch — avoids re-running target from scratch. | Snapshot cost is negligible; rollback saves re-running target. 73% faster than no-rollback (6.17 vs 10.66 μs). Essential for multi-branch verification. |
 
 #### Prompt Compression (PFlash-inspired)
 
@@ -250,7 +247,7 @@ The benchmarks progress from individual components to full pipelines:
 | **DDTree (no chain)** | Standard best-first: seeds heap with all root marginals, expands greedily by score. | Baseline tree construction. |
 | **DDTree (chain-seed)** | **Chain-seed optimization**: first builds a greedy backbone (argmax at each depth with cumulative log-prob), then seeds the heap with siblings at each chain depth + children of the last chain node. Inspired by [DFlash](https://arxiv.org/abs/2602.06036). | The chain provides a "highway" through the tree that pure best-first might miss. Slightly faster (2.56 vs 2.66 μs) because the initial heap population is more focused. |
 
-> † Feature-gated behind `--features leviathan`. These benchmarks require the target model for real verification or hidden state extraction.
+> These benchmarks require the target model for real verification or hidden state extraction.
 
 ### Zero-Alloc Improvements (Plan 013)
 
@@ -283,7 +280,7 @@ Result:  γ+1 tokens accepted at best, 1 at worst (guaranteed progress).
 |----------|----------------|---------------|------|
 | `SimulatedVerifier` | Accepts ceil(γ × rate) tokens + bonus from last marginal | ❌ No | ~1.05M tok/s |
 | `SimulatedVerifier` (AR) | Same, but autoregressive drafting (conditional q(x\|x<t)) | ❌ No | ~1.44M tok/s |
-| `LeviathanVerifier` † | Real p/q rejection + residual distribution + bonus from target p(x) | ✅ Yes | ~111K tok/s |
+| `LeviathanVerifier` | Real p/q rejection + residual distribution + bonus from target p(x) | ✅ Yes | ~110K tok/s |
 
 The `SpeculativeVerifier` trait makes them swappable — same `speculate()` interface, different verification strategy. When LoRA fine-tuning improves draft/target alignment, real verification becomes viable.
 
@@ -422,21 +419,17 @@ The Percepta team demonstrated **full in-model computation** (33K tok/s, 7K line
 # Build with optimizations
 cargo build --release
 
-# Run benchmark + generate plot (5 benchmarks: AR, DFlash, DDTree, Speculative, AR Draft)
+# Run benchmark + generate plot (16 benchmarks)
 cargo run --release
-
-# Run with Leviathan Algorithm 1 verification (6 benchmarks, includes real p/q rejection)
-cargo run --release --features leviathan
 
 # Run with Sudoku constraint pruner (adds SudokuPruner tests + examples)
 cargo run --release --features sudoku
 
-# Run everything (all benchmarks + Sudoku pruner + Leviathan)
+# Run everything (all benchmarks + Sudoku pruner)
 cargo run --release --all-features
 
 # Run all tests
-# Default:              145 tests (lib) + 80 integration = 225 total
-# +all-features:        196 tests (lib) + 80 integration = 276 total
+# Default:              196 tests (lib) + 80 integration = 276 total
 cargo test --quiet --workspace --all-features
 
 # Run Sudoku solver example (streaming "thinking" output)
@@ -462,12 +455,11 @@ cargo clippy --all-targets --all-features --quiet
 
 | Flag | Dependencies | Description |
 |------|-------------|-------------|
-| `leviathan` | — | Leviathan Algorithm 1 verification (real p/q rejection) |
 | `sudoku` | — | SudokuPruner constraint pruning + examples |
 | `validator` | `syn`, `proc-macro2` | SynPruner + partial parser |
 | `rest` | `reqwest`, `tokio` | REST module |
 | `gpu` | `wgpu`, `bytemuck`, `pollster`, `safetensors` | wgpu context & buffers |
-| `full` | all above | Enable all features |
+| `full` | all above (except leviathan, always on) | Enable all features |
 
 Build with `--features <flag>` or `--all-features`.
 
@@ -485,8 +477,8 @@ src/
     sampling.rs     sample_from_distribution, sample_residual_distribution, sample_residual_distribution_into
     dd_tree.rs      build_dd_tree, build_dd_tree_pruned, TreeBuilder (zero-alloc, parent_tokens_buf), extract_parent_tokens, extract_parent_tokens_into
     dflash.rs       dflash_predict, dflash_predict_with, dflash_predict_ar, dflash_predict_ar_with, dflash_predict_parallel
-    verifier.rs     SpeculativeVerifier trait, SimulatedVerifier, LeviathanVerifier † (all zero-alloc internals)
-    step.rs         speculative_step, speculative_step_verifier, speculative_step_rollback †, speculative_step_conditioned †
+    verifier.rs     SpeculativeVerifier trait, SimulatedVerifier, LeviathanVerifier (all zero-alloc internals)
+    step.rs         speculative_step, speculative_step_verifier, speculative_step_rollback, speculative_step_conditioned
     prefill.rs      PrefillScorer trait, AttentionScorer, compress_prompt, speculative_prefill, score_with
     sudoku_pruner.rs  SudokuPruner (path-aware, cross-depth conflict detection) *
   tokenizer/        BPE tokenizer (encode/decode/train, Config::bpe())
@@ -495,9 +487,8 @@ src/
   rest/             REST module ¶
   percepta.rs       Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
                     Sudoku9x9, ComputableLora, StreamingSolver, SolveEvent
-  benchmark.rs      BenchResult, run_all, save_results_csv (AR / DFlash / DDTree / Speculative / AR Draft / Leviathan †)
+  benchmark.rs      BenchResult, run_all, save_results_csv (AR / DFlash / DDTree / Speculative / AR Draft / Leviathan)
   plot.rs           plot_results → PNG horizontal bar chart
-  † behind --features leviathan
   * behind --features sudoku
   ‡ behind --features validator
   § behind --features gpu

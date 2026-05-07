@@ -67,16 +67,13 @@ cargo check
 # Run all lib tests (211 total: 131 lib + 80 example)
 cargo test --quiet
 
-# Run with leviathan feature (includes rollback + conditioned tests)
-cargo test --quiet --features leviathan
-
 # Run specific test modules
 cargo test --lib -- dd_tree::tests
 cargo test --lib -- transformer::tests::test_snapshot
 cargo test --lib -- prefill::tests
 cargo test --lib -- dflash::tests::test_dflash_conditioned
-cargo test --lib --features leviathan -- step::tests::test_speculative_step_rollback
-cargo test --lib --features leviathan -- step::tests::test_speculative_step_conditioned
+cargo test --lib -- step::tests::test_speculative_step_rollback
+cargo test --lib -- step::tests::test_speculative_step_conditioned
 
 # Run with all features
 cargo test --quiet --all-features
@@ -86,7 +83,6 @@ cargo clippy --all-targets --all-features --quiet
 
 # Run benchmarks (includes chain-seed + budget sweep + rollback + conditioned)
 cargo run --release
-cargo run --release --features leviathan
 ```
 
 ## Key Architecture Decisions

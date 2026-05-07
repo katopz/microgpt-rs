@@ -90,20 +90,17 @@ The paper's Algorithm 1 is mathematically elegant but requires large model asymm
 
 ## How to Dev/Test
 ```bash
-# Run all tests (173 with leviathan, 169 without)
+# Run all tests
 cargo test --quiet --workspace --all-features
 
-# Run benchmark (5 methods, default)
+# Run benchmark (includes Leviathan Algorithm 1)
 cargo run --quiet --release
-
-# Run benchmark with Leviathan Algorithm 1 (6 methods)
-cargo run --quiet --release --features leviathan
 
 # Clippy
 cargo clippy --all-targets --all-features
 
 # Specific test
-cargo test --quiet --lib -- test_leviathan_verifier_returns_at_least_one --features leviathan
+cargo test --quiet --lib -- test_leviathan_verifier_returns_at_least_one
 ```
 
 ## Plan Status
