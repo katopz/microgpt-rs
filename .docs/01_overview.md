@@ -1,4 +1,4 @@
-# mini-dllm: Overview
+# microgpt-rs: Overview
 
 ## What It Is
 

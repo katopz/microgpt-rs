@@ -1,4 +1,4 @@
-# mini-dllm: Performance Engineering
+# microgpt-rs: Performance Engineering
 
 ## Benchmark Results (release build, 50K iterations, Apple Silicon)
 

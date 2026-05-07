@@ -1,4 +1,4 @@
-# mini-dllm: Constraint Validator
+# microgpt-rs: Constraint Validator
 
 ## What is Validator?
 Deterministic validation — a neuro-symbolic inference system where `rustc`/`syn` acts as the deterministic referee inside the speculative decoding loop. The LLM drafts token sequences; a rules engine validates them against the Rust AST before target model verification.

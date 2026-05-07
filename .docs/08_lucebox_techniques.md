@@ -1,4 +1,4 @@
-# mini-dllm: Advanced Techniques (Lucebox-Hub Distillation)
+# microgpt-rs: Advanced Techniques (Lucebox-Hub Distillation)
 
 ## Source
 Techniques distilled from [Luce-Org/lucebox-hub](https://github.com/Luce-Org/lucebox-hub/) — open LLM inference optimized per-chip. We take the algorithmic ideas (chain-seed DDTree, importance scoring, rollback) and implement them on CPU without CUDA.

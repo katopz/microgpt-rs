@@ -1,4 +1,4 @@
-# mini-dllm: GPU LoRA Training (wgpu)
+# microgpt-rs: GPU LoRA Training (wgpu)
 
 ## Overview
 A `wgpu`-based GPU training backend that produces `lora.bin` from training data JSONL. Targets WASM (WebGPU), Metal (Apple Silicon), Vulkan (Nvidia/AMD), and DX12 (Windows). The CPU path remains the zero-allocation reference; GPU accelerates forward + backward for LoRA parameter updates.

@@ -39,7 +39,7 @@ pub fn plot_results(results: &[BenchResult], path: &str) -> Result<(), Box<dyn s
 
     let mut chart = ChartBuilder::on(&root)
         .caption(
-            "Mini-DLLM Benchmark Results",
+            "MicroGPT-RS Benchmark Results",
             ("sans-serif", 22).into_font(),
         )
         .margin(10)

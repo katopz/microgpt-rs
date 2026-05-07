@@ -1,4 +1,4 @@
-# mini-dllm: Core Architecture
+# microgpt-rs: Core Architecture
 
 ## Overview
 The transformer is a from-scratch GPT-2 style implementation. No frameworks — weights are `Vec<f32>`, ops are hand-written matmul/softmax/rmsnorm. Supports multi-layer, grouped-query attention (GQA), and zero-allocation inference.

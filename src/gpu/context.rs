@@ -41,7 +41,7 @@ impl GpuContext {
         let (device, queue) = adapter
             .request_device(
                 &DeviceDescriptor {
-                    label: Some("mini-dllm gpu device"),
+                    label: Some("microgpt-rs gpu device"),
                     required_features: Features::empty(),
                     required_limits: Limits::downlevel_defaults(),
                     ..Default::default()

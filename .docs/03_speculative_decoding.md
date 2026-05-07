@@ -1,4 +1,4 @@
-# mini-dllm: Speculative Decoding Engine
+# microgpt-rs: Speculative Decoding Engine
 
 ## Pipeline Overview
 

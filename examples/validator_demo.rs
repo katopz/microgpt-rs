@@ -90,7 +90,7 @@ const VALID_FRAGMENTS: &[&str] = &[
     "match n { 0 => 1, _ => n }",
     "fn add(a: i32, b: i32) -> i32 { a + b }",
     "let s = \"hello\";",
-    "arr.iter().map(|x| x * 2).collect()",
+    "let _: Vec<_> = arr.iter().map(|x| x * 2).collect();",
 ];
 
 const INVALID_FRAGMENTS: &[&str] = &[
@@ -197,7 +197,9 @@ fn main() {
     ];
 
     for (code, expected) in balance_tests {
-        let result = parser.is_valid(code);
+        let valid = parser.is_valid(code);
+        let balanced = parser.is_balanced();
+        let result = valid && balanced;
         let status = if result == *expected {
             "✓"
         } else {

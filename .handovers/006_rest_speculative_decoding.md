@@ -2,7 +2,7 @@
 
 ## What Happened
 
-Implemented Plan 009: REST Speculative Decoding — connecting mini-dllm to anyrag for Retrieval-Based Speculative Decoding. The hidden state extraction was already done in Plan 010 (`ForwardContext.hidden_state`). This plan adds:
+Implemented Plan 009: REST Speculative Decoding — connecting microgpt-rs to anyrag for Retrieval-Based Speculative Decoding. The hidden state extraction was already done in Plan 010 (`ForwardContext.hidden_state`). This plan adds:
 
 1. **REST client module** (`src/rest/`) — async HTTP client querying anyrag's `/search/vector` endpoint
 2. **DDTree merge** (`merge_retrieved_branches`) — injects retrieved token continuations into the speculative decoding tree with blended scores
