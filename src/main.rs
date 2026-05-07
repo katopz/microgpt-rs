@@ -98,9 +98,9 @@ fn main() {
         Err(e) => eprintln!("\n⚠️  Plot failed: {e}"),
     }
 
-    // Save results to CSV for regression tracking
-    let csv_path = "bench/results.csv";
-    match benchmark::save_results_csv(&results, csv_path) {
+    // Save results to CSV for regression tracking (same index as PNG)
+    let csv_path = format!("bench/{:03}_results.csv", index);
+    match benchmark::save_results_csv(&results, &csv_path) {
         Ok(()) => println!("📝 Results saved to: {csv_path}"),
         Err(e) => eprintln!("⚠️  CSV save failed: {e}"),
     }

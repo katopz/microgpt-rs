@@ -456,7 +456,7 @@ cargo clippy --all-targets --all-features --quiet
 
 - Console: transformer proof + benchmark table
 - `bench/NNN_bench_result.png`: auto-numbered horizontal bar chart (plotters)
-- `bench/results.csv`: append-only CSV for regression tracking (commit, date, method, throughput, latency)
+- `bench/NNN_results.csv`: paired CSV for regression tracking (commit, date, method, throughput, latency)
 
 ## 📁 Project Structure
 
@@ -490,8 +490,8 @@ tests/
   integration.rs  80 integration tests (adversarial + DFA + arithmetic + backtracking + geometry
                   + Sudoku9x9 + ComputableLora + StreamingSolver)
 bench/
-  001_bench_result.png  ...  024_bench_result.png (auto-numbered)
-  results.csv             append-only regression data (commit + timestamp + all metrics)
+  001_bench_result.png  ...  026_bench_result.png (auto-numbered)
+  001_results.csv       ...  026_results.csv       (paired CSV, same index as PNG)
 ```
 
 ## 📜 References
