@@ -218,8 +218,8 @@ fn main() {
     let marginals: Vec<Vec<f32>> = (0..config.draft_lookahead)
         .map(|_| {
             let mut probs = vec![0.0f32; vocab];
-            for i in 0..num_valid_tokens.min(vocab) {
-                probs[i] = 1.0 / num_valid_tokens as f32;
+            for prob in probs.iter_mut().take(num_valid_tokens.min(vocab)) {
+                *prob = 1.0 / num_valid_tokens as f32;
             }
             probs
         })
@@ -247,7 +247,7 @@ fn main() {
     );
     println!("  SynPruner:     {:3} nodes", tree_syn.len());
 
-    let reduction = if tree_no_prune.len() > 0 {
+    let reduction = if !tree_no_prune.is_empty() {
         let pct = 100.0 * (1.0 - tree_syn.len() as f64 / tree_no_prune.len() as f64);
         format!("{pct:.1}%")
     } else {
