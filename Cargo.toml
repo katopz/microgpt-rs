@@ -6,10 +6,17 @@ edition = "2024"
 [dependencies]
 plotters = "0.3"
 rayon = "1.10"
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 reqwest = { version = "0.12", features = ["json"], optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
+syn = { version = "2", features = ["full", "parsing"], optional = true }
+proc-macro2 = { version = "1", optional = true }
+wgpu = { version = "23", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
+pollster = { version = "0.4", optional = true }
+safetensors = { version = "0.4", optional = true }
 
 [dev-dependencies]
 ratatui = "0.29"
@@ -19,7 +26,10 @@ crossterm = "0.28"
 default = []
 leviathan = []
 sudoku = []
-rest = ["reqwest", "tokio", "serde", "serde_json"]
+clora = ["syn", "proc-macro2"]
+rest = ["reqwest", "tokio"]
+gpu = ["wgpu", "bytemuck", "pollster", "safetensors"]
+full = ["leviathan", "sudoku", "clora", "rest", "gpu"]
 
 [[example]]
 name = "sudoku_speculative"

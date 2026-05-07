@@ -14,6 +14,7 @@ pub struct Config {
     pub temperature: f32,
     pub draft_lookahead: usize,
     pub tree_budget: usize,
+    pub parallel_threshold: usize,
 }
 
 impl Config {
@@ -34,6 +35,7 @@ impl Config {
             temperature: 0.5,
             draft_lookahead: 8,
             tree_budget: 16,
+            parallel_threshold: 128,
         }
     }
 
@@ -53,6 +55,7 @@ impl Config {
             temperature: 0.5,
             draft_lookahead: 8,
             tree_budget: 16,
+            parallel_threshold: 128,
         }
     }
 
@@ -73,6 +76,7 @@ impl Config {
             temperature: 0.8,
             draft_lookahead: 5,
             tree_budget: 32,
+            parallel_threshold: 128,
         }
     }
 
@@ -91,6 +95,48 @@ impl Config {
             temperature: 0.8,
             draft_lookahead: 5,
             tree_budget: 32,
+            parallel_threshold: 128,
+        }
+    }
+
+    /// BPE tokenizer config for Rust source code.
+    /// vocab=4096, block=256, n_layer=1, n_head=4, n_embd=32, head_dim=8,
+    /// MLP hidden=128.
+    pub fn bpe() -> Self {
+        Self {
+            vocab_size: 4096,
+            block_size: 256,
+            n_embd: 32,
+            n_head: 4,
+            head_dim: 8,
+            mlp_hidden: 128,
+            n_layer: 1,
+            n_kv_head: 4,
+            bos_token: 1,
+            temperature: 0.8,
+            draft_lookahead: 8,
+            tree_budget: 32,
+            parallel_threshold: 128,
+        }
+    }
+
+    /// BPE draft model (smaller for speculative decoding).
+    /// Same vocab/block as bpe(), but embd=16, heads=2, mlp=64.
+    pub fn bpe_draft() -> Self {
+        Self {
+            vocab_size: 4096,
+            block_size: 256,
+            n_embd: 16,
+            n_head: 2,
+            head_dim: 8,
+            mlp_hidden: 64,
+            n_layer: 1,
+            n_kv_head: 2,
+            bos_token: 1,
+            temperature: 0.8,
+            draft_lookahead: 8,
+            tree_budget: 32,
+            parallel_threshold: 128,
         }
     }
 

@@ -632,54 +632,54 @@ Plan 009 will cover:
 
 ### Phase 0: Path Encoding Fix (Prerequisite)
 
-- [ ] 0.1 Change `TreeNode.parent_path` from `u64` to `u128` in `speculative/types.rs`
-- [ ] 0.2 Update `extract_parent_tokens` to use 16-bit shifts (`<< 16`, `& 0xFFFF`)
-- [ ] 0.3 Update `build_dd_tree_pruned` shift from `<< 5` to `<< 16`
-- [ ] 0.4 Add `extract_parent_tokens_into(parent_path: u128, num_tokens: usize, buf: &mut [usize])` to `dd_tree.rs` — zero-alloc version that writes into pre-allocated buffer
-- [ ] 0.5 Update `SpeculativeContext` in `speculative/types.rs` to include `parent_tokens_buf: Vec<usize>` (size = `draft_lookahead + 1`)
-- [ ] 0.6 Migrate all internal `extract_parent_tokens()` callers to `extract_parent_tokens_into()` with `SpeculativeContext::parent_tokens_buf`
-- [ ] 0.7 Update all tests in `dd_tree.rs` for new encoding
-- [ ] 0.8 Run `cargo test --all-features` — all 176 tests pass
-- [ ] 0.9 Run `cargo clippy --all-features` — zero warnings
-- [ ] 0.10 Run `cargo run --release` — benchmark unchanged (perf check)
-- [ ] 0.11 Commit with message `refactor: TreeNode path encoding 5-bit→16-bit for BPE vocab support`
+- [x] 0.1 Change `TreeNode.parent_path` from `u64` to `u128` in `speculative/types.rs`
+- [x] 0.2 Update `extract_parent_tokens` to use 16-bit shifts (`<< 16`, `& 0xFFFF`)
+- [x] 0.3 Update `build_dd_tree_pruned` shift from `<< 5` to `<< 16`
+- [x] 0.4 Add `extract_parent_tokens_into(parent_path: u128, num_tokens: usize, buf: &mut [usize])` to `dd_tree.rs` — zero-alloc version that writes into pre-allocated buffer
+- [x] 0.5 Update `SpeculativeContext` in `speculative/types.rs` to include `parent_tokens_buf: Vec<usize>` (size = `draft_lookahead + 1`)
+- [x] 0.6 Migrate all internal `extract_parent_tokens()` callers to `extract_parent_tokens_into()` with `SpeculativeContext::parent_tokens_buf`
+- [x] 0.7 Update all tests in `dd_tree.rs` for new encoding
+- [x] 0.8 Run `cargo test --all-features` — all 176 tests pass
+- [x] 0.9 Run `cargo clippy --all-features` — zero warnings
+- [x] 0.10 Run `cargo run --release` — benchmark unchanged (perf check)
+- [x] 0.11 Commit with message `refactor: TreeNode path encoding 5-bit→16-bit for BPE vocab support`
 
 ### Phase 1: BPE Tokenizer
 
-- [ ] 1.1 Add `blake3`, `serde`, `serde_json` to `Cargo.toml` dependencies
-- [ ] 1.2 Create `src/tokenizer/mod.rs` with re-exports
-- [ ] 1.3 Create `src/tokenizer/types.rs` with `BpeTokenizer`, `MergeRule`
-- [ ] 1.4 Create `src/tokenizer/bpe.rs` with `encode()`, `decode()`, `decode_single()`, `train()`
-- [ ] 1.5 Add `Config::bpe()` and `Config::bpe_draft()` to `src/types.rs`
-- [ ] 1.6 Add `pub mod tokenizer;` to `src/lib.rs`
-- [ ] 1.7 Add tests: encode/decode roundtrip, special tokens, vocab coverage
-- [ ] 1.8 Add benchmark: BPE encode/decode throughput (in `src/benchmark.rs`)
-- [ ] 1.9 Run `cargo clippy --all-features`, `cargo test --all-features`
-- [ ] 1.10 Commit with message `feat: BPE tokenizer for Rust source code`
+- [x] 1.1 Add `blake3`, `serde`, `serde_json` to `Cargo.toml` dependencies
+- [x] 1.2 Create `src/tokenizer/mod.rs` with re-exports
+- [x] 1.3 Create `src/tokenizer/types.rs` with `BpeTokenizer`, `MergeRule`
+- [x] 1.4 Create `src/tokenizer/bpe.rs` with `encode()`, `decode()`, `decode_single()`, `train()`
+- [x] 1.5 Add `Config::bpe()` and `Config::bpe_draft()` to `src/types.rs`
+- [x] 1.6 Add `pub mod tokenizer;` to `src/lib.rs`
+- [x] 1.7 Add tests: encode/decode roundtrip, special tokens, vocab coverage
+- [x] 1.8 Add benchmark: BPE encode/decode throughput (in `src/benchmark.rs`)
+- [x] 1.9 Run `cargo clippy --all-features`, `cargo test --all-features`
+- [x] 1.10 Commit with message `feat: BPE tokenizer for Rust source code`
 
 ### Phase 2: SynPruner (cLoRA Core)
 
-- [ ] 2.1 Add `syn` and `proc-macro2` to `Cargo.toml` under `[dependencies]` with `optional = true`
-- [ ] 2.2 Add `clora = ["syn", "proc-macro2"]` to `[features]`
-- [ ] 2.3 Create `src/clora/mod.rs` with re-exports (behind `#[cfg(feature = "clora")]`)
-- [ ] 2.4 Create `src/clora/types.rs` with `PruneResult`, `ErrorKind`, `CompilerFeedback`
-- [ ] 2.5 Create `src/clora/partial_parser.rs` with bracket balancer DFA
-- [ ] 2.6 Create `src/clora/syn_pruner.rs` with `SynPruner` implementing `ConstraintPruner`
-- [ ] 2.7 Add `pub mod clora;` to `src/lib.rs` (behind `#[cfg(feature = "clora")]`)
-- [ ] 2.8 Add tests: partial parser accepts valid fragments, rejects unbalanced
-- [ ] 2.9 Add tests: SynPruner prunes invalid Rust, accepts valid Rust
-- [ ] 2.10 Add benchmark: SynPruner overhead vs NoPruner on DDTree build
-- [ ] 2.11 Run `cargo test --features clora`, `cargo clippy --features clora`
-- [ ] 2.12 Commit with message `feat: SynPruner cLoRA — bracket balance + syn validation`
+- [x] 2.1 Add `syn` and `proc-macro2` to `Cargo.toml` under `[dependencies]` with `optional = true`
+- [x] 2.2 Add `clora = ["syn", "proc-macro2"]` to `[features]`
+- [x] 2.3 Create `src/clora/mod.rs` with re-exports (behind `#[cfg(feature = "clora")]`)
+- [x] 2.4 Create `src/clora/types.rs` with `PruneResult`, `ErrorKind`, `CompilerFeedback`
+- [x] 2.5 Create `src/clora/partial_parser.rs` with bracket balancer DFA
+- [x] 2.6 Create `src/clora/syn_pruner.rs` with `SynPruner` implementing `ConstraintPruner`
+- [x] 2.7 Add `pub mod clora;` to `src/lib.rs` (behind `#[cfg(feature = "clora")]`)
+- [x] 2.8 Add tests: partial parser accepts valid fragments, rejects unbalanced
+- [x] 2.9 Add tests: SynPruner prunes invalid Rust, accepts valid Rust
+- [x] 2.10 Add benchmark: SynPruner overhead vs NoPruner on DDTree build
+- [x] 2.11 Run `cargo test --features clora`, `cargo clippy --features clora`
+- [x] 2.12 Commit with message `feat: SynPruner cLoRA — bracket balance + syn validation`
 
 ### Phase 3: Integration & Validation
 
-- [ ] 3.1 Create example: `examples/clora_demo.rs` (behind `clora` feature)
-- [ ] 3.2 Demo shows: BPE encode → draft → SynPruner → syn validate → output
-- [ ] 3.3 Run baseline benchmark (no cLoRA) → `bench/015_bench_baseline.png`
-- [ ] 3.4 Run cLoRA benchmark (with SynPruner) → `bench/016_bench_clora.png`
-- [ ] 3.5 Measure DDTree build time overhead: target ≤5%
-- [ ] 3.6 Commit with message `feat: cLoRA demo + benchmark`
+- [x] 3.1 Create example: `examples/clora_demo.rs` (behind `clora` feature)
+- [x] 3.2 Demo shows: BPE encode → draft → SynPruner → syn validate → output
+- [x] 3.3 Run baseline benchmark (no cLoRA) → `bench/027_bench_result.png`
+- [x] 3.4 Run cLoRA benchmark (with SynPruner) → `bench/030_bench_result.png`
+- [x] 3.5 Measure DDTree build time overhead: target ≤5%
+- [x] 3.6 Commit with message `feat: cLoRA demo + benchmark`
 
 ## Feature Flags
 

@@ -3,7 +3,9 @@ use crate::speculative::{
     dflash_predict_ar_with, dflash_predict_with, extract_best_path_into, sample_from_distribution,
     speculative_step_verifier,
 };
-use crate::transformer::{ForwardContext, MultiLayerKVCache, TransformerWeights, forward};
+use crate::transformer::{
+    ForwardContext, MultiLayerKVCache, PagedKVCache, TransformerWeights, forward, forward_paged,
+};
 use crate::types::{Config, Rng, softmax};
 use std::io::Write;
 use std::time::Instant;
@@ -142,6 +144,11 @@ pub fn run_all(config: &Config) -> Vec<BenchResult> {
     let (no_chain, chain) = bench_ddtree_chain_seed(&draft_weights, &draft_config, warmup, iters);
     results.push(no_chain);
     results.push(chain);
+
+    // Paged vs flat cache comparison
+    let (flat_br, paged_br) = bench_paged_vs_flat_cache(config);
+    results.push(flat_br);
+    results.push(paged_br);
 
     results
 }
@@ -873,4 +880,80 @@ fn bench_prefill_compression(
     };
 
     (nocompress, compress)
+}
+
+/// Benchmark: paged KV cache vs flat KV cache forward pass throughput.
+///
+/// Measures `forward()` (flat MultiLayerKVCache) vs `forward_paged()` (PagedKVCache)
+/// over multiple positions, reporting tokens/sec and µs/step for each.
+pub fn bench_paged_vs_flat_cache(config: &Config) -> (BenchResult, BenchResult) {
+    let mut rng = Rng::new(42);
+    let weights = TransformerWeights::new(config, &mut rng);
+    let iters = 200;
+
+    // Warm up both paths
+    {
+        let mut ctx = ForwardContext::new(config);
+        let mut cache = MultiLayerKVCache::new(config);
+        let _ = forward(&mut ctx, &weights, &mut cache, 0, 0, config);
+    }
+    {
+        let mut ctx = ForwardContext::new(config);
+        let mut cache = PagedKVCache::new(config, 1);
+        let _ = forward_paged(&mut ctx, &weights, &mut cache, 0, 0, 0, config);
+    }
+
+    // Benchmark flat cache
+    let mut ctx_flat = ForwardContext::new(config);
+    let mut cache_flat = MultiLayerKVCache::new(config);
+    let start_flat = Instant::now();
+    for _ in 0..iters {
+        cache_flat.reset();
+        let max_pos = config.block_size.min(8);
+        for pos in 0..max_pos {
+            let _ = forward(&mut ctx_flat, &weights, &mut cache_flat, pos, pos, config);
+        }
+    }
+    let elapsed_flat = start_flat.elapsed();
+
+    // Benchmark paged cache
+    let mut ctx_paged = ForwardContext::new(config);
+    let mut cache_paged = PagedKVCache::new(config, 1);
+    let start_paged = Instant::now();
+    for _ in 0..iters {
+        cache_paged.reset();
+        let max_pos = config.block_size.min(8);
+        for pos in 0..max_pos {
+            let _ = forward_paged(
+                &mut ctx_paged,
+                &weights,
+                &mut cache_paged,
+                0,
+                pos,
+                pos,
+                config,
+            );
+        }
+    }
+    let elapsed_paged = start_paged.elapsed();
+
+    let steps_per_iter = config.block_size.min(8) as f64;
+
+    let flat_result = BenchResult {
+        label: "forward (flat)".into(),
+        throughput: iters as f64 * steps_per_iter / elapsed_flat.as_secs_f64(),
+        time_per_step_us: elapsed_flat.as_micros() as f64 / (iters as f64 * steps_per_iter),
+        avg_acceptance_len: 0.0,
+        color: (100, 149, 237),
+    };
+
+    let paged_result = BenchResult {
+        label: "forward_paged".into(),
+        throughput: iters as f64 * steps_per_iter / elapsed_paged.as_secs_f64(),
+        time_per_step_us: elapsed_paged.as_micros() as f64 / (iters as f64 * steps_per_iter),
+        avg_acceptance_len: 0.0,
+        color: (255, 165, 0),
+    };
+
+    (flat_result, paged_result)
 }

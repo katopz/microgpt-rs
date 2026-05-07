@@ -12,12 +12,12 @@ use super::types::{ConstraintPruner, NoPruner, TreeNode};
 ///
 /// Returns `Vec<usize>` where `result[k]` = token at depth `k`.
 /// Max depths: 64/5 = 12 (sufficient for lookahead of 5–8).
-pub fn extract_parent_tokens(parent_path: u64, num_tokens: usize) -> Vec<usize> {
+pub fn extract_parent_tokens(parent_path: u128, num_tokens: usize) -> Vec<usize> {
     // parent_path packs tokens with most-recent in lowest bits:
-    //   depth 0 token → bits (num_tokens-1)*5 .. (num_tokens-1)*5+4
-    //   depth k token → bits (num_tokens-1-k)*5 .. (num_tokens-1-k)*5+4
+    //   depth 0 token → bits (num_tokens-1)*16 .. (num_tokens-1)*16+15
+    //   depth k token → bits (num_tokens-1-k)*16 .. (num_tokens-1-k)*16+15
     (0..num_tokens)
-        .map(|k| ((parent_path >> ((num_tokens - 1 - k) * 5)) & 0x1F) as usize)
+        .map(|k| ((parent_path >> ((num_tokens - 1 - k) * 16)) & 0xFFFF) as usize)
         .collect()
 }
 
@@ -139,13 +139,16 @@ pub fn merge_retrieved_branches(
             let blended = (base_prob.ln() * inv_weight) + (similarity.ln() * rest_weight);
 
             // Reconstruct parent_path from sequence prefix up to current depth
-            let parent_path = seq[..=depth].iter().enumerate().fold(0u64, |acc, (d, &t)| {
-                if d == 0 {
-                    t as u64
-                } else {
-                    (acc << 5) | (t as u64)
-                }
-            });
+            let parent_path = seq[..=depth]
+                .iter()
+                .enumerate()
+                .fold(0u128, |acc, (d, &t)| {
+                    if d == 0 {
+                        t as u128
+                    } else {
+                        (acc << 16) | (t as u128)
+                    }
+                });
 
             tree.push(TreeNode {
                 score: blended,
@@ -210,7 +213,7 @@ impl TreeBuilder {
         if chain_seed {
             // ── Phase A: Build greedy chain backbone ──────────────
             let mut cumulative_score: f32 = 0.0;
-            let mut parent_path: u64 = 0;
+            let mut parent_path: u128 = 0;
 
             for (depth, marginal) in marginals.iter().enumerate() {
                 if self.tree.len() >= config.tree_budget {
@@ -236,9 +239,9 @@ impl TreeBuilder {
 
                 cumulative_score += prob.ln();
                 let node_path = if depth == 0 {
-                    token_idx as u64
+                    token_idx as u128
                 } else {
-                    (parent_path << 5) | (token_idx as u64)
+                    (parent_path << 16) | (token_idx as u128)
                 };
 
                 let node = TreeNode {
@@ -263,7 +266,7 @@ impl TreeBuilder {
                             score: prob.ln(),
                             depth: 0,
                             token_idx: i,
-                            parent_path: i as u64,
+                            parent_path: i as u128,
                         });
                     }
                 }
@@ -279,7 +282,7 @@ impl TreeBuilder {
 
                     // Parent tokens for pruning: chain tokens at depths 0..depth-1
                     let sibling_parent_tokens =
-                        extract_parent_tokens(chain_node.parent_path >> 5, depth);
+                        extract_parent_tokens(chain_node.parent_path >> 16, depth);
 
                     for (i, &prob) in marginals[depth].iter().enumerate() {
                         if i == chain_node.token_idx {
@@ -287,10 +290,10 @@ impl TreeBuilder {
                         }
                         if prob > 0.0 && pruner.is_valid(depth, i, &sibling_parent_tokens) {
                             let sibling_path = if depth == 0 {
-                                i as u64
+                                i as u128
                             } else {
-                                let ancestor_path = chain_node.parent_path >> 5;
-                                (ancestor_path << 5) | (i as u64)
+                                let ancestor_path = chain_node.parent_path >> 16;
+                                (ancestor_path << 16) | (i as u128)
                             };
 
                             self.heap.push(TreeNode {
@@ -314,7 +317,7 @@ impl TreeBuilder {
                                 score: last.score + prob.ln(),
                                 depth: next_depth,
                                 token_idx: i,
-                                parent_path: (last.parent_path << 5) | (i as u64),
+                                parent_path: (last.parent_path << 16) | (i as u128),
                             });
                         }
                     }
@@ -328,7 +331,7 @@ impl TreeBuilder {
                         score: prob.ln(),
                         depth: 0,
                         token_idx: i,
-                        parent_path: i as u64,
+                        parent_path: i as u128,
                     });
                 }
             }
@@ -352,7 +355,7 @@ impl TreeBuilder {
                             score: best.score + prob.ln(),
                             depth: next_depth,
                             token_idx: i,
-                            parent_path: (best.parent_path << 5) | (i as u64),
+                            parent_path: (best.parent_path << 16) | (i as u128),
                         });
                     }
                 }
@@ -414,9 +417,9 @@ mod tests {
 
     #[test]
     fn test_extract_parent_tokens_roundtrip() {
-        let path_d0 = 3u64;
-        let path_d1 = (path_d0 << 5) | 7;
-        let path_d2 = (path_d1 << 5) | 1;
+        let path_d0 = 3u128;
+        let path_d1 = (path_d0 << 16) | 7;
+        let path_d2 = (path_d1 << 16) | 1;
 
         assert_eq!(extract_parent_tokens(path_d0, 1), vec![3]);
         assert_eq!(extract_parent_tokens(path_d1, 2), vec![3, 7]);
@@ -669,12 +672,12 @@ mod tests {
         assert_eq!(tree[0].parent_path, 5, "depth 0 parent_path = token 5");
         assert_eq!(
             tree[1].parent_path,
-            (5u64 << 5) | 10,
+            (5u128 << 16) | 10,
             "depth 1 parent_path = [5, 10]"
         );
         assert_eq!(
             tree[2].parent_path,
-            ((5u64 << 5) | 10) << 5 | 3,
+            ((5u128 << 16) | 10) << 16 | 3,
             "depth 2 parent_path = [5, 10, 3]"
         );
 

@@ -1,0 +1,10 @@
+commit,date,method,throughput,us_per_step,avg_accept_len
+1564cea,2026-05-07T13:02:32,Transformer AR,834112,1.20,1.00
+1564cea,2026-05-07T13:02:32,DFlash,3962119,2.02,8.00
+1564cea,2026-05-07T13:02:32,DDTree Build,350804,2.85,0.00
+1564cea,2026-05-07T13:02:32,Speculative (Simulated),1004452,4.98,5.00
+1564cea,2026-05-07T13:02:32,Speculative (AR Draft),1466549,4.77,7.00
+1564cea,2026-05-07T13:02:32,Prefill (no compress),19809626,3.23,64.00
+1564cea,2026-05-07T13:02:32,Prefill (compressed),2009016,3.48,7.00
+1564cea,2026-05-07T13:02:32,DDTree (no chain),353366,2.83,16.00
+1564cea,2026-05-07T13:02:32,DDTree (chain-seed),374764,2.67,16.00
