@@ -261,30 +261,31 @@ fn main() {
     println!("\n🔄 Phase 6: Compiler Feedback Self-Correction");
     println!("{}", "─".repeat(40));
 
-    let error_cases = ["let = ;", "fn main() {", "struct { }"];
-    for code in &error_cases {
-        let result = syn_pruner.validate(code);
-        if !result.is_valid {
-            let feedback = CompilerFeedback {
-                error_message: match &result.error_kind {
-                    ErrorKind::SynError(msg) => msg.clone(),
-                    ErrorKind::UnbalancedBrackets => "Unbalanced brackets".to_string(),
-                    ErrorKind::None => String::new(),
-                },
-                failing_code: (*code).to_string(),
-                suggestion: match &result.error_kind {
-                    ErrorKind::SynError(msg) => CompilerFeedback::extract_suggestion(msg),
-                    _ => None,
-                },
-            };
-            println!("  Code:    {code}");
-            println!("  Error:   {}", feedback.error_message);
-            if let Some(suggestion) = &feedback.suggestion {
-                println!("  Hint:    {suggestion}");
-            }
-            println!("  Context: {}", feedback.to_context().replace('\n', " | "));
-            println!();
-        }
+    // Self-correction pairs: (broken code, suggested fix)
+    let correction_pairs: &[(&str, &str)] = &[
+        ("let = ;", "let x = 42;"),
+        ("fn main() {", "fn main() { }"),
+        ("struct { }", "struct Foo { x: i32 }"),
+        ("if true { } else", "if true { } else { }"),
+        ("match { 0 => 1 }", "match n { 0 => 1, _ => n }"),
+    ];
+
+    for (broken, fixed) in correction_pairs {
+        let result = syn_pruner.validate(broken);
+        let error_msg = match &result.error_kind {
+            ErrorKind::SynError(msg) => msg.clone(),
+            ErrorKind::UnbalancedBrackets => "Unbalanced brackets".to_string(),
+            ErrorKind::None => String::new(),
+        };
+
+        // Validate the fix
+        let fix_result = syn_pruner.validate(fixed);
+        let fix_status = if fix_result.is_valid { "✓" } else { "✗" };
+
+        println!("  Broken:  {broken}");
+        println!("  Error:   {error_msg}");
+        println!("  Fix:     {fixed} {fix_status}");
+        println!();
     }
 
     // ── Summary ──────────────────────────────────────────────────
