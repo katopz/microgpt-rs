@@ -250,7 +250,7 @@ Speedup: Speculative vs AR went from **0.72x** → **1.48x**
 - `bench_prefill_compression` improved 504% ✓ (24.63→4.08 μs/step)
 
 ## Remaining (optional, lower priority)
-- [ ] Allocation tracking via `#[global_allocator]` wrapper in debug builds
-- [ ] `run_all_parallel()` — rayon parallel benchmark runner
-- [ ] `generate_batch()` — multi-sample generation via `par_iter`
-- [ ] Rayon for `build_dd_tree_pruned` initial heap population (not worth it for vocab=27)
+- [x] Allocation tracking via `#[global_allocator]` wrapper in debug builds
+- [x] `run_all_parallel()` — rayon parallel benchmark runner
+- [x] `generate_batch()` — multi-sample generation via `par_iter`
+- [x] Rayon for `build_dd_tree_pruned` initial heap population (not worth it for vocab=27)

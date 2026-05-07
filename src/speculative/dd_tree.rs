@@ -1,6 +1,7 @@
 use std::collections::BinaryHeap;
 
 use super::types::{ConstraintPruner, NoPruner, TreeNode};
+use rayon::prelude::*;
 
 /// Extract tokens from `parent_path` bitfield for path-aware pruning.
 ///
@@ -277,14 +278,34 @@ impl TreeBuilder {
             // ── Phase B: Seed heap with siblings + last chain children ──
             if self.chain_nodes.is_empty() {
                 // No chain built — fall back to original root seeding
-                for (i, &prob) in marginals[0].iter().enumerate() {
-                    if prob > 0.0 && pruner.is_valid(0, i, &[]) {
-                        self.heap.push(TreeNode {
-                            score: prob.ln(),
-                            depth: 0,
-                            token_idx: i,
-                            parent_path: i as u128,
-                        });
+                if config.vocab_size > 256 {
+                    let nodes: Vec<TreeNode> = marginals[0]
+                        .par_iter()
+                        .enumerate()
+                        .filter_map(|(i, &prob)| {
+                            if prob > 0.0 && pruner.is_valid(0, i, &[]) {
+                                Some(TreeNode {
+                                    score: prob.ln(),
+                                    depth: 0,
+                                    token_idx: i,
+                                    parent_path: i as u128,
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    self.heap.extend(nodes);
+                } else {
+                    for (i, &prob) in marginals[0].iter().enumerate() {
+                        if prob > 0.0 && pruner.is_valid(0, i, &[]) {
+                            self.heap.push(TreeNode {
+                                score: prob.ln(),
+                                depth: 0,
+                                token_idx: i,
+                                parent_path: i as u128,
+                            });
+                        }
                     }
                 }
             } else {
@@ -349,14 +370,34 @@ impl TreeBuilder {
             }
         } else {
             // Original behavior: seed heap with root's children, filtered by pruner
-            for (i, &prob) in marginals[0].iter().enumerate() {
-                if prob > 0.0 && pruner.is_valid(0, i, &[]) {
-                    self.heap.push(TreeNode {
-                        score: prob.ln(),
-                        depth: 0,
-                        token_idx: i,
-                        parent_path: i as u128,
-                    });
+            if config.vocab_size > 256 {
+                let nodes: Vec<TreeNode> = marginals[0]
+                    .par_iter()
+                    .enumerate()
+                    .filter_map(|(i, &prob)| {
+                        if prob > 0.0 && pruner.is_valid(0, i, &[]) {
+                            Some(TreeNode {
+                                score: prob.ln(),
+                                depth: 0,
+                                token_idx: i,
+                                parent_path: i as u128,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                self.heap.extend(nodes);
+            } else {
+                for (i, &prob) in marginals[0].iter().enumerate() {
+                    if prob > 0.0 && pruner.is_valid(0, i, &[]) {
+                        self.heap.push(TreeNode {
+                            score: prob.ln(),
+                            depth: 0,
+                            token_idx: i,
+                            parent_path: i as u128,
+                        });
+                    }
                 }
             }
         }

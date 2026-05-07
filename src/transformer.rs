@@ -763,6 +763,46 @@ impl PagedKVCache {
         new_seq
     }
 
+    /// Rollback a sequence to a given position, freeing exclusive pages.
+    ///
+    /// Truncates page tables to keep only pages covering positions `[0..rollback_to_pos)`.
+    /// Pages that are exclusively owned by this sequence (not referenced by any other
+    /// sequence in any layer) are returned to the free list for reuse.
+    ///
+    /// This is the "page table CoW rollback" — no data is copied, only page table
+    /// entries are manipulated and exclusive pages are recycled.
+    pub fn rollback(&mut self, seq_idx: usize, rollback_to_pos: usize) {
+        let keep_count = rollback_to_pos / PAGE_SIZE;
+
+        // Build set of page indices referenced by all OTHER sequences across all layers.
+        // Since page indices are globally unique (allocated from a single pool), a simple
+        // HashSet<usize> is sufficient — no need for (layer, page) tuples.
+        let mut referenced_by_others = std::collections::HashSet::new();
+        for layer_tables in self.layer_page_tables.iter() {
+            for (seq, table) in layer_tables.iter().enumerate() {
+                if seq != seq_idx {
+                    for &pidx in table {
+                        referenced_by_others.insert(pidx);
+                    }
+                }
+            }
+        }
+
+        // Truncate page tables and free exclusive pages
+        for layer_tables in &mut self.layer_page_tables {
+            if seq_idx >= layer_tables.len() {
+                continue;
+            }
+            let table = &mut layer_tables[seq_idx];
+            let removed: Vec<usize> = table.drain(keep_count..).collect();
+            for pidx in removed {
+                if !referenced_by_others.contains(&pidx) {
+                    self.free_pages.push(pidx);
+                }
+            }
+        }
+    }
+
     /// Reset all sequences and free all pages.
     pub fn reset(&mut self) {
         for layer_tables in &mut self.layer_page_tables {
@@ -1539,6 +1579,164 @@ mod tests {
         let logits = forward_paged(&mut ctx, &weights, &mut cache, 0, 0, 0, &config);
         for (i, &l) in logits.iter().enumerate() {
             assert!(l.is_finite(), "logit {i} is not finite: {l}");
+        }
+    }
+
+    // ── Rollback tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_paged_rollback_frees_exclusive_pages() {
+        let config = Config::micro();
+        let mut paged = PagedKVCache::new(&config, 2);
+
+        // Allocate pages for seq 0 up to pos 31 (2 pages: 0..15, 16..31)
+        paged.ensure_pages(0, 31);
+        let seq0_pages_len = paged.layer_page_tables[0][0].len();
+        assert!(seq0_pages_len >= 2, "seq 0 should have at least 2 pages");
+
+        // Rollback seq 0 to pos 0 — all pages are exclusive (no other seq)
+        paged.rollback(0, 0);
+
+        // Page table should be truncated
+        assert!(
+            paged.layer_page_tables[0][0].is_empty(),
+            "seq 0 page table should be empty after rollback to pos 0"
+        );
+        // All pages should be freed (they were exclusive)
+        assert!(
+            !paged.free_pages.is_empty(),
+            "exclusive pages should be returned to free list"
+        );
+    }
+
+    #[test]
+    fn test_paged_rollback_preserves_shared_pages() {
+        let config = Config::micro();
+        let mut paged = PagedKVCache::new(&config, 4);
+
+        // Allocate pages for seq 0 up to pos 31
+        paged.ensure_pages(0, 31);
+        let _initial_pages_len = paged.layer_page_tables[0][0].len();
+
+        // Fork a new sequence from seq 0 at pos 16 — shares first page
+        // (fork returns layer_page_tables[0].len(), which may be > 1 if max_sequences > 1)
+        let seq1 = paged.fork(0, 16);
+        assert_ne!(seq1, 0, "fork should return a new sequence index");
+
+        // Allocate exclusive pages for seq 0 beyond fork point
+        paged.ensure_pages(0, 47); // extra pages after pos 31
+
+        let free_before = paged.free_pages.len();
+        let pages_before_rollback = paged.layer_page_tables[0][0].len();
+
+        // Rollback seq 0 to pos 16 — keeps shared page, frees exclusive ones
+        paged.rollback(0, 16);
+
+        // Page table should be truncated to 1 page (covers 0..15)
+        assert_eq!(
+            paged.layer_page_tables[0][0].len(),
+            1,
+            "seq 0 should have 1 page after rollback to pos 16 (page covers 0..15)"
+        );
+
+        // Some pages should have been freed (the exclusive ones beyond page 0)
+        let freed = paged.free_pages.len() - free_before;
+        assert!(
+            freed > 0,
+            "exclusive pages beyond rollback point should be freed"
+        );
+
+        // But NOT more than what was removed from page table
+        let removed = pages_before_rollback - 1;
+        assert!(
+            freed <= removed,
+            "freed pages ({freed}) should not exceed removed pages ({removed})"
+        );
+    }
+
+    #[test]
+    fn test_paged_rollback_shared_page_not_freed() {
+        let config = Config::micro();
+        let mut paged = PagedKVCache::new(&config, 4);
+
+        // Allocate pages for seq 0
+        paged.ensure_pages(0, 31);
+
+        // Fork seq 1 at pos 0 — shares nothing initially (fork_page = 0)
+        let seq1 = paged.fork(0, 0);
+
+        // Allocate different pages for seq 1
+        paged.ensure_pages(seq1, 31);
+
+        // Now fork seq 2 from seq 0 at pos 16 — shares first page with seq 0
+        let seq2 = paged.fork(0, 16);
+        let shared_page_idx = paged.layer_page_tables[0][0][0];
+
+        // Rollback seq 2 to pos 0 — the shared page should NOT be freed
+        let _free_before = paged.free_pages.len();
+        paged.rollback(seq2, 0);
+
+        // Shared page should still be in seq 0's page table
+        assert!(
+            paged.layer_page_tables[0][0].contains(&shared_page_idx),
+            "shared page should still be referenced by seq 0"
+        );
+        // Shared page should NOT be in free list
+        assert!(
+            !paged.free_pages.contains(&shared_page_idx),
+            "shared page should not be freed"
+        );
+    }
+
+    #[test]
+    fn test_paged_rollback_truncates_page_table() {
+        let config = Config::micro();
+        let mut paged = PagedKVCache::new(&config, 1);
+
+        // Allocate 4 pages worth of positions
+        paged.ensure_pages(0, 63);
+        assert!(
+            paged.layer_page_tables[0][0].len() >= 4,
+            "should have at least 4 pages for pos 0..63"
+        );
+
+        // Rollback to pos 32 — should keep 2 pages (0..15, 16..31)
+        paged.rollback(0, 32);
+        assert_eq!(
+            paged.layer_page_tables[0][0].len(),
+            2,
+            "should have exactly 2 pages after rollback to pos 32"
+        );
+
+        // Rollback to pos 16 — should keep 1 page (0..15)
+        paged.rollback(0, 16);
+        assert_eq!(
+            paged.layer_page_tables[0][0].len(),
+            1,
+            "should have exactly 1 page after rollback to pos 16"
+        );
+    }
+
+    #[test]
+    fn test_paged_rollback_all_layers_consistent() {
+        let mut config = Config::micro();
+        config.n_layer = 4;
+        let mut paged = PagedKVCache::new(&config, 1);
+
+        // Allocate pages for all layers
+        paged.ensure_pages(0, 31);
+
+        // Rollback to pos 16
+        paged.rollback(0, 16);
+
+        // All layers should have the same page table length
+        let expected = 1; // 1 page covers 0..15
+        for (layer_idx, lt) in paged.layer_page_tables.iter().enumerate() {
+            assert_eq!(
+                lt[0].len(),
+                expected,
+                "layer {layer_idx} should have {expected} pages after rollback"
+            );
         }
     }
 }
