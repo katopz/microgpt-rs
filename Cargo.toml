@@ -26,10 +26,10 @@ crossterm = "0.28"
 default = []
 leviathan = []
 sudoku = []
-clora = ["syn", "proc-macro2"]
+validator = ["syn", "proc-macro2"]
 rest = ["reqwest", "tokio"]
 gpu = ["wgpu", "bytemuck", "pollster", "safetensors"]
-full = ["leviathan", "sudoku", "clora", "rest", "gpu"]
+full = ["leviathan", "sudoku", "validator", "rest", "gpu"]
 
 [[example]]
 name = "sudoku_speculative"
@@ -44,5 +44,5 @@ name = "sudoku_tui"
 required-features = ["sudoku"]
 
 [[example]]
-name = "clora_demo"
-required-features = ["clora"]
+name = "validator_demo"
+required-features = ["validator"]

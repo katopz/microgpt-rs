@@ -9,8 +9,8 @@ pub mod types;
 #[cfg(feature = "rest")]
 pub mod rest;
 
-#[cfg(feature = "clora")]
-pub mod clora;
+#[cfg(feature = "validator")]
+pub mod validator;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;

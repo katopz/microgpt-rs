@@ -5,7 +5,7 @@ use crate::tokenizer::BpeTokenizer;
 use crate::tokenizer::BpeTokenizerImpl;
 use std::sync::Arc;
 
-/// Two-tier syntax pruner for cLoRA.
+/// Two-tier syntax pruner for Validator.
 ///
 /// Tier 0: Bracket balancer DFA (PartialParser) — O(n), rejects clearly broken code.
 /// Tier 1: `syn` parse attempt — accurate, but expensive. Only called if Tier 0 passes.

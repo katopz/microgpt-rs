@@ -268,7 +268,7 @@ pub trait ConstraintPruner: Send + Sync {
 |--------|---------|-------------|
 | `NoPruner` | (always available) | Always returns `true`. No-op pass-through. |
 | `SudokuPruner` | `"sudoku"` | Row/column/box validation with path-aware cross-depth checks. Ensures generated token sequences satisfy Sudoku constraints. |
-| `SynPruner` | `"clora"` | Bracket balance + syntax parse validation. Ensures generated code/structured output remains syntactically valid. |
+| `SynPruner` | `"validator"` | Bracket balance + syntax parse validation. Ensures generated code/structured output remains syntactically valid. |
 
 Pruners are called during `build_dd_tree_pruned` for every candidate node before it enters the priority heap. Invalid branches are discarded immediately, saving budget for valid explorations.
 
@@ -315,7 +315,7 @@ pub trait PrefillScorer: Send + Sync {
 | `"leviathan"` | `LeviathanVerifier` — full p/q rejection sampling |
 | `"rest"` | `RestClient`, REST-augmented tree merge |
 | `"sudoku"` | `SudokuPruner` — constrained decoding for Sudoku |
-| `"clora"` | `SynPruner` — syntax-aware constrained decoding |
+| `"validator"` | `SynPruner` — syntax-aware constrained decoding |
 
 ---
 

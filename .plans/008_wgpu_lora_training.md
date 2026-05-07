@@ -1,5 +1,10 @@
 # Plan 008: wgpu LoRA Training — GPU-Accelerated `lora.bin` Fine-Tuning
 
+> **Rename Note**: The `clora` module was renamed to `validator` because it contains
+> deterministic syntax validation code (SynPruner, PartialParser), not neural LoRA weights.
+> Feature flag: `clora` → `validator`. Module path: `src/clora/` → `src/validator/`.
+> The actual LoRA adapter (`lora.bin`) lives in this plan's `gpu` feature.
+
 ## Objective
 
 Build a `wgpu`-based GPU training backend that produces `lora.bin` (neural LoRA weights) from the training data JSONL produced by plan 007 (cLoRA). The CPU path remains the zero-allocation reference implementation. The GPU path accelerates the forward + backward pass for LoRA parameter updates, targeting WASM (WebGPU), Metal (Apple Silicon), Vulkan (Nvidia/AMD), and DX12 (Windows).

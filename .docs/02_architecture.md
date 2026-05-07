@@ -61,7 +61,7 @@ pub struct ForwardContext {
     xr2: Vec<f32>,            // [n_embd] — residual buffer 2
     scores: Vec<f32>,         // [block_size] — attention scores
     logits: Vec<f32>,         // [vocab_size]
-    pub hidden_state: Vec<f32>, // [n_embd] — snapshot before lm_head (for REST/cLoRA)
+    pub hidden_state: Vec<f32>, // [n_embd] — snapshot before lm_head (for REST/Validator)
 }
 ```
 - Created once, reused across calls via `cache.reset()`

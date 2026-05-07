@@ -1,7 +1,7 @@
-# mini-dllm: Compiler-in-the-Loop cLoRA
+# mini-dllm: Constraint Validator
 
-## What is cLoRA?
-Compiler-in-the-Loop LoRA — a neuro-symbolic inference system where `rustc`/`syn` acts as the deterministic referee inside the speculative decoding loop. The LLM drafts token sequences; a rules engine validates them against the Rust AST before target model verification.
+## What is Validator?
+Deterministic validation — a neuro-symbolic inference system where `rustc`/`syn` acts as the deterministic referee inside the speculative decoding loop. The LLM drafts token sequences; a rules engine validates them against the Rust AST before target model verification.
 
 ## The Grand Vision (from Research)
 
@@ -14,7 +14,7 @@ Compiler-in-the-Loop LoRA — a neuro-symbolic inference system where `rustc`/`s
 │                               DDTree Branches                   │
 │                                      │                           │
 │                          ┌───────────▼───────────┐              │
-│                          │   SynPruner (cLoRA)    │              │
+│                          │   SynPruner (Validator)│              │
 │                          │   ┌─────────────────┐  │              │
 │                          │   │ bracket balance  │  │  Tier 0 DFA │
 │                          │   │ keyword accept   │  │  ~100ns/tok │
@@ -70,7 +70,7 @@ Compiler-in-the-Loop LoRA — a neuro-symbolic inference system where `rustc`/`s
 | BPE Tokenizer | ❌ Planned | Module structure sketched |
 | PartialParser | ❌ Planned | Bracket balancer DFA designed |
 | SynPruner | ❌ Planned | Two-tier validation designed |
-| Training data pipeline | ❌ Deferred to Plan 009 | Depends on tokenizer + clora |
+| Training data pipeline | ❌ Deferred to Plan 009 | Depends on tokenizer + validator |
 
 ## Path Encoding Redesign
 
@@ -154,7 +154,7 @@ impl Config {
 ```
 - Total weights: ~1.1 MB (target), ~130 KB (draft)
 
-## PartialParser (`clora/partial_parser.rs`) (planned)
+## PartialParser (`validator/partial_parser.rs`) (planned)
 
 ### Design: Bracket Balancer + Keyword Acceptor
 NOT a full Rust parser. A pragmatic DFA:
@@ -178,12 +178,12 @@ pub struct PartialParser {
 - Latency: ~50ns per token call
 
 ### Honest Assessment
-This is "Phase 0 cLoRA":
+This is "Phase 0 Validator":
 - Catches ~10-20% of invalid branches (unbalanced delimiters)
 - Near-zero false negatives (rarely prunes valid code)
 - The remaining ~80-90% pass to Tier 1 (syn) and Tier 2 (cargo check)
 
-## SynPruner (`clora/syn_pruner.rs`) (planned)
+## SynPruner (`validator/syn_pruner.rs`) (planned)
 
 ### Two-Tier Validation
 
@@ -222,7 +222,7 @@ pub fn validate_path(&self, token_ids: &[usize]) -> PruneResult {
 }
 ```
 
-## CompilerFeedback (`clora/types.rs`) (planned)
+## CompilerFeedback (`validator/types.rs`) (planned)
 ```rust
 pub struct CompilerFeedback {
     pub error_message: String,
@@ -235,7 +235,7 @@ pub struct CompilerFeedback {
 
 ## Feature Flag
 ```toml
-clora = ["syn", "proc-macro2"]
+validator = ["syn", "proc-macro2"]
 ```
 - `syn` is an optional dependency, NOT required for core functionality
 - BPE tokenizer works without syn
@@ -263,6 +263,6 @@ Crates.io ─┘    (walk+dedup)       (syn+cargo check)    (training data)
 ```
 
 ## Key References
-- `.research/00_Neuro-Symbolic LLM Architecture.md` — Original cLoRA concept
+- `.research/00_Neuro-Symbolic LLM Architecture.md` — Original Validator concept
 - `.research/01_Advanced Neuro-Symbolic Rust Translation.md` — Grand Unification architecture
 - `syn` crate — Rust AST parser

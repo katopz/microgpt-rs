@@ -10,7 +10,7 @@ A `wgpu`-based GPU training backend that produces `lora.bin` from training data 
 │                    LoRA TRAINING PIPELINE                       │
 │                                                                  │
 │  training.jsonl ──► DataLoader ──► Batch ──► GPU Upload         │
-│  (from cLoRA pipeline)                               │         │
+│  (from Validator pipeline)                          │         │
 │                                      ┌───────────────▼───────┐ │
 │                                      │   wgpu Compute Pass   │ │
 │                                      │                        │ │
@@ -84,8 +84,8 @@ LoRA:      Y = W · x + α · (B · A) · x
 |--------|--------|------|----------|-------------|--------|
 | `micro` | 16 | 4 | 1 | ~5K | ~20 KB |
 | `draft` | 64 | 4 | 1 | ~20K | ~80 KB |
-| cLoRA target | 256 | 16 | 4 | ~524K | ~2 MB |
-| cLoRA large | 512 | 32 | 8 | ~4.2M | ~17 MB |
+| Validator target | 256 | 16 | 4 | ~524K | ~2 MB |
+| Validator large | 512 | 32 | 8 | ~4.2M | ~17 MB |
 
 ## Module Layout (planned)
 ```
@@ -209,7 +209,7 @@ pub struct TrainingConfig {
 Per step: forward → loss → backward (LoRA grads) → optimizer step → logging → checkpoint
 
 ## DataLoader (`gpu/dataloader.rs`)
-- Reads JSONL from cLoRA pipeline (Plan 007)
+- Reads JSONL from Validator pipeline (Plan 007)
 - Batches samples with shuffling and padding
 - Input: `[batch_size, seq_len]`, Target: shifted by 1 (next-token prediction)
 
@@ -233,6 +233,6 @@ gpu = ["wgpu", "bytemuck", "pollster", "safetensors"]
 | `safetensors` not WASM-compatible | Binary format fallback with blake3 |
 
 ## Prerequisites
-- Plan 007 (cLoRA): BPE Tokenizer must define vocabulary and Config dimensions
+- Plan 007 (Validator): BPE Tokenizer must define vocabulary and Config dimensions
 - Training data JSONL from Plan 007/009 pipeline
 - Development/testing uses `Config::micro()` which already exists

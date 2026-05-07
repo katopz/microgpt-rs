@@ -1,4 +1,9 @@
-# Plan 007: Compiler-in-the-Loop cLoRA — Full Rust Vocabulary + Training Pipeline
+# Plan 007: Constraint Validator — Full Rust Vocabulary + Validation Pipeline
+
+> **Rename Note**: The `clora` module was renamed to `validator` because it contains
+> deterministic syntax validation code (SynPruner, PartialParser), not neural LoRA weights.
+> Feature flag: `clora` → `validator`. Module path: `src/clora/` → `src/validator/`.
+> The actual LoRA adapter (`lora.bin`) lives in the `gpu` feature (Plan 008).
 
 ## Objective
 

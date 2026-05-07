@@ -1,5 +1,10 @@
 # Plan 009: REST Speculative Decoding — anyrag Hidden-State Bridge
 
+> **Rename Note**: The `clora` module was renamed to `validator` because it contains
+> deterministic syntax validation code (SynPruner, PartialParser), not neural LoRA weights.
+> Feature flag: `clora` → `validator`. Module path: `src/clora/` → `src/validator/`.
+> The actual LoRA adapter (`lora.bin`) lives in the `gpu` feature (Plan 008).
+
 ## Objective
 
 Connect the mini-dllm inference engine to anyrag for Retrieval-Based Speculative Decoding (REST). Extract the "free embedding" (last hidden state before lm_head) during inference, query anyrag's `/search/vector` endpoint, and inject retrieved token continuations into the DDTree as additional candidate branches.

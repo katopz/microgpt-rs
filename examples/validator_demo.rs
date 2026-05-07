@@ -1,4 +1,4 @@
-//! cLoRA Demo: BPE Tokenizer → DDTree → SynPruner Validation
+//! Validator Demo: BPE Tokenizer → DDTree → SynPruner Validation
 //!
 //! Demonstrates the compiler-in-the-loop pipeline:
 //! 1. Train a BPE tokenizer on Rust source code
@@ -7,14 +7,14 @@
 //! 4. Compare pruned vs unpruned tree sizes
 //! 5. Validate code fragments through two-tier syntax checking
 //!
-//! Run: cargo run --example clora_demo --features clora
+//! Run: cargo run --example validator_demo --features validator
 
 use std::sync::Arc;
 
-use microgpt_rs::clora::{CompilerFeedback, ErrorKind, PartialParser, SynPruner};
 use microgpt_rs::speculative::{NoPruner, build_dd_tree, build_dd_tree_pruned};
 use microgpt_rs::tokenizer::{BpeTokenizerImpl, BpeTrainer};
 use microgpt_rs::types::Config;
+use microgpt_rs::validator::{CompilerFeedback, ErrorKind, PartialParser, SynPruner};
 
 /// Sample Rust code corpus for BPE training.
 const RUST_CORPUS: &str = r#"
@@ -103,7 +103,7 @@ const INVALID_FRAGMENTS: &[&str] = &[
 ];
 
 fn main() {
-    println!("🧠 cLoRA Demo: Compiler-in-the-Loop Token Pruning");
+    println!("🧠 Validator Demo: Compiler-in-the-Loop Token Pruning");
     println!("{}", "═".repeat(60));
 
     // ── Phase 1: Train BPE Tokenizer ─────────────────────────────
@@ -287,7 +287,7 @@ fn main() {
 
     // ── Summary ──────────────────────────────────────────────────
     println!("{}", "═".repeat(60));
-    println!("✅ cLoRA pipeline complete");
+    println!("✅ Validator pipeline complete");
     println!();
     println!(
         "  BPE tokenizer:   {} vocab, {} merges",

@@ -8,7 +8,7 @@ A from-scratch Rust implementation of a GPT-2 style transformer with speculative
 
 - CPU-first inference engine with zero-allocation hot paths
 - Speculative decoding pipeline (DDTree + DFlash + Leviathan verification)
-- Domain-specific constraint pruning (Sudoku, Rust AST via cLoRA)
+- Domain-specific constraint pruning (Sudoku, Rust AST via Validator)
 - GPU LoRA training via wgpu (WASM-compatible)
 - Sub-millisecond inference on Apple Silicon
 
@@ -45,8 +45,8 @@ src/
 │   ├── mod.rs
 │   ├── client.rs
 │   └── types.rs
-├── tokenizer/                # BPE tokenizer (behind "clora" feature, planned)
-├── clora/                    # Compiler-in-the-Loop pruner (behind "clora" feature, planned)
+├── tokenizer/                # BPE tokenizer (behind "validator" feature, planned)
+├── validator/                # Deterministic validation pruner (behind "validator" feature, planned)
 └── gpu/                      # wgpu LoRA training (behind "gpu" feature, planned)
 ```
 
@@ -57,11 +57,11 @@ src/
 default = []
 leviathan = []                      # Real p/q rejection sampling with target model
 sudoku = []                         # SudokuPruner + sudoku examples
-clora = []                          # BPE tokenizer + SynPruner (planned: will add "syn" dep)
+validator = []                      # BPE tokenizer + SynPruner (planned: will add "syn" dep)
 rest = ["reqwest", "tokio"]         # REST bridge to anyrag
 training = []                       # Training mode (planned: will add "serde", "serde_json")
 gpu = []                            # wgpu LoRA training (planned: will add "wgpu", "bytemuck", "pollster", "safetensors")
-full = ["leviathan", "sudoku", "clora", "training", "gpu"]
+full = ["leviathan", "sudoku", "validator", "training", "gpu"]
 ```
 
 ## Quick Start
@@ -89,7 +89,7 @@ cargo run --release --features leviathan                       # Include Leviath
 ## Key Design Principles
 
 1. **Zero allocations on hot paths** — all buffers pre-allocated in `SpeculativeContext` and `ForwardContext`
-2. **Feature-gated modularity** — domain code (sudoku, clora) never pollutes core
+2. **Feature-gated modularity** — domain code (sudoku, validator) never pollutes core
 3. **Trait-based strategy** — `ConstraintPruner`, `SpeculativeVerifier`, `PrefillScorer` for swappable behavior
 4. **SOLID module decomposition** — each file < 1024 lines, single responsibility
 5. **`mod.rs` for index only**, minimal `main.rs`/`lib.rs`
@@ -114,7 +114,7 @@ cargo run --release --features leviathan                       # Include Leviath
 │  ┌──────────────┐    ┌──────────────────────────────┐  │
 │  │  Types/Kernel │    │     Constraint Pruners        │  │
 │  │  (matmul,     │    │  ┌────────┐ ┌──────────────┐ │  │
-│  │   softmax,    │    │  │Sudoku  │ │cLoRA (plan)  │ │  │
+│  │   softmax,    │    │  │Sudoku  │ │Validator(plan)│ │  │
 │  │   rmsnorm)    │    │  └────────┘ └──────────────┘ │  │
 │  └──────────────┘    └──────────────────────────────┘  │
 │                                                         │
@@ -137,7 +137,7 @@ cargo run --release --features leviathan                       # Include Leviath
 | 04 | `04_leviathan_distill.md` | Leviathan verification distillation |
 | 05 | `05_speculative_module_refactor.md` | Speculative module design |
 | 06 | `06_sudoku_tui.md` | TUI visualization |
-| 07 | `07_compiler_in_the_loop_clora.md` | cLoRA compiler-in-the-loop |
+| 07 | `07_compiler_in_the_loop_validator.md` | Validator compiler-in-the-loop |
 | 08 | `08_wgpu_lora_training.md` | GPU LoRA training |
 | 09 | `09_rest_speculative_decoding.md` | REST speculative decoding |
 | 10 | `10_multilayer_transformer.md` | Multi-layer transformer |
