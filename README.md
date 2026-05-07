@@ -184,24 +184,71 @@ Run on Apple Silicon (single-threaded, `--release` profile, 50k iterations, **ze
 ```
 Method                         Throughput         μs/step  Avg Accept Len
 ───────────────────────────────────────────────────────────────────────────────
-Transformer AR                  723,675 tok/s         1.38            1.00
-DFlash                         4,125,661 tok/s         1.94            8.00
-DDTree Build                     383,817 trees/s       2.61            —
-Speculative (Simulated)        1,072,079 tok/s         4.66            5.00
-Speculative (AR Draft)         1,511,882 tok/s         4.63            7.00
-Leviathan (Algorithm 1)    †    111,887 tok/s        10.54            1.18
-Leviathan (no rollback)    †    112,220 tok/s        10.50            1.18
-Leviathan (w/ rollback)    †    198,380 tok/s         5.92            1.18
-Spec (unconditioned)           1,072,739 tok/s         4.66            5.00
-Spec (conditioned)    †        1,118,092 tok/s         6.03            6.74
-Prefill (no compress)         19,157,126 tok/s         3.34           64.00
-Prefill (compressed)           1,946,902 tok/s         3.60            7.00
-DDTree (no chain)                384,190 trees/s       2.60           16.00
-DDTree (chain-seed)              403,230 trees/s       2.48           16.00
+Transformer AR                  1,187,238 tok/s       0.84            1.00
+DFlash                         4,045,821 tok/s       1.98            8.00
+DDTree Build                     372,928 trees/s      2.68            —
+Speculative (Simulated)        1,061,668 tok/s       4.71            5.00
+Speculative (AR Draft)         1,473,397 tok/s       4.75            7.00
+Leviathan (Algorithm 1)    †    109,306 tok/s      10.78            1.18
+Leviathan (no rollback)    †    109,509 tok/s      10.76            1.18
+Leviathan (w/ rollback)    †    190,013 tok/s       6.18            1.18
+Spec (unconditioned)           1,048,696 tok/s       4.77            5.00
+Spec (conditioned)    †        1,064,849 tok/s       6.33            6.74
+Prefill (no compress)         17,780,852 tok/s       3.36           64.00
+Prefill (compressed)           1,796,034 tok/s       3.90            7.00
+DDTree (no chain)                375,828 trees/s      2.66           16.00
+DDTree (chain-seed)              390,266 trees/s      2.56           16.00
 ───────────────────────────────────────────────────────────────────────────────
-📈 Best speedup: 1.48x (Speculative vs AR)
+📈 Best speedup: 1.24x (Speculative AR Draft vs AR)
 † Requires --features leviathan
 ```
+
+![Benchmark Chart](bench/022_bench_result.png)
+
+### What each benchmark measures
+
+The benchmarks progress from individual components to full pipelines:
+
+#### Core Components
+
+| Benchmark | What it does | Why it matters |
+|-----------|-------------|----------------|
+| **Transformer AR** | Baseline: 1 target model forward pass → 1 token. The "slow path" that speculative decoding tries to beat. | Ground truth. If speculative can't beat this, it's not worth the complexity. |
+| **DFlash** | **Block-parallel draft prediction**: runs 8 independent forward passes on the tiny draft model (same input, different positions). Produces 8 marginal distributions P(x₁), P(x₂), …, P(x₈) without autoregressive feedback. | The "fast but inaccurate" draft. 8 tokens predicted in parallel vs 1 from AR. Throughput is per-draft-token. |
+| **DDTree Build** | Builds a Best-First Search tree (budget=16 nodes) from DFlash marginals. Explores the most probable token paths using cumulative log-probability. | Converts flat marginals into a tree of candidate paths. The tree maximizes Expected Acceptance Length. |
+
+#### Speculative Decoding Pipelines
+
+| Benchmark | Pipeline | Why it matters |
+|-----------|----------|----------------|
+| **Speculative (Simulated)** | DFlash → DDTree → extract best path → simulated 75% acceptance cap → bonus token. No target model. "Simulated" means acceptance is artificially capped rather than using real p/q rejection. | Full speculative pipeline without expensive target verification. Measures the "ideal" case where draft quality is good. Avg 5 accepted tokens per step. |
+| **Speculative (AR Draft)** | Same pipeline but uses **autoregressive** drafting: each step feeds back the sampled token as input for the next. Produces conditional q(x\|x<t) distributions instead of independent marginals. | AR drafting produces more coherent sequences → better acceptance (7 tokens vs 5). The extra sampling cost pays off in longer accepted sequences. |
+| **Spec (unconditioned)** | Identical to "Speculative (Simulated)" — measured separately as the baseline for comparison with the conditioned variant below. | Control group: same draft model, same pipeline, no target information. |
+| **Spec (conditioned)** † | **Target-conditioned draft**: runs target model forward to capture hidden state → projects it into draft model's KV cache as initial seed → draft now "sees" target features → produces better-informed marginals → DDTree → simulated acceptance. | The draft model gains partial access to the target's representation. Higher avg acceptance (6.74 vs 5.0) shows conditioning helps, but the extra target forward pass adds latency. |
+
+#### Leviathan: Real Target Verification (Algorithm 1)
+
+| Benchmark | Pipeline | Why it matters |
+|-----------|----------|----------------|
+| **Leviathan (Algorithm 1)** † | Full [Algorithm 1](https://arxiv.org/pdf/2211.17192): AR draft → target model scores ALL drafted tokens → real p/q rejection sampling → residual distribution on rejection → bonus token. **Mathematically distribution-preserving** — output is identical to sampling from target alone. | Proves the algorithm works end-to-end. Slow here because our target is only 4× bigger than draft — needs ~10× for speculative to win. |
+| **Leviathan (no rollback)** † | Standard Leviathan that resets target KV cache each step. No branch recovery. | Baseline for rollback comparison. |
+| **Leviathan (w/ rollback)** † | Leviathan with KV cache **snapshot/rollback**: before each verification attempt, snapshots the target KV cache (cheap O(n_layer × pos × kv_dim) copy). On rejection, rolls back and tries the next candidate branch — avoids re-running target from scratch. | Snapshot cost is negligible; rollback saves re-running target. 73% faster than no-rollback (6.18 vs 10.76 μs). Essential for multi-branch verification. |
+
+#### Prompt Compression (PFlash-inspired)
+
+| Benchmark | Pipeline | Why it matters |
+|-----------|----------|----------------|
+| **Prefill (no compress)** | Uses the draft model's **self-attention weights** as a per-token importance proxy. Runs forward passes over a 64-token prompt (block_size × 4), extracts attention scores, normalizes to [0, 1]. All 64 tokens are kept. | Measures raw importance scoring speed. The 612× zero-alloc speedup came from reusing `SpeculativeContext` instead of creating `ForwardContext` + `KVCache` per call. |
+| **Prefill (compressed)** | Same scoring as above, then **compresses** to keep_ratio=0.1 — keeps only the top 10% most important tokens (~7 of 64). Inspired by [Cross-Family Speculative Prefill](https://arxiv.org/abs/2603.02631): instead of feeding all prompt tokens to the (expensive) target model, score them with the (cheap) draft model and only prefill the important ones. | The actual use case: reduces target prefill work by ~9× at the cost of losing ~90% of prompt tokens. The 7 kept tokens represent the most "attended-to" positions. |
+
+#### Tree Building Variants
+
+| Benchmark | What differs | Why it matters |
+|-----------|-------------|----------------|
+| **DDTree (no chain)** | Standard best-first: seeds heap with all root marginals, expands greedily by score. | Baseline tree construction. |
+| **DDTree (chain-seed)** | **Chain-seed optimization**: first builds a greedy backbone (argmax at each depth with cumulative log-prob), then seeds the heap with siblings at each chain depth + children of the last chain node. Inspired by [DFlash](https://arxiv.org/abs/2602.06036). | The chain provides a "highway" through the tree that pure best-first might miss. Slightly faster (2.56 vs 2.66 μs) because the initial heap population is more focused. |
+
+> † Feature-gated behind `--features leviathan`. These benchmarks require the target model for real verification or hidden state extraction.
 
 ### Zero-Alloc Improvements (Plan 013)
 
@@ -209,70 +256,47 @@ Pre-allocated `SpeculativeContext` + `TreeBuilder` structs eliminate per-step he
 
 | Method | Before (μs) | After (μs) | Improvement |
 |--------|-------------|-------------|-------------|
-| DFlash | 2.60 | 1.94 | **34% faster** |
-| DDTree Build | 3.19 | 2.61 | **22% faster** |
-| Speculative (Simulated) | 5.92 | 4.66 | **27% faster** |
-| Speculative (AR Draft) | 5.70 | 4.63 | **23% faster** |
-| Prefill (no compress) | 23.78 | 3.34 | **612% faster** |
-| Prefill (compressed) | 23.99 | 3.60 | **567% faster** |
-| DDTree (chain-seed) | 3.16 | 2.48 | **27% faster** |
+| DFlash | 2.60 | 1.98 | **31% faster** |
+| DDTree Build | 3.19 | 2.68 | **19% faster** |
+| Speculative (Simulated) | 5.92 | 4.71 | **25% faster** |
+| Speculative (AR Draft) | 5.70 | 4.75 | **20% faster** |
+| Prefill (no compress) | 23.78 | 3.36 | **608% faster** |
+| Prefill (compressed) | 23.99 | 3.90 | **515% faster** |
+| DDTree (chain-seed) | 3.16 | 2.56 | **23% faster** |
 
-![Benchmark Chart](bench/021_bench_result.png)
-
-### What each benchmark measures
-
-| Benchmark | What it does | Metric |
-|-----------|-------------|--------|
-| **Transformer AR** | 1 target model forward pass | tok/s (1 token per step) |
-| **DFlash** | 8 draft model forward passes (block-parallel prediction) | draft tok/s (8 tokens per step) |
-| **DDTree Build** | Tree construction from DFlash marginals | trees/s |
-| **Speculative (Simulated)** | DFlash + DDTree + simulated 75% acceptance + bonus token | effective tok/s |
-| **Speculative (AR Draft)** | Autoregressive draft + DDTree + simulated acceptance + bonus token | effective tok/s |
-| **Leviathan (Algorithm 1)** † | AR draft + real target model p/q verification + residual sampling | effective tok/s |
-| **Leviathan (w/ rollback)** † | Leviathan + KV cache snapshot/rollback for branch verification | effective tok/s |
-| **Spec (conditioned)** † | Target-conditioned draft via hidden state seeding + DDTree + simulated acceptance | effective tok/s |
-| **Prefill (no compress)** | Attention scorer over full prompt (block_size×4 tokens) | tokens scored/s |
-| **Prefill (compressed)** | Attention scorer + compression to keep_ratio=0.1 | kept tokens/s |
-| **DDTree (chain-seed)** | Greedy chain backbone before best-first expansion | trees/s |
-
-> † `Leviathan (Algorithm 1)` requires `--features leviathan`. It runs the full Algorithm 1 from [Leviathan et al. 2022](https://arxiv.org/pdf/2211.17192).
-
-### Speculative Decoding: Distilled from Leviathan et al. 2022
-
-Based on ["Fast Inference from Transformers via Speculative Decoding"](https://arxiv.org/pdf/2211.17192) (Leviathan et al., 2022, Algorithm 1):
+### Speculative Decoding Pipeline
 
 ```
-Phase 1: DRAFT — Run small model M_q autoregressively for γ tokens.
-         Sample each token, feed back as input for next. Save q(x) distributions.
-Phase 2: TARGET SCORING — Run large model M_p on all drafted tokens (+1 for bonus).
-         Save p(x) distributions.
-Phase 3: REJECTION SAMPLING — Accept token i with prob min(1, p_i/q_i).
-         On reject: sample replacement from residual max(0, p−q), break.
-Phase 4: BONUS TOKEN — If all γ accepted, sample +1 token from p(x) at position γ (free).
+Phase 1: DRAFT — Run small model M_q for γ tokens (DFlash: parallel, AR: sequential).
+         Save q(x) distributions at each step.
+Phase 2: VERIFY — Check drafted tokens against target distribution.
+         Simulated: cap acceptance at 75%.  Leviathan: real p/q rejection.
+Phase 3: BONUS — If all γ accepted, sample +1 free token from target distribution.
+Result:  γ+1 tokens accepted at best, 1 at worst (guaranteed progress).
 ```
 
 **Key insight: Model size ratio matters.** The paper assumes ~10× target/draft cost ratio (e.g., 70B/7B). Our ratio is ~4× (embd=16/4), so real target verification is a net loss:
 
 | Verifier | How it verifies | Target model? | Perf |
 |----------|----------------|---------------|------|
-| `SimulatedVerifier` | Accepts ceil(γ × rate) tokens + bonus from last marginal | ❌ No | 876K tok/s |
-| `SimulatedVerifier` (AR) | Same, but autoregressive drafting (conditional q(x\|x<t)) | ❌ No | 1.25M tok/s |
-| `LeviathanVerifier` † | Real p/q rejection + residual distribution + bonus from target p(x) | ✅ Yes | 107K tok/s |
+| `SimulatedVerifier` | Accepts ceil(γ × rate) tokens + bonus from last marginal | ❌ No | ~1.1M tok/s |
+| `SimulatedVerifier` (AR) | Same, but autoregressive drafting (conditional q(x\|x<t)) | ❌ No | ~1.5M tok/s |
+| `LeviathanVerifier` † | Real p/q rejection + residual distribution + bonus from target p(x) | ✅ Yes | ~109K tok/s |
 
 The `SpeculativeVerifier` trait makes them swappable — same `speculate()` interface, different verification strategy. When LoRA fine-tuning improves draft/target alignment, real verification becomes viable.
 
-> **`LeviathanVerifier` proves Algorithm 1 works end-to-end** — mathematically correct, distribution-preserving, but 8× slower than simulated at our 4× model ratio. This is the expected result: speculative decoding needs large model asymmetry to win.
+> **`LeviathanVerifier` proves Algorithm 1 works end-to-end** — mathematically correct, distribution-preserving, but ~10× slower than simulated at our 4× model ratio. This is the expected result: speculative decoding needs large model asymmetry to win.
 
 ### Why Leviathan is slow here (and when it won't be)
 
 ```
-Leviathan cost:  γ × draft_cost + (γ+1) × target_cost
-              =  8 × 0.31μs      + 9 × 1.23μs
-              =  2.5μs            + 11.1μs  = 13.6μs / 1.18 accepted = 11.5μs/token
+Leviathan cost:  γ × draft_cost + (γ+1) × target_cost + overhead
+              =  8 × 0.25μs      + 9 × 0.84μs            + ~1.6μs
+              =  2.0μs            + 7.6μs                + 1.6μs  = 10.78μs / 1.18 accepted = 9.1μs/token
 
-Simulated cost:  γ × draft_cost + tree_cost
-              =  8 × 0.31μs      + 3.1μs
-              =  2.5μs            + 3.1μs  = 5.6μs / 7 accepted = 0.8μs/token
+Simulated cost:  DFlash + DDTree + acceptance
+              =  1.98μs  + 2.68μs + ~0.05μs
+              =  4.71μs / 5 accepted = 0.94μs/token
 ```
 
 With random weights the draft and target distributions are poorly aligned → low acceptance rate (1.18/8 = 15%). After LoRA fine-tuning, acceptance should approach 80%+ and Leviathan becomes competitive at larger model sizes.
