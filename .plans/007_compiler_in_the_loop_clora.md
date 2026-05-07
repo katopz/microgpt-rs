@@ -10,7 +10,7 @@ Before implementation, I audited every file in `src/`. Here are the blockers the
 
 ### Blocker 1: `parent_path` bitfield overflows with BPE vocab (SHOWSTOPPER)
 
-```mini-dllm/src/speculative/dd_tree.rs#L19-20
+```/src/speculative/dd_tree.rs#L19-20
     .map(|k| ((parent_path >> ((num_tokens - 1 - k) * 5)) & 0x1F) as usize)
 ```
 
@@ -20,7 +20,7 @@ The `parent_path` packs **5 bits per depth** (`<< 5`, `& 0x1F`). This means **ma
 
 ### Blocker 2: `TransformerWeights` scales linearly with `vocab_size`
 
-```mini-dllm/src/transformer.rs#L25-35
+```/src/transformer.rs#L25-35
         Self {
             wte: init(config.vocab_size * n),      // [vocab_size * n_embd]
             lm_head: init(config.vocab_size * n),  // [vocab_size * n_embd]
@@ -51,7 +51,7 @@ The project's pattern is incremental: one module per plan, behind feature flags 
 
 ### Non-Blocker: `ConstraintPruner::is_valid` doesn't carry tokenizer
 
-```mini-dllm/src/speculative/types.rs#L15-20
+```/src/speculative/types.rs#L15-20
 pub trait ConstraintPruner: Send + Sync {
     fn is_valid(&self, depth: usize, token_idx: usize, parent_tokens: &[usize]) -> bool;
 }

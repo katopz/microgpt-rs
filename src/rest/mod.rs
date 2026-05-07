@@ -1,6 +1,6 @@
 //! REST-based Speculative Decoding (REST) module.
 //!
-//! Connects mini-dllm to anyrag for Retrieval-Based Speculative Decoding.
+//! Connects microgpt-rs to anyrag for Retrieval-Based Speculative Decoding.
 //! Queries anyrag's `/search/vector` endpoint with hidden state embeddings,
 //! then injects retrieved token continuations into the DDTree.
 //!
