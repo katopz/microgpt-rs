@@ -58,7 +58,7 @@ pub fn build_dd_tree(marginals: &[&[f32]], config: &crate::types::Config) -> Vec
 /// The pruner is called for every candidate token at every depth.
 /// Invalid tokens are never added to the heap — they don't waste tree budget.
 ///
-/// This is the **Computable LoRA intercept**: the draft model proposes
+/// This is the **Symbolic Validator intercept**: the draft model proposes
 /// logits (semantic probability), the pruner enforces constraints
 /// (mathematical validity), and only valid branches reach verification.
 pub fn build_dd_tree_pruned(

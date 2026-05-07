@@ -2,7 +2,7 @@
 
 ## Objective
 
-Extend the transformer from single-layer to multi-layer, enabling cLoRA-scale configs (4-8 layers) and making the architecture match real GPT-2/GPT-3 designs. This is a prerequisite for Plan 008 (wgpu LoRA training) at scale.
+Extend the transformer from single-layer to multi-layer, enabling validator-scale configs (4-8 layers, previously cLoRA-scale) and making the architecture match real GPT-2/GPT-3 designs. This is a prerequisite for Plan 008 (wgpu LoRA training) at scale.
 
 ## The Problem
 
@@ -72,7 +72,7 @@ impl Config {
         }
     }
     
-    /// Multi-layer target model for cLoRA scale.
+    /// Multi-layer target model for Deterministic Validator scale (previously cLoRA).
     /// 4 layers, embd=64, mlp=256 — ~550KB total.
     pub fn small_target() -> Self {
         Self {
@@ -262,8 +262,8 @@ pub fn forward<'a>(
 | `draft` | 1 | 4 | 16 | ~3 KB |
 | `bpe` | 1 | 32 | 128 | ~1.1 MB |
 | `small_target` | 4 | 64 | 256 | ~550 KB |
-| cLoRA target | 4 | 256 | 1024 | ~33 MB |
-| cLoRA large | 8 | 512 | 2048 | ~266 MB |
+| validator target (previously cLoRA) | 4 | 256 | 1024 | ~33 MB |
+| validator large (previously cLoRA) | 8 | 512 | 2048 | ~266 MB |
 
 ## Migration Strategy
 
@@ -341,7 +341,7 @@ pub fn forward<'a>(
 2. `LayerWeights` — per-layer weight struct
 3. `MultiLayerKVCache` — per-layer KV cache
 4. `forward()` — layer loop with zero extra allocations
-5. `Config::small_target()` — 4-layer config for cLoRA scale
+5. `Config::small_target()` — 4-layer config for validator scale (previously cLoRA)
 6. Full backward compatibility: `n_layer: 1` = current behavior
 
 ## Files to Create/Modify
@@ -358,6 +358,6 @@ pub fn forward<'a>(
 
 ## References
 
-- `.plans/007_compiler_in_the_loop_clora.md` — Config::bpe(), cLoRA scale
+- `.plans/007_constraint_validator.md` — Config::bpe(), validator scale (previously `007_compiler_in_the_loop_clora.md`, cLoRA scale)
 - `.plans/008_wgpu_lora_training.md` — GpuWeightBuffers, LoRA per-layer adapters
 - `.research/01_Advanced Neuro-Symbolic Rust Translation.md` — §Foundation Engine

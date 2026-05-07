@@ -2,12 +2,13 @@
 
 > **Rename Note**: The `clora` module was renamed to `validator` because it contains
 > deterministic syntax validation code (SynPruner, PartialParser), not neural LoRA weights.
-> Feature flag: `clora` → `validator`. Module path: `src/clora/` → `src/validator/`.
+> Feature flag: `clora` → `validator` (previously `clora`). Module path: `src/clora/` → `src/validator/`.
 > The actual LoRA adapter (`lora.bin`) lives in this plan's `gpu` feature.
+> The concept "Computable LoRA" / "cLoRA" is now called "Deterministic Validator".
 
 ## Objective
 
-Build a `wgpu`-based GPU training backend that produces `lora.bin` (neural LoRA weights) from the training data JSONL produced by plan 007 (cLoRA). The CPU path remains the zero-allocation reference implementation. The GPU path accelerates the forward + backward pass for LoRA parameter updates, targeting WASM (WebGPU), Metal (Apple Silicon), Vulkan (Nvidia/AMD), and DX12 (Windows).
+Build a `wgpu`-based GPU training backend that produces `lora.bin` (neural LoRA weights) from the training data JSONL produced by plan 007 (Deterministic Validator, previously cLoRA). The CPU path remains the zero-allocation reference implementation. The GPU path accelerates the forward + backward pass for LoRA parameter updates, targeting WASM (WebGPU), Metal (Apple Silicon), Vulkan (Nvidia/AMD), and DX12 (Windows).
 
 ## The Problem
 
@@ -17,7 +18,7 @@ Plan 007 produces `training.jsonl` — millions of BPE-tokenized Rust code sampl
 training.jsonl → batch → forward pass → cross-entropy loss → backward pass → LoRA A/B update → lora.bin
 ```
 
-The forward + backward pass is matmul-heavy. CPU works for the toy model (vocab=27, n_embd=16). But at cLoRA scale (vocab=32K, n_embd=256+, multi-layer), GPU becomes essential for practical training times.
+The forward + backward pass is matmul-heavy. CPU works for the toy model (vocab=27, n_embd=16). But at Deterministic Validator scale (vocab=32K, n_embd=256+, multi-layer), GPU becomes essential for practical training times.
 
 ## Architecture Overview
 
@@ -93,7 +94,7 @@ This plan targets **WebGPU via wgpu** as the sole GPU backend. Rationale:
 | BPE tokenizer | ❌ Blocked on Plan 007 | Plan 008 can develop with `Config::micro()` |
 
 ### Prerequisites Update
-- Plan 007 Phase 1 (BPE Tokenizer) must be complete for cLoRA-scale configs
+- Plan 007 Phase 1 (BPE Tokenizer) must be complete for validator-scale configs (previously cLoRA-scale)
 - Development and testing uses `Config::micro()` which already exists
 - `Config::bpe()` from Plan 007 defines the production config dimensions
 
@@ -127,8 +128,8 @@ LoRA:        Y = W·x + (B·A)·x   where A ∈ ℝ^(rank×n_embd), B ∈ ℝ^(n
 |--------|--------|------------|------|----------|-------------|-------------|
 | `micro` (toy) | 16 | 64 | 4 | 1 | ~5K | ~20 KB |
 | `draft` (small) | 64 | 256 | 4 | 1 | ~20K | ~80 KB |
-| cLoRA target | 256 | 1024 | 16 | 4 | ~524K | ~2 MB |
-| cLoRA large | 512 | 2048 | 32 | 8 | ~4.2M | ~17 MB |
+| validator target (previously cLoRA) | 256 | 1024 | 16 | 4 | ~524K | ~2 MB |
+| validator large (previously cLoRA) | 512 | 2048 | 32 | 8 | ~4.2M | ~17 MB |
 
 Even the largest config fits easily in GPU memory. The bottleneck is the **base model forward pass** (to compute activations), not the LoRA params.
 
@@ -178,10 +179,10 @@ safetensors = { version = "0.4", optional = true }   # Native only — not WASM 
 default = []
 leviathan = []
 sudoku = []
-clora = ["syn"]
+validator = ["syn"]                 # previously clora
 training = ["serde", "serde_json"]
-gpu = ["wgpu", "bytemuck", "pollster", "safetensors"]     # GPU-accelerated training
-full = ["leviathan", "sudoku", "clora", "training", "gpu"]
+gpu = ["wgpu", "bytemuck", "pollster", "safetensors"]             # GPU-accelerated training
+full = ["leviathan", "sudoku", "validator", "training", "gpu"]    # previously clora
 ```
 
 ## Phase 1: wgpu Context & Buffer Management
@@ -963,12 +964,12 @@ pub fn load_lora(path: &Path, forward: &mut GpuForwardPass) -> Result<(), GpuErr
 
 Note: safetensors may not compile on WASM targets. For WASM, use a simpler export format: `[blake3_hash(4B) | n_layers(4B) | rank(4B) | layer_data...]` where each layer_data is `[a_len(4B) | a_data | b_len(4B) | b_data]`. Gate safetensors behind a native-only path.
 
-## Phase 7: Integration with cLoRA Pipeline
+## Phase 7: Integration with Deterministic Validator Pipeline
 
 ### Data Flow from Plan 007 → Plan 008
 
 ```
-Plan 007 (cLoRA)                    Plan 008 (wgpu LoRA Training)
+Plan 007 (Deterministic Validator)  Plan 008 (wgpu LoRA Training)
 ─────────────────                   ──────────────────────────────
 rust-lang/rust ─┐
 top 1000 crates─┼─► CorpusIngester
@@ -1029,7 +1030,7 @@ impl Config {
 }
 ```
 
-**Note**: Plan 007 defines `vocab_size=4096` for `Config::bpe()`. Plan 008's GPU buffers must match this. The "32K vocab" mentioned in the parameter estimates table is for a future "cLoRA large" config that is NOT yet defined — it will be added when multi-layer support lands. All Plan 008 development and testing uses `vocab_size=4096` from Plan 007.
+**Note**: Plan 007 defines `vocab_size=4096` for `Config::bpe()`. Plan 008's GPU buffers must match this. The "32K vocab" mentioned in the parameter estimates table is for a future "validator large" config (previously "cLoRA large") that is NOT yet defined — it will be added when multi-layer support lands. All Plan 008 development and testing uses `vocab_size=4096` from Plan 007.
 
 **Note on multi-layer**: Plan 010 already implemented multi-layer support. `TransformerWeights` uses `layers: Vec<LayerWeights>`, `Config` has `n_layer: usize`, and `forward()` has a layer loop. The GPU forward pass must iterate `layers` and allocate per-layer activation buffers.
 
@@ -1111,7 +1112,7 @@ impl Config {
 - [ ] 6.4 Add test: export → load → forward pass produces same logits
 - [ ] 6.5 Add CLI command: `cargo run --features gpu -- train --data training.jsonl --output lora.bin`
 
-### Phase 7: cLoRA Integration
+### Phase 7: Deterministic Validator Integration
 - [ ] 7.1 Update `Config` with LoRA fields (rank, alpha, dropout, targets) — note: `n_layer` already exists from Plan 010
 - [ ] 7.2 Verify GPU buffer sizes match plan 007's BPE dimensions (vocab_size=4096, n_embd=32, n_layer=1)
 - [ ] 7.2.1 Update `GpuWeightBuffers` to use `Vec<GpuLayerWeights>` matching the `Vec<LayerWeights>` structure from Plan 010
@@ -1134,10 +1135,10 @@ impl Config {
 default = []
 leviathan = []
 sudoku = []
-clora = ["syn"]
+validator = ["syn"]                 # previously clora
 training = ["serde", "serde_json", "walkdir"]
 gpu = ["wgpu", "bytemuck", "pollster"]             # GPU training backend
-full = ["leviathan", "sudoku", "clora", "training", "gpu"]
+full = ["leviathan", "sudoku", "validator", "training", "gpu"]    # previously clora
 ```
 
 ## Key Risks & Mitigations
@@ -1163,10 +1164,10 @@ full = ["leviathan", "sudoku", "clora", "training", "gpu"]
 
 ## Prerequisites
 
-- **Plan 007 (cLoRA)**: Must be partially or fully completed. At minimum:
+- **Plan 007 (Deterministic Validator, previously cLoRA)**: Must be partially or fully completed. At minimum:
   - Phase 1 (BPE Tokenizer) must define the vocabulary and `Config` dimensions
   - Phase 3 (Training Data Pipeline) must produce `training.jsonl` for integration testing
-- The toy model (`Config::micro()`) can be used for development and testing without cLOra
+- The toy model (`Config::micro()`) can be used for development and testing without the validator feature
 
 ## Files to Create/Modify
 
@@ -1199,7 +1200,7 @@ full = ["leviathan", "sudoku", "clora", "training", "gpu"]
 
 ## References
 
-- `.plans/007_compiler_in_the_loop_clora.md` — Produces training data JSONL, defines BPE dimensions
+- `.plans/007_constraint_validator.md` — Produces training data JSONL, defines BPE dimensions (previously `007_compiler_in_the_loop_clora.md`)
 - `.research/01_Advanced Neuro-Symbolic Rust Translation.md` — LoRA training loop in the 32-day cycle
 - [wgpu repo](https://github.com/gfx-rs/wgpu) — Cross-platform GPU API for Rust
 - [WebGPU Compute Shaders](https://webgpufundamentals.org/webgpu/lessons/webgpu-compute-shaders.html) — WGSL basics

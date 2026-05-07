@@ -1,4 +1,4 @@
-//! Sudoku Speculative Decoding: DDTree + Computable LoRA Pruning
+//! Sudoku Speculative Decoding: DDTree + Symbolic Validator Pruning
 //!
 //! Demonstrates the neuro-symbolic intercept with 3-level comparison:
 //! - **Unpruned**: Draft model proposes all high-probability tokens
@@ -31,7 +31,7 @@ impl ConstraintPruner for StaticOnlyPruner<'_> {
 }
 
 fn main() {
-    println!("🧠 Sudoku Speculative Decoding: DDTree + Computable LoRA");
+    println!("🧠 Sudoku Speculative Decoding: DDTree + Symbolic Validator");
     println!("{}", "═".repeat(60));
 
     let board = Sudoku9x9::arto_inkala();

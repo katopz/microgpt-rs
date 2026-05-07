@@ -2,7 +2,7 @@
 //!
 //! Two tabs:
 //! - **9×9** — full backtracking solver, animated cell-by-cell.
-//! - **Speculative** — DDTree + path-aware Computable LoRA pruning.
+//! - **Speculative** — DDTree + path-aware Symbolic Validator pruning.
 //!
 //! Keys: Tab / 1 / 2 — switch mode · R — restart · Q / Esc — quit.
 //!

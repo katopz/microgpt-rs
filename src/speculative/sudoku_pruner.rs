@@ -7,7 +7,7 @@ use crate::speculative::types::ConstraintPruner;
 /// Sudoku constraint pruner: maps DDTree depth → (row, col) and
 /// validates each drafted digit (token_idx 1-9) against Sudoku rules.
 ///
-/// This is the bridge between speculative decoding and Computable LoRA:
+/// This is the bridge between speculative decoding and the Deterministic Validator:
 /// - Draft model proposes logits for each empty cell
 /// - SudokuPruner rejects digits that violate row/col/box constraints
 /// - Only valid digits enter the DDTree → 100% valid placements

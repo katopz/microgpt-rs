@@ -1,7 +1,7 @@
 # microgpt-rs: Sudoku Domain — Solver, Constraint Pruning, TUI
 
 ## Overview
-Sudoku serves as the proof-of-concept domain for Computable LoRA — demonstrating that a deterministic rules engine can validate LLM-drafted tokens inside the speculative decoding loop. The 9×9 solver with streaming output matches the web-demo experience from the Percepta blog.
+Sudoku serves as the proof-of-concept domain for Deterministic Validator — demonstrating that a deterministic rules engine can validate LLM-drafted tokens inside the speculative decoding loop. The 9×9 solver with streaming output matches the web-demo experience from the Percepta blog.
 
 ## Sudoku9x9 (`percepta.rs`)
 
@@ -102,7 +102,7 @@ pub struct SudokuPruner {
 
 ### `sudoku_speculative.rs` (behind "sudoku" feature)
 - Simulated draft model marginals (uniform over valid digits)
-- Compares DDTree: without vs with Computable LoRA pruning
+- Compares DDTree: without vs with Deterministic Validator pruning
 - Token distribution table shows which digits pruned per depth
 
 ### `sudoku_tui.rs` (behind "sudoku" feature)
@@ -116,4 +116,4 @@ pub struct SudokuPruner {
 1. **ConstraintPruner is domain-agnostic** — same trait serves Sudoku and Rust AST (SynPruner)
 2. **Path context is essential** — static pruning misses cross-depth conflicts
 3. **Incremental validation is fast** — O(lookahead) per check, no board copies needed
-4. **Computable LoRA promise delivered** — LLM drafts, deterministic rules validate, 100% valid outputs
+4. **Deterministic Validator promise delivered** — LLM drafts, deterministic rules validate, 100% valid outputs

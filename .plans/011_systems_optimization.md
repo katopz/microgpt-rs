@@ -166,7 +166,7 @@ fn attention_head_gqa(
 | `micro` | 4 | 4 | 4 | 2 × 4 × 4 = 32 floats | — |
 | `bpe` | 4 | 4 | 8 | 2 × 4 × 8 = 64 floats | — |
 | `gqa_draft` | 8 | 2 | 8 | 2 × 2 × 8 = 32 floats | 4× smaller |
-| cLoRA target | 8 | 2 | 32 | 2 × 2 × 32 = 128 floats | 4× smaller |
+| validator target (previously cLoRA) | 8 | 2 | 32 | 2 × 2 × 32 = 128 floats | 4× smaller |
 
 For a 4-layer model with `block_size=256`:
 - MHA: 4 × 2 × 256 × 8 × 32 = 524 KB

@@ -1388,7 +1388,7 @@ fn test_percepta_nqueens_8() {
     );
 }
 
-// ── 9×9 Sudoku + Computable LoRA Tests ───────────────────────────
+// ── 9×9 Sudoku + Symbolic Validator Tests ───────────────────────────
 
 #[test]
 fn test_sudoku9x9_arto_inkala_clues() {
@@ -1467,8 +1467,8 @@ fn test_sudoku9x9_solve_hull_compression() {
 }
 
 #[test]
-fn test_computable_lora_prune_drafts() {
-    use microgpt_rs::percepta::{ComputableLora, Sudoku9x9};
+fn test_symbolic_validator_prune_drafts() {
+    use microgpt_rs::percepta::{Sudoku9x9, SymbolicValidator};
 
     let puzzle = Sudoku9x9::arto_inkala();
 
@@ -1483,7 +1483,7 @@ fn test_computable_lora_prune_drafts() {
         (1, -1.2), // Valid
     ];
 
-    let pruned = ComputableLora::prune_drafts(&puzzle, 0, 1, &drafts);
+    let pruned = SymbolicValidator::prune_drafts(&puzzle, 0, 1, &drafts);
 
     assert_eq!(pruned.len(), 2, "should have 2 valid moves");
     assert_eq!(pruned[0].0, 2, "highest prob valid = 2");
@@ -1499,8 +1499,8 @@ fn test_computable_lora_prune_drafts() {
 }
 
 #[test]
-fn test_computable_lora_prune_all_invalid() {
-    use microgpt_rs::percepta::{ComputableLora, Sudoku9x9};
+fn test_symbolic_validator_prune_all_invalid() {
+    use microgpt_rs::percepta::{Sudoku9x9, SymbolicValidator};
 
     let puzzle = Sudoku9x9::arto_inkala();
 
@@ -1519,7 +1519,7 @@ fn test_computable_lora_prune_all_invalid() {
         (7, -0.3), // in col + box
     ];
 
-    let pruned = ComputableLora::prune_drafts(&puzzle, 0, 1, &all_invalid);
+    let pruned = SymbolicValidator::prune_drafts(&puzzle, 0, 1, &all_invalid);
     assert!(pruned.is_empty(), "all drafts should be pruned");
 }
 

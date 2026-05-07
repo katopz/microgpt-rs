@@ -2,8 +2,9 @@
 
 > **Rename Note**: The `clora` module was renamed to `validator` because it contains
 > deterministic syntax validation code (SynPruner, PartialParser), not neural LoRA weights.
-> Feature flag: `clora` → `validator`. Module path: `src/clora/` → `src/validator/`.
+> Feature flag: `clora` → `validator` (previously `clora`). Module path: `src/clora/` → `src/validator/`.
 > The actual LoRA adapter (`lora.bin`) lives in the `gpu` feature (Plan 008).
+> The concept "Computable LoRA" / "cLoRA" is now called "Deterministic Validator".
 
 ## Objective
 
@@ -239,10 +240,10 @@ rest = ["reqwest", "tokio"]   # Retrieval-based speculative decoding
 default = []
 leviathan = []
 sudoku = []
-clora = ["syn", "proc-macro2"]
+validator = ["syn", "proc-macro2"]  # previously clora
 rest = ["reqwest", "tokio"]
 gpu = ["wgpu", "bytemuck", "pollster", "safetensors"]
-full = ["leviathan", "sudoku", "clora", "rest", "training", "gpu"]
+full = ["leviathan", "sudoku", "validator", "rest", "training", "gpu"]  # previously clora
 ```
 
 ## Key Risks & Mitigations
