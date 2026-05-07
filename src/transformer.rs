@@ -14,6 +14,22 @@ pub struct LayerWeights {
 
 /// All transformer weights: embeddings, per-layer weights, and LM head.
 /// Layout preserves init order for backward compat: wte, wpe, layers…, lm_head.
+///
+/// # Future: f16 Storage
+///
+/// For memory-constrained deployments, weights can be stored as `f16` (half-precision)
+/// and quantized on-the-fly during matmul. This would halve memory usage with minimal
+/// accuracy loss for inference-only workloads. The migration path:
+///
+/// 1. Add a `StorageFormat` enum: `F32`, `F16`, `Q4_0`, `Q8_0`
+/// 2. Replace `Vec<f32>` with a `WeightTensor` enum that stores the chosen format
+/// 3. Add `dequantize_row()` that converts to `f32` on-the-fly during matmul
+/// 4. The `forward()` kernel remains unchanged — it operates on `f32` buffers
+///    populated by dequantization
+///
+/// Key insight: only storage changes; compute stays in `f32`. This avoids the need
+/// for f16 arithmetic hardware support and keeps the attention kernel simple.
+/// Estimated memory savings: ~50% for f16, ~75% for 4-bit quantized.
 pub struct TransformerWeights {
     pub wte: Vec<f32>,             // [vocab_size, n_embd]
     pub wpe: Vec<f32>,             // [block_size, n_embd]
@@ -365,6 +381,136 @@ pub fn forward<'a>(
     }
 
     // Snapshot hidden state (for Plan 009 compatibility)
+    ctx.hidden_state[..n].copy_from_slice(&ctx.x[..n]);
+
+    // LM Head
+    matmul(
+        &mut ctx.logits,
+        &weights.lm_head,
+        &ctx.x,
+        config.vocab_size,
+        n,
+    );
+
+    &mut ctx.logits
+}
+
+/// Forward pass using `PagedKVCache` instead of `MultiLayerKVCache`.
+///
+/// Identical computation to `forward()` but stores KV in paged memory,
+/// enabling copy-on-write fork for DDTree branch exploration.
+/// Builds a temporary flat KV buffer per layer for attention computation.
+#[inline(always)]
+pub fn forward_paged<'a>(
+    ctx: &'a mut ForwardContext,
+    weights: &TransformerWeights,
+    paged_cache: &mut PagedKVCache,
+    seq_idx: usize,
+    token: usize,
+    pos: usize,
+    config: &Config,
+) -> &'a mut [f32] {
+    let n = config.n_embd;
+    let hd = config.head_dim;
+    let kvd = crate::types::kv_dim(config);
+    let n_kv = config.n_kv_head;
+
+    // Ensure pages allocated for this sequence up to pos
+    paged_cache.ensure_pages(seq_idx, pos);
+
+    // Temporary flat KV cache for attention computation (avoids page-by-page in kernel)
+    let t_n = pos + 1;
+    let mut flat_key = vec![0.0f32; t_n * kvd];
+    let mut flat_value = vec![0.0f32; t_n * kvd];
+
+    // 1. Embedding: x = wte[token] + wpe[pos]
+    let tok_off = token * n;
+    let pos_off_emb = pos * n;
+    for i in 0..n {
+        unsafe {
+            *ctx.x.get_unchecked_mut(i) = *weights.wte.get_unchecked(tok_off + i)
+                + *weights.wpe.get_unchecked(pos_off_emb + i);
+        }
+    }
+
+    // 2. Layer loop
+    for (layer_idx, layer_weights) in weights.layers.iter().enumerate() {
+        // Pre-attention: RMSNorm → save residual → RMSNorm
+        rmsnorm(&mut ctx.x);
+        ctx.xr[..n].copy_from_slice(&ctx.x[..n]);
+        rmsnorm(&mut ctx.x);
+
+        // QKV projections
+        matmul(&mut ctx.q, &layer_weights.attn_wq, &ctx.x, n, n);
+        matmul(&mut ctx.k, &layer_weights.attn_wk, &ctx.x, kvd, n);
+        matmul(&mut ctx.v, &layer_weights.attn_wv, &ctx.x, kvd, n);
+
+        // Write K,V to paged cache
+        paged_cache.write_kv(layer_idx, seq_idx, pos, &ctx.k, &ctx.v);
+
+        // Build flat KV from paged cache for attention
+        for t in 0..t_n {
+            let k_slice = &mut flat_key[t * kvd..(t + 1) * kvd];
+            let v_slice = &mut flat_value[t * kvd..(t + 1) * kvd];
+            paged_cache.read_kv(layer_idx, seq_idx, t, k_slice, v_slice);
+        }
+
+        // Multi-head attention with GQA (reuse existing attention_head)
+        let scale = 1.0 / (hd as f32).sqrt();
+        ctx.attn_out[..n].fill(0.0);
+
+        for h in 0..config.n_head {
+            let kv_group = h * n_kv / config.n_head;
+            unsafe {
+                attention_head(
+                    &ctx.q,
+                    &flat_key,
+                    &flat_value,
+                    &mut ctx.attn_out,
+                    &mut ctx.scores,
+                    h * hd,
+                    kv_group * hd,
+                    kvd,
+                    hd,
+                    t_n,
+                    scale,
+                );
+            }
+        }
+
+        // Output projection + residual
+        matmul(&mut ctx.x, &layer_weights.attn_wo, &ctx.attn_out, n, n);
+        for i in 0..n {
+            unsafe {
+                *ctx.x.get_unchecked_mut(i) += *ctx.xr.get_unchecked(i);
+            }
+        }
+
+        // MLP: save residual → RMSNorm → MLP → residual
+        ctx.xr2[..n].copy_from_slice(&ctx.x[..n]);
+        rmsnorm(&mut ctx.x);
+        types::matmul_relu(
+            &mut ctx.hidden,
+            &layer_weights.mlp_w1,
+            &ctx.x,
+            config.mlp_hidden,
+            n,
+        );
+        matmul(
+            &mut ctx.x,
+            &layer_weights.mlp_w2,
+            &ctx.hidden,
+            n,
+            config.mlp_hidden,
+        );
+        for i in 0..n {
+            unsafe {
+                *ctx.x.get_unchecked_mut(i) += *ctx.xr2.get_unchecked(i);
+            }
+        }
+    }
+
+    // Snapshot hidden state
     ctx.hidden_state[..n].copy_from_slice(&ctx.x[..n]);
 
     // LM Head
@@ -1276,6 +1422,123 @@ mod tests {
 
         for (a, b) in restored_logits.iter().zip(fresh_logits.iter()) {
             assert!((a - b).abs() < 1e-3, "GQA restore should match fresh");
+        }
+    }
+
+    // ── forward_paged tests ──────────────────────────────────────
+
+    #[test]
+    fn test_forward_paged_logits_match_forward() {
+        let config = Config::micro();
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+
+        // Flat cache forward
+        let mut ctx_flat = ForwardContext::new(&config);
+        let mut cache_flat = MultiLayerKVCache::new(&config);
+        let logits_flat = forward(&mut ctx_flat, &weights, &mut cache_flat, 0, 0, &config);
+
+        // Paged cache forward
+        let mut ctx_paged = ForwardContext::new(&config);
+        let mut cache_paged = PagedKVCache::new(&config, 1);
+        let logits_paged =
+            forward_paged(&mut ctx_paged, &weights, &mut cache_paged, 0, 0, 0, &config);
+
+        assert_eq!(logits_flat.len(), logits_paged.len());
+        for (i, (a, b)) in logits_flat.iter().zip(logits_paged.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "forward_paged logit {i} differs: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_forward_paged_logits_match_forward_multi_pos() {
+        let config = Config::micro();
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+
+        let mut ctx_flat = ForwardContext::new(&config);
+        let mut cache_flat = MultiLayerKVCache::new(&config);
+
+        let mut ctx_paged = ForwardContext::new(&config);
+        let mut cache_paged = PagedKVCache::new(&config, 1);
+
+        for pos in 0..4 {
+            let token = pos; // simple: use pos as token
+            let logits_flat = forward(
+                &mut ctx_flat,
+                &weights,
+                &mut cache_flat,
+                token,
+                pos,
+                &config,
+            );
+            let logits_paged = forward_paged(
+                &mut ctx_paged,
+                &weights,
+                &mut cache_paged,
+                0,
+                token,
+                pos,
+                &config,
+            );
+
+            for (i, (a, b)) in logits_flat.iter().zip(logits_paged.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-3,
+                    "pos {pos} logit {i} differs: {a} vs {b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_forward_paged_gqa_logits_match() {
+        let config = Config::gqa_draft();
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+
+        let mut ctx_flat = ForwardContext::new(&config);
+        let mut cache_flat = MultiLayerKVCache::new(&config);
+        let logits_flat = forward(&mut ctx_flat, &weights, &mut cache_flat, 0, 0, &config);
+
+        let mut ctx_paged = ForwardContext::new(&config);
+        let mut cache_paged = PagedKVCache::new(&config, 1);
+        let logits_paged =
+            forward_paged(&mut ctx_paged, &weights, &mut cache_paged, 0, 0, 0, &config);
+
+        assert_eq!(logits_flat.len(), logits_paged.len());
+        for (i, (a, b)) in logits_flat.iter().zip(logits_paged.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-3,
+                "GQA forward_paged logit {i} differs: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_forward_paged_output_size() {
+        let config = Config::micro();
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+        let mut ctx = ForwardContext::new(&config);
+        let mut cache = PagedKVCache::new(&config, 1);
+        let logits = forward_paged(&mut ctx, &weights, &mut cache, 0, 0, 0, &config);
+        assert_eq!(logits.len(), config.vocab_size);
+    }
+
+    #[test]
+    fn test_forward_paged_logits_finite() {
+        let config = Config::micro();
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+        let mut ctx = ForwardContext::new(&config);
+        let mut cache = PagedKVCache::new(&config, 1);
+        let logits = forward_paged(&mut ctx, &weights, &mut cache, 0, 0, 0, &config);
+        for (i, &l) in logits.iter().enumerate() {
+            assert!(l.is_finite(), "logit {i} is not finite: {l}");
         }
     }
 }

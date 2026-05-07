@@ -26,7 +26,9 @@ pub use sampling::{
     sample_from_distribution, sample_residual_distribution, sample_residual_distribution_into,
 };
 pub use step::{speculative_step, speculative_step_verifier};
-pub use types::{ConstraintPruner, DraftResult, NoPruner, SpeculativeContext, TreeNode};
+pub use types::{
+    ConstraintPruner, DDTreeBranchCache, DraftResult, NoPruner, SpeculativeContext, TreeNode,
+};
 pub use verifier::{SimulatedVerifier, SpeculativeVerifier};
 
 #[cfg(feature = "leviathan")]

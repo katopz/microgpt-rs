@@ -290,9 +290,10 @@ mod tests {
             ..Config::draft()
         };
 
-        let tree_unpruned = build_dd_tree(&marginals, &config);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+        let tree_unpruned = build_dd_tree(&mv, &config);
         let tree_pruned =
-            build_dd_tree_pruned(&marginals, &config, &SudokuPruner::new(make_board()), false);
+            build_dd_tree_pruned(&mv, &config, &SudokuPruner::new(make_board()), false);
 
         assert!(
             tree_pruned.len() < tree_unpruned.len(),
@@ -324,11 +325,12 @@ mod tests {
             .collect();
 
         let config = Config {
-            tree_budget: 50,
+            tree_budget: 100,
             ..Config::draft()
         };
 
-        let tree = build_dd_tree_pruned(&marginals, &config, &pruner, false);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+        let tree = build_dd_tree_pruned(&mv, &config, &pruner, false);
 
         for node in &tree {
             let pos = pruner
@@ -370,7 +372,8 @@ mod tests {
             ..Config::draft()
         };
 
-        let tree = build_dd_tree_pruned(&marginals, &config, &pruner, false);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+        let tree = build_dd_tree_pruned(&mv, &config, &pruner, false);
 
         for node in &tree {
             assert_ne!(
@@ -440,11 +443,12 @@ mod tests {
             .collect();
 
         let config = Config {
-            tree_budget: 100,
+            tree_budget: 50,
             ..Config::draft()
         };
 
-        let tree = build_dd_tree_pruned(&marginals, &config, &pruner, false);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+        let tree = build_dd_tree_pruned(&mv, &config, &pruner, false);
         assert!(!tree.is_empty(), "tree should have nodes");
 
         let invalid = count_invalid_accumulated(&pruner, &tree);
@@ -477,9 +481,10 @@ mod tests {
             ..Config::draft()
         };
 
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
         let static_pruner = StaticOnlyPruner(&pruner);
-        let tree_static = build_dd_tree_pruned(&marginals, &config, &static_pruner, false);
-        let tree_aware = build_dd_tree_pruned(&marginals, &config, &pruner, false);
+        let tree_static = build_dd_tree_pruned(&mv, &config, &static_pruner, false);
+        let tree_aware = build_dd_tree_pruned(&mv, &config, &pruner, false);
 
         let static_invalid = count_invalid_accumulated(&pruner, &tree_static);
         assert!(

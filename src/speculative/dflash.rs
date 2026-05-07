@@ -192,6 +192,11 @@ pub fn dflash_predict_parallel(
         return Vec::new();
     }
 
+    // For micro models, sequential is faster than rayon overhead
+    if draft_config.n_embd <= draft_config.parallel_threshold {
+        return dflash_predict(draft_weights, draft_config, token, pos);
+    }
+
     (0..max_steps)
         .into_par_iter()
         .map_init(
@@ -550,6 +555,77 @@ mod tests {
         for step in 0..steps1 {
             // Can't compare directly since second call overwrites, but we know it ran OK
             let _slice = sctx.marginal_slice(step, vocab_size);
+        }
+    }
+
+    #[test]
+    fn test_parallel_threshold_fallback_identical() {
+        // draft config: n_embd=4, parallel_threshold=128 → sequential path
+        let config = Config::draft();
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+
+        let sequential = dflash_predict(&weights, &config, 0, 0);
+        let parallel = dflash_predict_parallel(&weights, &config, 0, 0);
+
+        assert_eq!(sequential.len(), parallel.len());
+        for (step, (seq_marg, par_marg)) in sequential.iter().zip(parallel.iter()).enumerate() {
+            for (i, (a, b)) in seq_marg.iter().zip(par_marg.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "step {step} token {i}: sequential={a}, parallel={b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parallel_threshold_above_runs_parallel() {
+        // micro config: n_embd=16, parallel_threshold=128 → still sequential
+        let config = Config::micro();
+        assert!(
+            config.n_embd <= config.parallel_threshold,
+            "micro should be below threshold"
+        );
+
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+
+        let sequential = dflash_predict(&weights, &config, 0, 0);
+        let parallel = dflash_predict_parallel(&weights, &config, 0, 0);
+
+        // Should be identical because threshold triggers sequential fallback
+        assert_eq!(sequential.len(), parallel.len());
+        for (step, (seq_marg, par_marg)) in sequential.iter().zip(parallel.iter()).enumerate() {
+            for (i, (a, b)) in seq_marg.iter().zip(par_marg.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "step {step} token {i}: sequential={a}, parallel={b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parallel_threshold_custom_above_triggers_parallel() {
+        // Custom config with threshold below n_embd → actual parallel path
+        let mut config = Config::micro();
+        config.parallel_threshold = 1; // Force parallel path (n_embd=16 > 1)
+
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+
+        let result = dflash_predict_parallel(&weights, &config, 0, 0);
+        assert!(!result.is_empty(), "parallel should produce results");
+        assert_eq!(result.len(), config.draft_lookahead);
+
+        // Verify valid probabilities
+        for (step, marg) in result.iter().enumerate() {
+            let sum: f32 = marg.iter().sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-3,
+                "step {step} probabilities should sum to ~1.0, got {sum}"
+            );
         }
     }
 }

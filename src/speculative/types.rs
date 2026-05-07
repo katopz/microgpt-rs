@@ -1,4 +1,6 @@
-use crate::transformer::{ForwardContext, MultiLayerKVCache};
+use crate::transformer::{
+    ForwardContext, MultiLayerKVCache, PagedKVCache, TransformerWeights, forward_paged,
+};
 use crate::types::Config;
 use std::cmp::Ordering;
 
@@ -40,7 +42,7 @@ pub struct TreeNode {
     pub score: f32,
     pub depth: usize,
     pub token_idx: usize,
-    pub parent_path: u64,
+    pub parent_path: u128,
 }
 
 impl Eq for TreeNode {}
@@ -186,5 +188,188 @@ impl SpeculativeContext {
         } else {
             &mut []
         }
+    }
+}
+
+// ── DDTree Branch Cache ────────────────────────────────────────
+
+/// Paged KV cache wrapper for DDTree branch exploration.
+/// Forks share prefix pages, only new pages allocate after fork point.
+///
+/// This enables best-first search in DDTree where multiple token branches
+/// are explored from a shared prefix — copy-on-write avoids duplicating
+/// the entire KV cache for each branch.
+pub struct DDTreeBranchCache {
+    paged: PagedKVCache,
+    branch_count: usize,
+    max_branches: usize,
+}
+
+impl DDTreeBranchCache {
+    /// Create a new branch cache.
+    /// `max_branches` determines how many concurrent sequences the paged cache supports.
+    pub fn new(config: &Config, max_branches: usize) -> Self {
+        Self {
+            paged: PagedKVCache::new(config, max_branches),
+            branch_count: 1, // sequence 0 = trunk
+            max_branches,
+        }
+    }
+
+    /// Fork from an existing sequence at the given position.
+    /// Returns the new sequence index.
+    /// Shared prefix pages are NOT copied — copy-on-write semantics.
+    pub fn fork_branch(&mut self, from: usize, at_pos: usize) -> usize {
+        if self.branch_count >= self.max_branches {
+            return from; // budget exhausted, reuse source
+        }
+        let new_seq = self.paged.fork(from, at_pos);
+        self.branch_count += 1;
+        new_seq
+    }
+
+    /// Forward pass on a specific branch sequence.
+    /// Returns logits slice via `forward_paged`.
+    pub fn forward_branch<'a>(
+        &mut self,
+        ctx: &'a mut ForwardContext,
+        weights: &TransformerWeights,
+        seq_idx: usize,
+        token: usize,
+        pos: usize,
+        config: &Config,
+    ) -> &'a mut [f32] {
+        forward_paged(ctx, weights, &mut self.paged, seq_idx, token, pos, config)
+    }
+
+    /// Reset all branches, freeing pages back to pool.
+    pub fn reset(&mut self) {
+        self.paged.reset();
+        self.branch_count = 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transformer::TransformerWeights;
+    use crate::types::Rng;
+
+    #[test]
+    fn test_branch_cache_fork_branch() {
+        let config = Config::draft();
+        let mut cache = DDTreeBranchCache::new(&config, 8);
+
+        // Run trunk forward at pos 0..3
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+        let mut ctx = ForwardContext::new(&config);
+
+        for pos in 0..4 {
+            let _ = cache.forward_branch(&mut ctx, &weights, 0, pos, pos, &config);
+        }
+
+        // Fork at pos 2 — should return a new sequence index (not source)
+        let branch = cache.fork_branch(0, 2);
+        assert_ne!(
+            branch, 0,
+            "first fork should return different seq_idx than source"
+        );
+
+        // Fork again — should return another new unique sequence index
+        let branch2 = cache.fork_branch(0, 2);
+        assert_ne!(
+            branch2, 0,
+            "second fork should return different seq_idx than source"
+        );
+        assert_ne!(branch2, branch, "each fork should return unique seq_idx");
+    }
+
+    #[test]
+    fn test_branch_cache_fork_branch_budget_exhausted() {
+        let config = Config::draft();
+        let mut cache = DDTreeBranchCache::new(&config, 2); // max 2 branches
+
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+        let mut ctx = ForwardContext::new(&config);
+
+        // Trunk at pos 0
+        let _ = cache.forward_branch(&mut ctx, &weights, 0, 0, 0, &config);
+
+        // First fork succeeds — returns a new seq_idx (not source)
+        let b1 = cache.fork_branch(0, 0);
+        assert_ne!(b1, 0, "fork should return new seq_idx");
+
+        // Budget exhausted (branch_count == max_branches), returns source
+        let b2 = cache.fork_branch(0, 0);
+        assert_eq!(b2, 0, "budget exhausted should return source seq_idx");
+    }
+
+    #[test]
+    fn test_branch_cache_forward_branch_logits() {
+        let config = Config::draft();
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+
+        let mut cache = DDTreeBranchCache::new(&config, 4);
+        let mut ctx = ForwardContext::new(&config);
+
+        let logits = cache.forward_branch(&mut ctx, &weights, 0, 0, 0, &config);
+        assert_eq!(logits.len(), config.vocab_size);
+
+        for (i, &l) in logits.iter().enumerate() {
+            assert!(l.is_finite(), "logit {i} not finite: {l}");
+        }
+    }
+
+    #[test]
+    fn test_branch_cache_fork_shared_prefix_forward() {
+        let config = Config::draft();
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+
+        let mut cache = DDTreeBranchCache::new(&config, 4);
+        let mut ctx = ForwardContext::new(&config);
+
+        // Trunk: pos 0, 1, 2
+        for pos in 0..3 {
+            let _ = cache.forward_branch(&mut ctx, &weights, 0, pos, pos, &config);
+        }
+
+        // Fork at pos 2 — returns a new seq_idx (not source)
+        let branch = cache.fork_branch(0, 2);
+        assert_ne!(branch, 0, "fork should return new seq_idx");
+
+        // Continue branch from pos 2 with different token
+        let logits = cache.forward_branch(&mut ctx, &weights, branch, 5, 2, &config);
+        assert_eq!(logits.len(), config.vocab_size);
+
+        // All logits should be finite
+        for (i, &l) in logits.iter().enumerate() {
+            assert!(l.is_finite(), "branch logit {i} not finite: {l}");
+        }
+    }
+
+    #[test]
+    fn test_branch_cache_reset() {
+        let config = Config::draft();
+        let mut cache = DDTreeBranchCache::new(&config, 8);
+
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+        let mut ctx = ForwardContext::new(&config);
+
+        let _ = cache.forward_branch(&mut ctx, &weights, 0, 0, 0, &config);
+        let _ = cache.fork_branch(0, 0);
+
+        assert_eq!(cache.branch_count, 2);
+
+        cache.reset();
+
+        assert_eq!(
+            cache.branch_count, 1,
+            "reset should restore branch_count to 1"
+        );
     }
 }

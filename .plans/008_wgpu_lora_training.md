@@ -1051,13 +1051,13 @@ impl Config {
 ## Tasks
 
 ### Phase 1: wgpu Context & Buffers
-- [ ] 1.1 Add `wgpu`, `bytemuck`, `pollster` to `Cargo.toml` behind `gpu` feature
-- [ ] 1.2 Create `src/gpu/mod.rs` with feature gate
-- [ ] 1.3 Create `src/gpu/context.rs` — `GpuContext::new()`, error types
-- [ ] 1.4 Create `src/gpu/buffer.rs` — `upload_f32`, `download_f32`, `create_buffer`
-- [ ] 1.5 Add tests: context init, buffer upload/download roundtrip
-- [ ] 1.5.1 Add `#[cfg(target_arch = "wasm32")]` conditional for async GPU init (use wasm-bindgen-futures instead of pollster::block_on)
-- [ ] 1.6 Verify compilation on WASM target (`cargo build --target wasm32-unknown-unknown --features gpu`)
+- [x] 1.1 Add `wgpu`, `bytemuck`, `pollster` to `Cargo.toml` behind `gpu` feature
+- [x] 1.2 Create `src/gpu/mod.rs` with feature gate
+- [x] 1.3 Create `src/gpu/context.rs` — `GpuContext::new()`, error types
+- [x] 1.4 Create `src/gpu/buffer.rs` — `upload_f32`, `download_f32`, `create_buffer`
+- [x] 1.5 Add tests: context init, buffer upload/download roundtrip
+- [x] 1.5.1 Add `#[cfg(target_arch = "wasm32")]` conditional for async GPU init (use wasm-bindgen-futures instead of pollster::block_on)
+- [x] 1.6 Verify compilation on WASM target (`cargo build --target wasm32-unknown-unknown --features gpu`)
 
 ### Phase 2: WGSL Compute Shaders
 - [ ] 2.1 Create `src/gpu/kernels/mod.rs` — shader loading, pipeline creation helpers
