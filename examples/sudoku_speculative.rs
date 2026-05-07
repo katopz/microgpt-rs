@@ -82,9 +82,9 @@ fn main() {
     let tree_unpruned = build_dd_tree(&raw_marginals, &config);
 
     let static_pruner = StaticOnlyPruner(&pruner);
-    let tree_static = build_dd_tree_pruned(&raw_marginals, &config, &static_pruner);
+    let tree_static = build_dd_tree_pruned(&raw_marginals, &config, &static_pruner, false);
 
-    let tree_aware = build_dd_tree_pruned(&raw_marginals, &config, &pruner);
+    let tree_aware = build_dd_tree_pruned(&raw_marginals, &config, &pruner, false);
 
     // ── 3. Count validity for each tree ────────────────────────────
     // Static validity: valid against initial board only

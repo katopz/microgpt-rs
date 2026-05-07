@@ -1,5 +1,6 @@
 // Shared configuration, RNG, and math utilities.
 
+#[derive(Clone)]
 pub struct Config {
     pub vocab_size: usize,
     pub block_size: usize,

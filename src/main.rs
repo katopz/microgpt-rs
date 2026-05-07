@@ -98,6 +98,30 @@ fn main() {
         Err(e) => eprintln!("\n⚠️  Plot failed: {e}"),
     }
 
+    // ── Budget Sweep ───────────────────────────────────────────────
+    println!("\n📊 DDTree Budget Sweep");
+    println!("{}", "─".repeat(75));
+
+    let draft_config = types::Config::draft();
+    let mut draft_rng = types::Rng::new(99);
+    let draft_weights = transformer::TransformerWeights::new(&draft_config, &mut draft_rng);
+
+    let budgets = [4, 8, 12, 16, 20, 24, 32, 48, 64];
+    let sweep_results =
+        benchmark::bench_ddtree_budget_sweep(&draft_weights, &draft_config, &budgets, 100, 10000);
+
+    println!(
+        "  {:<30} {:>12} {:>12} {:>12}",
+        "Config", "trees/s", "μs/build", "Avg Nodes"
+    );
+    println!("{}", "─".repeat(75));
+    for r in &sweep_results {
+        println!(
+            "  {:<30} {:>12.0} {:>12.2} {:>12.2}",
+            r.label, r.throughput, r.time_per_step_us, r.avg_acceptance_len,
+        );
+    }
+
     // ── 6. Percepta 2D Attention Benchmark ─────────────────────────
     println!("\n🧠 Percepta 2D Convex Hull Attention (O(log N) vs O(N))");
     println!("{}", "─".repeat(60));

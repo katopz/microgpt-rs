@@ -103,6 +103,49 @@ impl MultiLayerKVCache {
             layer.reset();
         }
     }
+
+    /// Snapshot KV cache state up to position `pos`.
+    /// Copies only filled slots [0..pos) per layer — cheap at our model scale.
+    pub fn snapshot(&self, pos: usize, config: &Config) -> KVSnapshot {
+        let kd = types::kv_dim(config);
+        let end = pos * kd;
+        let layers = self
+            .layers
+            .iter()
+            .map(|layer| KVLayerSnapshot {
+                key: layer.key[..end].to_vec(),
+                value: layer.value[..end].to_vec(),
+            })
+            .collect();
+        KVSnapshot { layers, pos }
+    }
+
+    /// Restore KV cache from a snapshot.
+    /// Writes snapshot data back and zeros out positions [snapshot.pos..block_size).
+    pub fn restore(&mut self, snapshot: &KVSnapshot, config: &Config) {
+        let kd = types::kv_dim(config);
+        for (layer, snap_layer) in self.layers.iter_mut().zip(snapshot.layers.iter()) {
+            let end = snapshot.pos * kd;
+            layer.key[..end].copy_from_slice(&snap_layer.key);
+            layer.value[..end].copy_from_slice(&snap_layer.value);
+            // Zero out positions [snapshot.pos..block_size) to prevent stale data
+            layer.key[end..].fill(0.0);
+            layer.value[end..].fill(0.0);
+        }
+    }
+}
+
+/// Cheap snapshot of KV cache state up to position `pos`.
+/// Only copies filled slots [0..pos) per layer, not the entire block_size buffer.
+pub struct KVSnapshot {
+    pub layers: Vec<KVLayerSnapshot>,
+    pub pos: usize,
+}
+
+/// Per-layer snapshot of KV cache data.
+pub struct KVLayerSnapshot {
+    pub key: Vec<f32>,   // [pos * kv_dim]
+    pub value: Vec<f32>, // [pos * kv_dim]
 }
 
 /// Pre-allocated buffers for zero-alloc forward passes.
@@ -115,7 +158,7 @@ pub struct ForwardContext {
     k: Vec<f32>,                // [kv_dim] key (kv_dim = n_kv_head * head_dim)
     v: Vec<f32>,                // [kv_dim] value
     attn_out: Vec<f32>,         // [n_embd] attention output
-    scores: Vec<f32>,           // [block_size] attention scores (max possible)
+    pub scores: Vec<f32>,       // [block_size] attention scores (max possible)
     hidden: Vec<f32>,           // [mlp_hidden] MLP hidden
     pub logits: Vec<f32>,       // [vocab_size] output logits
     pub hidden_state: Vec<f32>, // [n_embd] final hidden state (Plan 009 compat)
@@ -990,5 +1033,199 @@ mod tests {
         paged.ensure_pages(0, 0);
         // If reuse works, total_pages shouldn't grow
         assert_eq!(paged.total_pages, total_before, "should reuse freed pages");
+    }
+
+    #[test]
+    fn test_snapshot_restore_roundtrip() {
+        // Forward some tokens, snapshot, modify, restore, verify same logits
+        let config = Config::micro();
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+        let mut ctx = ForwardContext::new(&config);
+        let mut cache = MultiLayerKVCache::new(&config);
+
+        // Fill cache with tokens at positions 0..4
+        for pos in 0..4 {
+            let _ = forward(&mut ctx, &weights, &mut cache, pos, pos, &config);
+        }
+
+        // Snapshot at position 4
+        let snapshot = cache.snapshot(4, &config);
+
+        // Fill more positions
+        for pos in 4..8 {
+            let _ = forward(&mut ctx, &weights, &mut cache, pos, pos, &config);
+        }
+
+        // Now restore
+        cache.restore(&snapshot, &config);
+
+        // Verify restored: forward at position 4 should give same result as fresh cache at pos 4
+        let mut fresh_cache = MultiLayerKVCache::new(&config);
+        let mut fresh_ctx = ForwardContext::new(&config);
+        for pos in 0..4 {
+            let _ = forward(
+                &mut fresh_ctx,
+                &weights,
+                &mut fresh_cache,
+                pos,
+                pos,
+                &config,
+            );
+        }
+
+        let restored_logits = forward(&mut ctx, &weights, &mut cache, 0, 4, &config);
+        let fresh_logits = forward(&mut fresh_ctx, &weights, &mut fresh_cache, 0, 4, &config);
+
+        for (a, b) in restored_logits.iter().zip(fresh_logits.iter()) {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "restored logits should match fresh: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_snapshot_correct_size() {
+        let config = Config::micro();
+        let kd = types::kv_dim(&config);
+        let cache = MultiLayerKVCache::new(&config);
+        let snapshot = cache.snapshot(5, &config);
+
+        assert_eq!(snapshot.pos, 5);
+        assert_eq!(snapshot.layers.len(), config.n_layer);
+        for layer in &snapshot.layers {
+            assert_eq!(layer.key.len(), 5 * kd);
+            assert_eq!(layer.value.len(), 5 * kd);
+        }
+    }
+
+    #[test]
+    fn test_restore_zeros_stale_data() {
+        let config = Config::micro();
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+        let mut ctx = ForwardContext::new(&config);
+        let mut cache = MultiLayerKVCache::new(&config);
+
+        // Fill cache
+        for pos in 0..8 {
+            let _ = forward(&mut ctx, &weights, &mut cache, pos, pos, &config);
+        }
+
+        // Snapshot at position 3
+        let snapshot = cache.snapshot(3, &config);
+
+        // Restore
+        cache.restore(&snapshot, &config);
+
+        // Verify positions after pos=3 are zeroed
+        let kd = types::kv_dim(&config);
+        for layer in &cache.layers {
+            for val in &layer.key[3 * kd..] {
+                assert_eq!(*val, 0.0, "stale key data should be zeroed");
+            }
+            for val in &layer.value[3 * kd..] {
+                assert_eq!(*val, 0.0, "stale value data should be zeroed");
+            }
+        }
+    }
+
+    #[test]
+    fn test_snapshot_restore_multi_layer() {
+        // Test with n_layer > 1 (small_target config)
+        let config = Config::small_target();
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+        let mut ctx = ForwardContext::new(&config);
+        let mut cache = MultiLayerKVCache::new(&config);
+
+        // Fill cache
+        for pos in 0..4 {
+            let _ = forward(&mut ctx, &weights, &mut cache, pos, pos, &config);
+        }
+
+        let snapshot = cache.snapshot(4, &config);
+        assert_eq!(snapshot.layers.len(), 4, "should have 4 layer snapshots");
+
+        // Modify and restore
+        for pos in 4..8 {
+            let _ = forward(&mut ctx, &weights, &mut cache, pos, pos, &config);
+        }
+        cache.restore(&snapshot, &config);
+
+        // Verify restored correctly by checking logits match fresh cache
+        let mut fresh_cache = MultiLayerKVCache::new(&config);
+        let mut fresh_ctx = ForwardContext::new(&config);
+        for pos in 0..4 {
+            let _ = forward(
+                &mut fresh_ctx,
+                &weights,
+                &mut fresh_cache,
+                pos,
+                pos,
+                &config,
+            );
+        }
+
+        let restored_logits = forward(&mut ctx, &weights, &mut cache, 0, 4, &config);
+        let fresh_logits = forward(&mut fresh_ctx, &weights, &mut fresh_cache, 0, 4, &config);
+
+        for (a, b) in restored_logits.iter().zip(fresh_logits.iter()) {
+            assert!(
+                (a - b).abs() < 1e-3,
+                "multi-layer restore should match fresh"
+            );
+        }
+    }
+
+    #[test]
+    fn test_snapshot_restore_gqa() {
+        // Test with GQA config (kv_dim < n_embd)
+        let config = Config::gqa_draft();
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+        let mut ctx = ForwardContext::new(&config);
+        let mut cache = MultiLayerKVCache::new(&config);
+
+        for pos in 0..4 {
+            let _ = forward(&mut ctx, &weights, &mut cache, pos, pos, &config);
+        }
+
+        let snapshot = cache.snapshot(4, &config);
+        let kd = types::kv_dim(&config);
+
+        // Verify snapshot uses GQA kv_dim (smaller than n_embd)
+        assert_eq!(kd, config.n_kv_head * config.head_dim);
+        assert!(kd < config.n_embd, "GQA kv_dim should be < n_embd");
+        for layer in &snapshot.layers {
+            assert_eq!(layer.key.len(), 4 * kd);
+        }
+
+        // Restore and verify
+        for pos in 4..8 {
+            let _ = forward(&mut ctx, &weights, &mut cache, pos, pos, &config);
+        }
+        cache.restore(&snapshot, &config);
+
+        let mut fresh_cache = MultiLayerKVCache::new(&config);
+        let mut fresh_ctx = ForwardContext::new(&config);
+        for pos in 0..4 {
+            let _ = forward(
+                &mut fresh_ctx,
+                &weights,
+                &mut fresh_cache,
+                pos,
+                pos,
+                &config,
+            );
+        }
+
+        let restored_logits = forward(&mut ctx, &weights, &mut cache, 0, 4, &config);
+        let fresh_logits = forward(&mut fresh_ctx, &weights, &mut fresh_cache, 0, 4, &config);
+
+        for (a, b) in restored_logits.iter().zip(fresh_logits.iter()) {
+            assert!((a - b).abs() < 1e-3, "GQA restore should match fresh");
+        }
     }
 }

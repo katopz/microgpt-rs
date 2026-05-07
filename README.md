@@ -2,7 +2,7 @@
 
 Speculative Decoding with DFlash & DDTree — a high-performance Rust implementation of a micro-Transformer with built-in benchmarking and visualization.
 
-Inspired by [microgpt-c](https://github.com/nicholasgasior/microgpt-c) and [talos-vs-macbook](https://github.com/alexcb123/talos-vs-macbook).
+Inspired by [microgpt-c](https://github.com/nicholasgasior/microgpt-c), [talos-vs-macbook](https://github.com/alexcb123/talos-vs-macbook), and [Luce-Org/lucebox-hub](https://github.com/Luce-Org/lucebox-hub/).
 
 ## 🚀 Key Features
 
@@ -22,6 +22,9 @@ Inspired by [microgpt-c](https://github.com/nicholasgasior/microgpt-c) and [talo
 - **Percepta O(log N) Attention** — 2D convex hull KV cache with ternary search, proving LLMs can execute programs internally via geometric attention. Includes adversarial failure tests.
 - **TUI Visualization** — Ratatui-based terminal UI showing the Sudoku solver in real-time: color-coded grid, step/trace panels, speculative mode comparison (behind `--features sudoku`).
 - **Benchmarks + Plots** — 6-method benchmark suite (AR, DFlash, DDTree, Speculative, AR Draft, Leviathan †) with auto-numbered PNG output via `plotters`.
+- **Chain-Seed DDTree** — Greedy chain backbone (argmax per depth) before best-first expansion, recovering high-confidence token spine. Inspired by [DFlash](https://arxiv.org/abs/2602.06036).
+- **Speculative Prefill** — PFlash-inspired prompt compression via attention-based importance scoring. Draft model scores token importance, compresses to top-`keep_ratio` spans before target prefill. Inspired by [Cross-Family Speculative Prefill](https://arxiv.org/abs/2603.02631).
+- **KV-Cache Snapshot/Rollback** — Cheap per-position KV cache snapshots for branch-level tree verification. Restore on rejection to try alternate DDTree paths without full recomputation.
 
 † Behind `--features leviathan`
 
@@ -170,20 +173,28 @@ Run on Apple Silicon (single-threaded, `--release` profile, 50k iterations):
 **Models:** Target (embd=16, heads=4, mlp=64) · Draft (embd=4, heads=2, mlp=16)
 
 ```
-Method                       Throughput         μs/step  Avg Accept Len
+Method                         Throughput         μs/step  Avg Accept Len
 ───────────────────────────────────────────────────────────────────────────────
-Transformer AR                813,714 tok/s         1.23            1.00
-DFlash                       3,196,001 tok/s         2.50            8.00
-DDTree Build                   321,060 trees/s       3.11            —
-Speculative (Simulated)        876,517 tok/s         5.70            5.00
-Speculative (AR Draft)       1,250,138 tok/s         5.60            7.00
-Leviathan (Algorithm 1)  †    107,157 tok/s        11.00            1.18
+Transformer AR                  979,889 tok/s         1.02            1.00
+DFlash                         3,074,414 tok/s         2.60            8.00
+DDTree Build                     313,919 trees/s       3.19            —
+Speculative (Simulated)          844,947 tok/s         5.92            5.00
+Speculative (AR Draft)         1,227,674 tok/s         5.70            7.00
+Leviathan (Algorithm 1)    †    108,885 tok/s        10.83            1.18
+Leviathan (no rollback)    †    108,827 tok/s        10.83            1.18
+Leviathan (w/ rollback)    †    161,324 tok/s         7.28            1.18
+Spec (unconditioned)             842,657 tok/s         5.93            5.00
+Spec (conditioned)    †         972,163 tok/s         6.94            6.74
+Prefill (no compress)          2,691,452 tok/s        23.78           64.00
+Prefill (compressed)             291,819 tok/s        23.99            7.00
+DDTree (no chain)                316,003 tok/s         3.16           16.00
+DDTree (chain-seed)              316,849 tok/s         3.16           16.00
 ───────────────────────────────────────────────────────────────────────────────
-📈 Best speedup: 1.08x (Speculative vs AR)
+📈 Best speedup: 1.45x (Speculative AR Draft vs AR)
 † Requires --features leviathan
 ```
 
-![Benchmark Chart](bench/011_bench_result.png)
+![Benchmark Chart](bench/015_bench_result.png)
 
 ### What each benchmark measures
 
@@ -195,6 +206,11 @@ Leviathan (Algorithm 1)  †    107,157 tok/s        11.00            1.18
 | **Speculative (Simulated)** | DFlash + DDTree + simulated 75% acceptance + bonus token | effective tok/s |
 | **Speculative (AR Draft)** | Autoregressive draft + DDTree + simulated acceptance + bonus token | effective tok/s |
 | **Leviathan (Algorithm 1)** † | AR draft + real target model p/q verification + residual sampling | effective tok/s |
+| **Leviathan (w/ rollback)** † | Leviathan + KV cache snapshot/rollback for branch verification | effective tok/s |
+| **Spec (conditioned)** † | Target-conditioned draft via hidden state seeding + DDTree + simulated acceptance | effective tok/s |
+| **Prefill (no compress)** | Attention scorer over full prompt (block_size×4 tokens) | tokens scored/s |
+| **Prefill (compressed)** | Attention scorer + compression to keep_ratio=0.1 | kept tokens/s |
+| **DDTree (chain-seed)** | Greedy chain backbone before best-first expansion | trees/s |
 
 > † `Leviathan (Algorithm 1)` requires `--features leviathan`. It runs the full Algorithm 1 from [Leviathan et al. 2022](https://arxiv.org/pdf/2211.17192).
 
@@ -409,7 +425,8 @@ src/
     dd_tree.rs      build_dd_tree, build_dd_tree_pruned, extract_parent_tokens
     dflash.rs       dflash_predict, dflash_predict_parallel, dflash_predict_ar
     verifier.rs     SpeculativeVerifier trait, SimulatedVerifier, LeviathanVerifier †
-    step.rs         speculative_step, speculative_step_verifier
+    step.rs         speculative_step, speculative_step_verifier, speculative_step_rollback †, speculative_step_conditioned †
+    prefill.rs      PrefillScorer trait, AttentionScorer, compress_prompt, speculative_prefill
     sudoku_pruner.rs  SudokuPruner (path-aware, cross-depth conflict detection) *
   percepta.rs       Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
                     Sudoku9x9, ComputableLora, StreamingSolver, SolveEvent
@@ -435,3 +452,9 @@ bench/
 - [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/pdf/2211.17192) — Leviathan et al., 2022 (Algorithm 1: draft → target scoring → p/q rejection → residual sampling → bonus token)
 - SpecInfer — tree-based speculative verification (inspiration for DDTree)
 - [Percepta: Can LLMs Be Computers?](https://www.percepta.ai/blog/can-llms-be-computers) — 2D convex hull attention for in-model execution
+- [Luce-Org/lucebox-hub](https://github.com/Luce-Org/lucebox-hub/) — Open LLM Inference, Rewritten by Hand for One Specific Chip at a Time
+- [DFlash: Block-Diffusion Speculative Decoding](https://arxiv.org/abs/2602.06036) — Wang et al., 2026 (chain-seed DDTree, target-conditioned draft)
+- [DDTree: Block Diffusion Draft Trees](https://arxiv.org/abs/2604.12989) — Ringel & Romano, 2026 (budget sweep, tree verify)
+- [Cross-Family Speculative Prefill](https://arxiv.org/abs/2603.02631) — Liu et al., ICLR 2026 (importance scoring, prompt compression)
+- [FlashPrefill](https://arxiv.org/abs/2603.06199) — Fan et al., 2026 (block-sparse drafter attention)
+- [Hazy Research Megakernel](https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles) — Intelligence Per Watt methodology

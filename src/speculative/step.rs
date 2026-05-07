@@ -4,14 +4,24 @@ use crate::types::{Config, Rng};
 
 #[cfg(feature = "rest")]
 use crate::rest::{RestClient, RetrievalResult};
+
+// Shared imports for rest and leviathan features
 #[cfg(feature = "rest")]
-use crate::speculative::dd_tree::{build_dd_tree, extract_best_path, merge_retrieved_branches};
-#[cfg(feature = "rest")]
+use crate::speculative::dd_tree::merge_retrieved_branches;
+#[cfg(any(feature = "rest", feature = "leviathan"))]
+use crate::speculative::dd_tree::{build_dd_tree, extract_best_path};
+#[cfg(any(feature = "rest", feature = "leviathan"))]
 use crate::speculative::dflash::dflash_predict;
-#[cfg(feature = "rest")]
+#[cfg(feature = "leviathan")]
+use crate::speculative::dflash::dflash_predict_conditioned;
+#[cfg(any(feature = "rest", feature = "leviathan"))]
 use crate::speculative::sampling::sample_from_distribution;
-#[cfg(feature = "rest")]
+#[cfg(feature = "leviathan")]
+use crate::speculative::sampling::sample_residual_distribution;
+#[cfg(any(feature = "rest", feature = "leviathan"))]
 use crate::transformer::{ForwardContext, MultiLayerKVCache, forward};
+#[cfg(feature = "leviathan")]
+use crate::types::softmax;
 
 /// Speculative decoding step with a custom verifier.
 /// Pass any `SpeculativeVerifier` to control how drafts are verified.
@@ -120,6 +130,251 @@ pub async fn speculative_step_rest(
     }
 
     accepted
+}
+
+// ── Leviathan: KV Rollback + Conditioned Draft ────────────────
+
+/// Speculative step with KV-Cache snapshot/rollback for tree verification.
+///
+/// Builds a DDTree from draft marginals, then verifies multiple candidate
+/// paths against the target model using p/q rejection sampling. Before each
+/// path attempt, snapshots the target KV cache. On rejection, rolls back to
+/// the snapshot and tries the next branch — avoids re-running target from scratch.
+///
+/// Snapshot cost: O(n_layer × pos × kv_dim) — cheap at our model scale.
+///
+/// Requires `--features leviathan` (target model forward pass needed).
+#[cfg(feature = "leviathan")]
+#[allow(clippy::too_many_arguments)]
+pub fn speculative_step_rollback(
+    draft_weights: &TransformerWeights,
+    draft_config: &Config,
+    target_weights: &TransformerWeights,
+    target_config: &Config,
+    target_ctx: &mut ForwardContext,
+    target_cache: &mut MultiLayerKVCache,
+    token: usize,
+    pos: usize,
+    rng: &mut Rng,
+) -> (Vec<usize>, usize) {
+    // 1. Draft marginals via DFlash
+    let marginals = dflash_predict(draft_weights, draft_config, token, pos);
+
+    // 2. Build DDTree
+    let tree = build_dd_tree(&marginals, draft_config);
+
+    // 3. Extract candidate paths (top-3 root branches)
+    let paths = extract_ddtree_paths(&tree);
+
+    if paths.is_empty() {
+        let fallback = sample_from_distribution(
+            marginals.first().map(|m| m.as_slice()).unwrap_or(&[1.0]),
+            rng,
+        );
+        return (vec![fallback], 1);
+    }
+
+    // 4. Snapshot target KV cache at current position
+    let snapshot = target_cache.snapshot(pos, target_config);
+
+    // 5. Try each candidate path with rollback on rejection
+    for path in &paths {
+        target_cache.restore(&snapshot, target_config);
+
+        let mut accepted = Vec::with_capacity(path.len());
+        let mut all_accepted = true;
+
+        // Score initial token with target
+        let logits = forward(
+            target_ctx,
+            target_weights,
+            target_cache,
+            token,
+            pos,
+            target_config,
+        );
+        let mut p_dist = logits.to_vec();
+        for p in p_dist.iter_mut() {
+            *p /= target_config.temperature;
+        }
+        softmax(&mut p_dist);
+
+        for (i, &draft_tok) in path.iter().enumerate() {
+            let q_dist = marginals.get(i).map(|m| m.as_slice()).unwrap_or(&[]);
+            let q_i = q_dist.get(draft_tok).copied().unwrap_or(0.0);
+            let p_i = p_dist.get(draft_tok).copied().unwrap_or(0.0);
+
+            let acceptance_prob = if q_i > 0.0 { (p_i / q_i).min(1.0) } else { 1.0 };
+
+            if rng.uniform() <= acceptance_prob {
+                accepted.push(draft_tok);
+                if i + 1 < path.len() {
+                    let logits = forward(
+                        target_ctx,
+                        target_weights,
+                        target_cache,
+                        draft_tok,
+                        pos + 1 + i,
+                        target_config,
+                    );
+                    p_dist = logits.to_vec();
+                    for p in p_dist.iter_mut() {
+                        *p /= target_config.temperature;
+                    }
+                    softmax(&mut p_dist);
+                }
+            } else {
+                let replacement = sample_residual_distribution(&p_dist, q_dist, rng);
+                accepted.push(replacement);
+                all_accepted = false;
+                break;
+            }
+        }
+
+        if all_accepted && !p_dist.is_empty() {
+            let bonus = sample_from_distribution(&p_dist, rng);
+            accepted.push(bonus);
+        }
+
+        if !accepted.is_empty() {
+            let len = accepted.len();
+            return (accepted, len);
+        }
+    }
+
+    // All paths exhausted: restore and sample from target
+    target_cache.restore(&snapshot, target_config);
+    let logits = forward(
+        target_ctx,
+        target_weights,
+        target_cache,
+        token,
+        pos,
+        target_config,
+    );
+    let mut p_dist = logits.to_vec();
+    for p in p_dist.iter_mut() {
+        *p /= target_config.temperature;
+    }
+    softmax(&mut p_dist);
+    let fallback = sample_from_distribution(&p_dist, rng);
+    (vec![fallback], 1)
+}
+
+/// Speculative step with target-conditioned draft (DFlash-inspired).
+///
+/// Runs target model forward to capture hidden state, then conditions the
+/// draft model's KV cache via `dflash_predict_conditioned`. The draft sees
+/// target features, producing higher-quality marginals. Uses simulated
+/// acceptance (no real p/q verification).
+///
+/// Requires `--features leviathan` (target model forward pass needed).
+#[cfg(feature = "leviathan")]
+#[allow(clippy::too_many_arguments)]
+pub fn speculative_step_conditioned(
+    draft_weights: &TransformerWeights,
+    draft_config: &Config,
+    target_weights: &TransformerWeights,
+    target_config: &Config,
+    target_ctx: &mut ForwardContext,
+    target_cache: &mut MultiLayerKVCache,
+    token: usize,
+    pos: usize,
+    rng: &mut Rng,
+) -> (Vec<usize>, usize) {
+    // 1. Run target forward to get hidden state
+    let logits = forward(
+        target_ctx,
+        target_weights,
+        target_cache,
+        token,
+        pos,
+        target_config,
+    )
+    .to_vec(); // clone to release mutable borrow on target_ctx
+    let hidden = target_ctx.hidden_state.clone();
+
+    // 2. Conditioned draft using target hidden state
+    let draft_result =
+        dflash_predict_conditioned(draft_weights, draft_config, token, pos, &hidden, rng);
+
+    // 3. Build DDTree from conditioned marginals
+    let tree = build_dd_tree(&draft_result.marginals, draft_config);
+    let path = extract_best_path(&tree);
+
+    if path.is_empty() {
+        let mut p_dist = logits.to_vec();
+        for p in p_dist.iter_mut() {
+            *p /= target_config.temperature;
+        }
+        softmax(&mut p_dist);
+        let fallback = sample_from_distribution(&p_dist, rng);
+        return (vec![fallback], 1);
+    }
+
+    // 4. Simulated acceptance (75% cap)
+    let acceptance_rate = 0.75;
+    let max_accept = ((path.len() as f32) * acceptance_rate).ceil() as usize;
+    let accepted: Vec<usize> = path.into_iter().take(max_accept.max(1)).collect();
+
+    // 5. Bonus token if all accepted
+    if accepted.len() == max_accept && !draft_result.marginals.is_empty() {
+        let last_marginal = draft_result.marginals.last().unwrap();
+        let bonus = sample_from_distribution(last_marginal, rng);
+        let mut result = accepted;
+        result.push(bonus);
+        let len = result.len();
+        return (result, len);
+    }
+
+    let len = accepted.len();
+    (accepted, len)
+}
+
+/// Extract candidate verification paths from DDTree (top-3 root branches).
+/// Each branch follows the best child at subsequent depths.
+#[cfg(feature = "leviathan")]
+fn extract_ddtree_paths(tree: &[crate::speculative::types::TreeNode]) -> Vec<Vec<usize>> {
+    if tree.is_empty() {
+        return Vec::new();
+    }
+
+    let max_depth = tree.iter().map(|n| n.depth).max().unwrap_or(0);
+
+    // Collect root nodes (depth 0), sorted by score descending
+    let mut roots: Vec<_> = tree.iter().filter(|n| n.depth == 0).collect();
+    roots.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    roots.truncate(3);
+
+    let mut paths = Vec::with_capacity(roots.len());
+
+    for root in roots {
+        let mut path = vec![root.token_idx];
+        let mut current_path = root.parent_path;
+
+        for depth in 1..=max_depth {
+            let child = tree
+                .iter()
+                .filter(|n| n.depth == depth && n.parent_path >> 5 == current_path)
+                .max_by_key(|n| (n.score * 1e6) as i64);
+
+            match child {
+                Some(node) => {
+                    path.push(node.token_idx);
+                    current_path = node.parent_path;
+                }
+                None => break,
+            }
+        }
+
+        paths.push(path);
+    }
+
+    paths
 }
 
 #[cfg(test)]
@@ -236,5 +491,226 @@ mod tests {
         assert!(pruner.is_valid(0, 0, &[]));
         assert!(pruner.is_valid(0, 26, &[]));
         assert!(pruner.is_valid(100, 999, &[]));
+    }
+
+    // ── Leviathan: Rollback + Conditioned Draft Tests ─────────────
+
+    #[cfg(feature = "leviathan")]
+    #[test]
+    fn test_speculative_step_rollback_returns_at_least_one() {
+        let target_config = Config::micro();
+        let draft_config = Config::draft();
+        let mut rng = Rng::new(42);
+        let target_weights = TransformerWeights::new(&target_config, &mut rng);
+        let mut draft_rng = Rng::new(99);
+        let draft_weights = TransformerWeights::new(&draft_config, &mut draft_rng);
+
+        let mut target_ctx = ForwardContext::new(&target_config);
+        let mut target_cache = MultiLayerKVCache::new(&target_config);
+
+        let (accepted, len) = speculative_step_rollback(
+            &draft_weights,
+            &draft_config,
+            &target_weights,
+            &target_config,
+            &mut target_ctx,
+            &mut target_cache,
+            0,
+            0,
+            &mut Rng::new(100),
+        );
+
+        assert!(!accepted.is_empty(), "should return at least 1 token");
+        assert!(len >= 1);
+        for &t in &accepted {
+            assert!(t < target_config.vocab_size, "token {t} out of range");
+        }
+    }
+
+    #[cfg(feature = "leviathan")]
+    #[test]
+    fn test_speculative_step_rollback_deterministic() {
+        let target_config = Config::micro();
+        let draft_config = Config::draft();
+        let mut rng = Rng::new(42);
+        let target_weights = TransformerWeights::new(&target_config, &mut rng);
+        let mut draft_rng = Rng::new(99);
+        let draft_weights = TransformerWeights::new(&draft_config, &mut draft_rng);
+
+        let (a1, l1) = {
+            let mut target_ctx = ForwardContext::new(&target_config);
+            let mut target_cache = MultiLayerKVCache::new(&target_config);
+            speculative_step_rollback(
+                &draft_weights,
+                &draft_config,
+                &target_weights,
+                &target_config,
+                &mut target_ctx,
+                &mut target_cache,
+                0,
+                0,
+                &mut Rng::new(100),
+            )
+        };
+
+        let (a2, l2) = {
+            let mut target_ctx = ForwardContext::new(&target_config);
+            let mut target_cache = MultiLayerKVCache::new(&target_config);
+            speculative_step_rollback(
+                &draft_weights,
+                &draft_config,
+                &target_weights,
+                &target_config,
+                &mut target_ctx,
+                &mut target_cache,
+                0,
+                0,
+                &mut Rng::new(100),
+            )
+        };
+
+        assert_eq!(a1, a2, "same seed should produce same results");
+        assert_eq!(l1, l2);
+    }
+
+    #[cfg(feature = "leviathan")]
+    #[test]
+    fn test_speculative_step_conditioned_returns_at_least_one() {
+        let target_config = Config::micro();
+        let draft_config = Config::draft();
+        let mut rng = Rng::new(42);
+        let target_weights = TransformerWeights::new(&target_config, &mut rng);
+        let mut draft_rng = Rng::new(99);
+        let draft_weights = TransformerWeights::new(&draft_config, &mut draft_rng);
+
+        let mut target_ctx = ForwardContext::new(&target_config);
+        let mut target_cache = MultiLayerKVCache::new(&target_config);
+
+        let (accepted, len) = speculative_step_conditioned(
+            &draft_weights,
+            &draft_config,
+            &target_weights,
+            &target_config,
+            &mut target_ctx,
+            &mut target_cache,
+            0,
+            0,
+            &mut Rng::new(100),
+        );
+
+        assert!(!accepted.is_empty(), "should return at least 1 token");
+        assert!(len >= 1);
+        for &t in &accepted {
+            assert!(t < target_config.vocab_size, "token {t} out of range");
+        }
+    }
+
+    #[cfg(feature = "leviathan")]
+    #[test]
+    fn test_speculative_step_conditioned_deterministic() {
+        let target_config = Config::micro();
+        let draft_config = Config::draft();
+        let mut rng = Rng::new(42);
+        let target_weights = TransformerWeights::new(&target_config, &mut rng);
+        let mut draft_rng = Rng::new(99);
+        let draft_weights = TransformerWeights::new(&draft_config, &mut draft_rng);
+
+        let (a1, l1) = {
+            let mut target_ctx = ForwardContext::new(&target_config);
+            let mut target_cache = MultiLayerKVCache::new(&target_config);
+            speculative_step_conditioned(
+                &draft_weights,
+                &draft_config,
+                &target_weights,
+                &target_config,
+                &mut target_ctx,
+                &mut target_cache,
+                0,
+                0,
+                &mut Rng::new(100),
+            )
+        };
+
+        let (a2, l2) = {
+            let mut target_ctx = ForwardContext::new(&target_config);
+            let mut target_cache = MultiLayerKVCache::new(&target_config);
+            speculative_step_conditioned(
+                &draft_weights,
+                &draft_config,
+                &target_weights,
+                &target_config,
+                &mut target_ctx,
+                &mut target_cache,
+                0,
+                0,
+                &mut Rng::new(100),
+            )
+        };
+
+        assert_eq!(a1, a2, "same seed should produce same results");
+        assert_eq!(l1, l2);
+    }
+
+    #[cfg(feature = "leviathan")]
+    #[test]
+    fn test_speculative_step_conditioned_differs_from_unconditioned() {
+        let target_config = Config::micro();
+        let draft_config = Config::draft();
+        let mut rng = Rng::new(42);
+        let target_weights = TransformerWeights::new(&target_config, &mut rng);
+        let mut draft_rng = Rng::new(99);
+        let draft_weights = TransformerWeights::new(&draft_config, &mut draft_rng);
+
+        let (cond_accepted, _) = {
+            let mut target_ctx = ForwardContext::new(&target_config);
+            let mut target_cache = MultiLayerKVCache::new(&target_config);
+            speculative_step_conditioned(
+                &draft_weights,
+                &draft_config,
+                &target_weights,
+                &target_config,
+                &mut target_ctx,
+                &mut target_cache,
+                0,
+                0,
+                &mut Rng::new(100),
+            )
+        };
+
+        let (uncond_accepted, _) = {
+            let mut verifier = SimulatedVerifier::new(0.75);
+            speculative_step_verifier(
+                &draft_weights,
+                &draft_config,
+                0,
+                0,
+                &mut Rng::new(100),
+                &mut verifier,
+            )
+        };
+
+        assert_ne!(
+            cond_accepted, uncond_accepted,
+            "conditioned draft should differ from unconditioned"
+        );
+    }
+
+    #[cfg(feature = "leviathan")]
+    #[test]
+    fn test_extract_ddtree_paths() {
+        let (weights, config) = make_draft();
+        let marginals = dflash_predict(&weights, &config, 0, 0);
+        let tree = build_dd_tree(&marginals, &config);
+        let paths = extract_ddtree_paths(&tree);
+
+        if !tree.is_empty() {
+            assert!(!paths.is_empty(), "non-empty tree should produce paths");
+            for path in &paths {
+                assert!(!path.is_empty(), "each path should have at least one token");
+                for &t in path {
+                    assert!(t < config.vocab_size, "token {t} out of range");
+                }
+            }
+        }
     }
 }

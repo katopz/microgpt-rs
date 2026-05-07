@@ -292,7 +292,7 @@ mod tests {
 
         let tree_unpruned = build_dd_tree(&marginals, &config);
         let tree_pruned =
-            build_dd_tree_pruned(&marginals, &config, &SudokuPruner::new(make_board()));
+            build_dd_tree_pruned(&marginals, &config, &SudokuPruner::new(make_board()), false);
 
         assert!(
             tree_pruned.len() < tree_unpruned.len(),
@@ -328,7 +328,7 @@ mod tests {
             ..Config::draft()
         };
 
-        let tree = build_dd_tree_pruned(&marginals, &config, &pruner);
+        let tree = build_dd_tree_pruned(&marginals, &config, &pruner, false);
 
         for node in &tree {
             let pos = pruner
@@ -370,7 +370,7 @@ mod tests {
             ..Config::draft()
         };
 
-        let tree = build_dd_tree_pruned(&marginals, &config, &pruner);
+        let tree = build_dd_tree_pruned(&marginals, &config, &pruner, false);
 
         for node in &tree {
             assert_ne!(
@@ -444,7 +444,7 @@ mod tests {
             ..Config::draft()
         };
 
-        let tree = build_dd_tree_pruned(&marginals, &config, &pruner);
+        let tree = build_dd_tree_pruned(&marginals, &config, &pruner, false);
         assert!(!tree.is_empty(), "tree should have nodes");
 
         let invalid = count_invalid_accumulated(&pruner, &tree);
@@ -478,8 +478,8 @@ mod tests {
         };
 
         let static_pruner = StaticOnlyPruner(&pruner);
-        let tree_static = build_dd_tree_pruned(&marginals, &config, &static_pruner);
-        let tree_aware = build_dd_tree_pruned(&marginals, &config, &pruner);
+        let tree_static = build_dd_tree_pruned(&marginals, &config, &static_pruner, false);
+        let tree_aware = build_dd_tree_pruned(&marginals, &config, &pruner, false);
 
         let static_invalid = count_invalid_accumulated(&pruner, &tree_static);
         assert!(
