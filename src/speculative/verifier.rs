@@ -1,17 +1,8 @@
 use crate::speculative::dd_tree::{build_dd_tree, extract_best_path};
-use crate::speculative::dflash::dflash_predict;
-use crate::speculative::sampling::sample_from_distribution;
-use crate::transformer::TransformerWeights;
-use crate::types::{Config, Rng};
-
-#[cfg(feature = "leviathan")]
-use crate::speculative::dflash::dflash_predict_ar;
-#[cfg(feature = "leviathan")]
-use crate::speculative::sampling::sample_residual_distribution;
-#[cfg(feature = "leviathan")]
-use crate::transformer::{ForwardContext, KVCache, forward};
-#[cfg(feature = "leviathan")]
-use crate::types::softmax;
+use crate::speculative::dflash::{dflash_predict, dflash_predict_ar};
+use crate::speculative::sampling::{sample_from_distribution, sample_residual_distribution};
+use crate::transformer::{ForwardContext, KVCache, TransformerWeights, forward};
+use crate::types::{Config, Rng, softmax};
 
 // ── Speculative Verifier: Strategy Pattern ──────────────────
 
