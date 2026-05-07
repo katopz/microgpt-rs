@@ -456,6 +456,7 @@ cargo clippy --all-targets --all-features --quiet
 
 - Console: transformer proof + benchmark table
 - `bench/NNN_bench_result.png`: auto-numbered horizontal bar chart (plotters)
+- `bench/results.csv`: append-only CSV for regression tracking (commit, date, method, throughput, latency)
 
 ## 📁 Project Structure
 
@@ -477,8 +478,8 @@ src/
     sudoku_pruner.rs  SudokuPruner (path-aware, cross-depth conflict detection) *
   percepta.rs       Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
                     Sudoku9x9, ComputableLora, StreamingSolver, SolveEvent
-  benchmark.rs      BenchResult, run_all (AR / DFlash / DDTree / Speculative / AR Draft / Leviathan †)
-  plot.rs           plot_results → PNG bar chart
+  benchmark.rs      BenchResult, run_all, save_results_csv (AR / DFlash / DDTree / Speculative / AR Draft / Leviathan †)
+  plot.rs           plot_results → PNG horizontal bar chart
   † behind --features leviathan
   * behind --features sudoku
 examples/
@@ -489,7 +490,8 @@ tests/
   integration.rs  80 integration tests (adversarial + DFA + arithmetic + backtracking + geometry
                   + Sudoku9x9 + ComputableLora + StreamingSolver)
 bench/
-  001_bench_result.png  ...  023_bench_result.png (auto-numbered)
+  001_bench_result.png  ...  024_bench_result.png (auto-numbered)
+  results.csv             append-only regression data (commit + timestamp + all metrics)
 ```
 
 ## 📜 References

@@ -5,6 +5,7 @@ use crate::speculative::{
 };
 use crate::transformer::{ForwardContext, MultiLayerKVCache, TransformerWeights, forward};
 use crate::types::{Config, Rng, softmax};
+use std::io::Write;
 use std::time::Instant;
 
 #[cfg(feature = "leviathan")]
@@ -19,6 +20,55 @@ pub struct BenchResult {
     pub time_per_step_us: f64,
     pub avg_acceptance_len: f64,
     pub color: (u8, u8, u8),
+}
+
+/// Save benchmark results to `bench/results.csv` (append, create if missing).
+///
+/// CSV columns: `commit,date,method,throughput,us_per_step,avg_accept_len`
+/// One row per benchmark method per run. Safe to call multiple times — always appends.
+pub fn save_results_csv(results: &[BenchResult], path: &str) -> std::io::Result<()> {
+    let commit = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".into());
+
+    let date = chrono_like_now();
+
+    let file_exists = std::path::Path::new(path).exists();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+
+    // Write header if file is new
+    if !file_exists {
+        writeln!(
+            file,
+            "commit,date,method,throughput,us_per_step,avg_accept_len"
+        )?;
+    }
+
+    for r in results {
+        writeln!(
+            file,
+            "{},{},{},{:.0},{:.2},{:.2}",
+            commit, date, r.label, r.throughput, r.time_per_step_us, r.avg_acceptance_len,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Simple timestamp without chrono dependency: `YYYY-MM-DDTHH:MM:SS`
+fn chrono_like_now() -> String {
+    let output = std::process::Command::new("date")
+        .arg("+%Y-%m-%dT%H:%M:%S")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    output.unwrap_or_else(|| "unknown".into())
 }
 
 /// Run all benchmarks and return results.

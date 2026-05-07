@@ -98,6 +98,13 @@ fn main() {
         Err(e) => eprintln!("\n⚠️  Plot failed: {e}"),
     }
 
+    // Save results to CSV for regression tracking
+    let csv_path = "bench/results.csv";
+    match benchmark::save_results_csv(&results, csv_path) {
+        Ok(()) => println!("📝 Results saved to: {csv_path}"),
+        Err(e) => eprintln!("⚠️  CSV save failed: {e}"),
+    }
+
     // ── Budget Sweep ───────────────────────────────────────────────
     println!("\n📊 DDTree Budget Sweep");
     println!("{}", "─".repeat(75));

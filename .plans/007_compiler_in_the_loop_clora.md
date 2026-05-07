@@ -43,11 +43,11 @@ The plan must specify a concrete `Config::bpe()` that keeps weights in the low-M
 
 **Resolution**: Start with a **bracket balancer** (balanced `{}`, `()`, `[]`, `<>`) + keyword acceptance table. NOT a full Rust parser. See §PartialParser.
 
-### Blocker 4: Plan creates 3 new top-level modules at once
+### ~~Blocker 4: Plan creates 3 new top-level modules at once~~ ✅ RESOLVED
 
 The project's pattern is incremental: one module per plan, behind feature flags (sudoku → plan 002/005/006, leviathan → plan 004). The original plan proposed `clora/`, `tokenizer/`, `data/` simultaneously.
 
-**Resolution**: Phase per module. Phase 1 = `tokenizer/` only. Phase 2 = `clora/` only. Phase 3 = `data/` = separate plan 009. Plan 008 is now wgpu LoRA training.
+**Resolution**: ~~Phase per module.~~ **RESOLVED** — the project now has established patterns (`rest/`, `speculative/` submodules). The incremental phase approach is confirmed and working. Phase 1 = `tokenizer/` only. Phase 2 = `clora/` only. Phase 3 = `data/` = separate plan 009.
 
 ### Non-Blocker: `ConstraintPruner::is_valid` doesn't carry tokenizer
 
@@ -58,6 +58,29 @@ pub trait ConstraintPruner: Send + Sync {
 ```
 
 The `SynPruner` needs to decode tokens → string. Solution: `SynPruner` holds `Arc<BpeTokenizer>` internally. Trait signature unchanged. Clean.
+
+## Current Codebase State (as of Plan 013)
+
+The following changes have landed since this plan was written:
+
+| What | Plan | Status |
+|------|------|--------|
+| Multi-layer transformer (`Vec<LayerWeights>`) | Plan 010 | ✅ Done |
+| `Config.n_layer` field | Plan 010 | ✅ Done |
+| GQA support (`n_kv_head`) | Plan 011 | ✅ Done |
+| `PagedKVCache` with `fork()` | Plan 011 | ✅ Done |
+| Zero-alloc hot paths (`SpeculativeContext`) | Plan 013 | ✅ Done |
+| REST speculative decoding | Plan 009 | ✅ Done |
+| `Config::small_target()`, `Config::gqa_draft()` | Plan 010/011 | ✅ Done |
+| `extract_parent_tokens` still returns `Vec<usize>` | — | ⚠️ Allocates per call |
+| `TreeNode.parent_path` still `u64` with 5-bit encoding | — | ⚠️ Max token = 31 |
+| No BPE tokenizer | — | ❌ Not started |
+| No SynPruner / clora module | — | ❌ Not started |
+
+### Remaining Blockers
+
+Only **Blocker 1** (path encoding overflow) and **Blocker 3** (syn partial parse) remain.
+Blockers 2 and 4 are resolved.
 
 ## The Grand Vision (from Research)
 
@@ -211,12 +234,10 @@ impl Config {
 }
 ```
 
-**Note on multi-layer**: Both configs use `n_layer: 1` (single-layer). The current `TransformerWeights` struct is single-layer — all weight fields are flat `Vec<f32>`, not `Vec<Vec<f32>>`. Adding multi-layer support requires:
-1. Adding `n_layer: usize` to `Config`
-2. Changing `TransformerWeights` to hold `Vec<Vec<f32>>` for per-layer weights (`attn_wq/k/v/o`, `mlp_w1/w2`)
-3. Adding a layer loop in `forward()`
+    // NOTE: small_target() and gqa_draft() already exist with vocab=4096, n_layer=4.
+    // Config::bpe() differs: smaller n_embd (32 vs 64), single layer, BPE-specific parameters.
 
-This is a prerequisite for Plan 008 (wgpu LoRA training) at cLoRA scale, but NOT for Plan 007's BPE tokenizer + SynPruner. Multi-layer will be added as a Phase 0.5 task when needed for Plan 008 integration.
+**Note on multi-layer**: Plan 010 already implemented multi-layer support. `TransformerWeights` uses `layers: Vec<LayerWeights>`, `Config` has `n_layer: usize`, and `forward()` has a layer loop. The `Config::bpe()` below can freely use `n_layer > 1` if needed.
 
 **Memory estimates** for `Config::bpe()`:
 | Buffer | Size | Bytes |
@@ -614,13 +635,14 @@ Plan 009 will cover:
 - [ ] 0.1 Change `TreeNode.parent_path` from `u64` to `u128` in `speculative/types.rs`
 - [ ] 0.2 Update `extract_parent_tokens` to use 16-bit shifts (`<< 16`, `& 0xFFFF`)
 - [ ] 0.3 Update `build_dd_tree_pruned` shift from `<< 5` to `<< 16`
-- [ ] 0.4 Update all tests in `dd_tree.rs` for new encoding
-- [ ] 0.5 Run `cargo test --all-features` — all 176 tests pass
-- [ ] 0.6 Run `cargo clippy --all-features` — zero warnings
-- [ ] 0.7 Run `cargo run --release` — benchmark unchanged (perf check)
-- [ ] 0.8 Commit with message `refactor: TreeNode path encoding 5-bit→16-bit for BPE vocab support`
-- [ ] 0.9 Add `n_layer: usize` field to `Config` in `types.rs` (default: 1 for all configs)
-- [ ] 0.10 Note: multi-layer `TransformerWeights` deferred until Plan 008 needs it
+- [ ] 0.4 Add `extract_parent_tokens_into(parent_path: u128, num_tokens: usize, buf: &mut [usize])` to `dd_tree.rs` — zero-alloc version that writes into pre-allocated buffer
+- [ ] 0.5 Update `SpeculativeContext` in `speculative/types.rs` to include `parent_tokens_buf: Vec<usize>` (size = `draft_lookahead + 1`)
+- [ ] 0.6 Migrate all internal `extract_parent_tokens()` callers to `extract_parent_tokens_into()` with `SpeculativeContext::parent_tokens_buf`
+- [ ] 0.7 Update all tests in `dd_tree.rs` for new encoding
+- [ ] 0.8 Run `cargo test --all-features` — all 176 tests pass
+- [ ] 0.9 Run `cargo clippy --all-features` — zero warnings
+- [ ] 0.10 Run `cargo run --release` — benchmark unchanged (perf check)
+- [ ] 0.11 Commit with message `refactor: TreeNode path encoding 5-bit→16-bit for BPE vocab support`
 
 ### Phase 1: BPE Tokenizer
 
@@ -691,13 +713,13 @@ clora = ["syn", "proc-macro2"]
 
 | File | Action | Phase | Breaking? |
 |------|--------|-------|-----------|
-| `src/speculative/types.rs` | `u64` → `u128` in TreeNode | 0 | **Yes** — all tests update |
+| `src/speculative/types.rs` | `u64` → `u128` in TreeNode; add `parent_tokens_buf` to `SpeculativeContext` | 0 | **Yes** — all tests update |
 | `src/speculative/dd_tree.rs` | shift/mask update | 0 | No (internal) |
 | `Cargo.toml` | Add deps + features | 1-2 | No |
 | `src/tokenizer/mod.rs` | New | 1 | No |
 | `src/tokenizer/types.rs` | New | 1 | No |
 | `src/tokenizer/bpe.rs` | New | 1 | No |
-| `src/types.rs` | Add Config::bpe() | 1 | No |
+| `src/types.rs` | Add Config::bpe() (`n_layer` already exists from Plan 010) | 1 | No |
 | `src/lib.rs` | Add mod tokenizer | 1 | No |
 | `src/clora/mod.rs` | New | 2 | No |
 | `src/clora/types.rs` | New | 2 | No |

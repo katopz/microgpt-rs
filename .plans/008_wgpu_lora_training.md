@@ -65,6 +65,33 @@ The forward + backward pass is matmul-heavy. CPU works for the toy model (vocab=
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+## Design Principle: WASM-First, wgpu-Native
+
+This plan targets **WebGPU via wgpu** as the sole GPU backend. Rationale:
+
+1. **WASM compatibility**: wgpu compiles to `wasm32-unknown-unknown` via WebGPU. This means the same training code runs in-browser.
+2. **Cross-platform**: wgpu abstracts over Metal (macOS), Vulkan (Linux/Android), DX12 (Windows), and WebGPU (browser).
+3. **No candle/burn dependency**: Those crates don't support WASM GPU compute. wgpu + WGSL is the only path for browser-based LoRA training.
+4. **Micro-scale appropriate**: At `n_embd ≤ 256`, WebGPU compute shaders are sufficient. No need for CUDA-specific optimizations.
+5. **safetensors may not compile on WASM** — for browser, use a simpler binary format (raw f32 slices with blake3 checksum). safetensors stays for native.
+
+## Current Codebase State (as of Plan 013)
+
+| What | Status | Impact on Plan 008 |
+|------|--------|--------------------|
+| Multi-layer `TransformerWeights` with `Vec<LayerWeights>` | ✅ Done (Plan 010) | GpuWeightBuffers must mirror this structure |
+| `Config.n_layer` field | ✅ Done (Plan 010) | No Config changes needed for n_layer |
+| GQA (`n_kv_head`) | ✅ Done (Plan 011) | GPU attention must handle GQA groups |
+| `PagedKVCache` | ✅ Done (Plan 011) | GPU KV cache can use paged design |
+| `ForwardContext` zero-alloc | ✅ Done (Plan 013) | GPU activation buffers follow same pattern |
+| `hidden_state` extraction | ✅ Done (Plan 009) | GPU forward must also expose hidden state |
+| BPE tokenizer | ❌ Blocked on Plan 007 | Plan 008 can develop with `Config::micro()` |
+
+### Prerequisites Update
+- Plan 007 Phase 1 (BPE Tokenizer) must be complete for cLoRA-scale configs
+- Development and testing uses `Config::micro()` which already exists
+- `Config::bpe()` from Plan 007 defines the production config dimensions
+
 ## LoRA Architecture
 
 LoRA injects low-rank adapter matrices into the transformer. Base weights are **frozen**. Only LoRA A and B are updated during training.
@@ -140,7 +167,7 @@ src/
 wgpu = { version = "24", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 pollster = { version = "0.4", optional = true }  # block_on for async wgpu init
-safetensors = { version = "0.4", optional = true }   # LoRA weight serialization
+safetensors = { version = "0.4", optional = true }   # Native only — not WASM compatible
 
 [features]
 default = []
@@ -592,13 +619,17 @@ pub struct GpuForwardPass {
 pub struct GpuWeightBuffers {
     pub wte: wgpu::Buffer,       // [vocab_size, n_embd]
     pub wpe: wgpu::Buffer,       // [block_size, n_embd]
-    pub attn_wq: wgpu::Buffer,   // [n_embd, n_embd]
+    pub lm_head: wgpu::Buffer,   // [vocab_size, n_embd]
+    pub layers: Vec<GpuLayerBuffers>,  // [n_layer] — matches TransformerWeights.layers
+}
+
+pub struct GpuLayerBuffers {
+    pub attn_wq: wgpu::Buffer,
     pub attn_wk: wgpu::Buffer,
     pub attn_wv: wgpu::Buffer,
     pub attn_wo: wgpu::Buffer,
-    pub mlp_w1: wgpu::Buffer,    // [mlp_hidden, n_embd]
-    pub mlp_w2: wgpu::Buffer,    // [n_embd, mlp_hidden]
-    pub lm_head: wgpu::Buffer,   // [vocab_size, n_embd]
+    pub mlp_w1: wgpu::Buffer,
+    pub mlp_w2: wgpu::Buffer,
 }
 
 /// LoRA adapter buffers. 6 adapters per layer (Q, K, V, O, MLP1, MLP2).
@@ -652,8 +683,10 @@ impl GpuForwardPass {
         // 1. Embedding lookup: hidden = wte[tokens] + wpe[positions]
         self.dispatch_embedding(&mut encoder, token_ids);
         
-        // 2. For each layer: attention + MLP with LoRA
-        self.dispatch_layer(&mut encoder)?;
+        // 2. For each layer in self.weights.layers: attention + MLP with LoRA
+        for layer_idx in 0..self.config.n_layer {
+            self.dispatch_layer(&mut encoder, layer_idx)?;
+        }
         
         // 3. Final lm_head projection
         self.dispatch_lm_head(&mut encoder)?;
@@ -923,6 +956,8 @@ pub fn load_lora(path: &Path, forward: &mut GpuForwardPass) -> Result<(), GpuErr
 }
 ```
 
+Note: safetensors may not compile on WASM targets. For WASM, use a simpler export format: `[blake3_hash(4B) | n_layers(4B) | rank(4B) | layer_data...]` where each layer_data is `[a_len(4B) | a_data | b_len(4B) | b_data]`. Gate safetensors behind a native-only path.
+
 ## Phase 7: Integration with cLoRA Pipeline
 
 ### Data Flow from Plan 007 → Plan 008
@@ -991,7 +1026,7 @@ impl Config {
 
 **Note**: Plan 007 defines `vocab_size=4096` for `Config::bpe()`. Plan 008's GPU buffers must match this. The "32K vocab" mentioned in the parameter estimates table is for a future "cLoRA large" config that is NOT yet defined — it will be added when multi-layer support lands. All Plan 008 development and testing uses `vocab_size=4096` from Plan 007.
 
-**Note on multi-layer**: Current `TransformerWeights` is single-layer. Adding `n_layer > 1` support requires changing per-layer weights from `Vec<f32>` to `Vec<Vec<f32>>` and adding a layer loop in `forward()`. This is a prerequisite for cLoRA-scale configs (4-8 layers) but NOT needed for development/testing with `Config::micro_lora()` or `Config::bpe()`.
+**Note on multi-layer**: Plan 010 already implemented multi-layer support. `TransformerWeights` uses `layers: Vec<LayerWeights>`, `Config` has `n_layer: usize`, and `forward()` has a layer loop. The GPU forward pass must iterate `layers` and allocate per-layer activation buffers.
 
 ## Phase 8: Benchmarking
 
@@ -1021,6 +1056,7 @@ impl Config {
 - [ ] 1.3 Create `src/gpu/context.rs` — `GpuContext::new()`, error types
 - [ ] 1.4 Create `src/gpu/buffer.rs` — `upload_f32`, `download_f32`, `create_buffer`
 - [ ] 1.5 Add tests: context init, buffer upload/download roundtrip
+- [ ] 1.5.1 Add `#[cfg(target_arch = "wasm32")]` conditional for async GPU init (use wasm-bindgen-futures instead of pollster::block_on)
 - [ ] 1.6 Verify compilation on WASM target (`cargo build --target wasm32-unknown-unknown --features gpu`)
 
 ### Phase 2: WGSL Compute Shaders
@@ -1071,9 +1107,9 @@ impl Config {
 - [ ] 6.5 Add CLI command: `cargo run --features gpu -- train --data training.jsonl --output lora.bin`
 
 ### Phase 7: cLoRA Integration
-- [ ] 7.1 Update `Config` with LoRA fields (rank, alpha, dropout, targets)
+- [ ] 7.1 Update `Config` with LoRA fields (rank, alpha, dropout, targets) — note: `n_layer` already exists from Plan 010
 - [ ] 7.2 Verify GPU buffer sizes match plan 007's BPE dimensions (vocab_size=4096, n_embd=32, n_layer=1)
-- [ ] 7.2.1 Note: cLoRA large configs (vocab=32K, n_embd=256+, n_layer=4+) require multi-layer TransformerWeights — deferred to separate refactor
+- [ ] 7.2.1 Update `GpuWeightBuffers` to use `Vec<GpuLayerWeights>` matching the `Vec<LayerWeights>` structure from Plan 010
 - [ ] 7.3 Add integration test: load plan 007's JSONL → train → export lora.bin
 - [ ] 7.4 Document the data flow: plan 007 JSONL → plan 008 training → lora.bin
 
