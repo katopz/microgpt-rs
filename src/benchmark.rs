@@ -1,7 +1,7 @@
 use crate::speculative::{
-    AttentionScorer, NoPruner, PrefillScorer, SimulatedVerifier, build_dd_tree,
-    build_dd_tree_pruned, compress_prompt, dflash_predict, dflash_predict_ar,
-    sample_from_distribution, speculative_step_verifier,
+    AttentionScorer, NoPruner, SimulatedVerifier, SpeculativeContext, TreeBuilder, compress_prompt,
+    dflash_predict_ar_with, dflash_predict_with, extract_best_path_into, sample_from_distribution,
+    speculative_step_verifier,
 };
 use crate::transformer::{ForwardContext, MultiLayerKVCache, TransformerWeights, forward};
 use crate::types::{Config, Rng, softmax};
@@ -9,7 +9,7 @@ use std::time::Instant;
 
 #[cfg(feature = "leviathan")]
 use crate::speculative::{
-    LeviathanVerifier, speculative_step_conditioned, speculative_step_rollback,
+    LeviathanVerifier, speculative_step_conditioned_with, speculative_step_rollback_with,
 };
 
 /// Single benchmark result.
@@ -148,15 +148,19 @@ fn bench_dflash(
     warmup: usize,
     iters: usize,
 ) -> BenchResult {
+    let mut sctx = SpeculativeContext::new(draft_config);
+
     for _ in 0..warmup {
-        let _ = dflash_predict(draft_weights, draft_config, 0, 0);
+        sctx.reset();
+        dflash_predict_with(&mut sctx, draft_weights, draft_config, 0, 0);
     }
 
     let mut total_draft_tokens = 0usize;
     let start = Instant::now();
     for _ in 0..iters {
-        let marginals = dflash_predict(draft_weights, draft_config, 0, 0);
-        total_draft_tokens += marginals.len();
+        sctx.reset();
+        let steps = dflash_predict_with(&mut sctx, draft_weights, draft_config, 0, 0);
+        total_draft_tokens += steps;
     }
     let elapsed = start.elapsed();
 
@@ -176,15 +180,22 @@ fn bench_ddtree(
     warmup: usize,
     iters: usize,
 ) -> BenchResult {
-    let marginals = dflash_predict(draft_weights, draft_config, 0, 0);
+    let mut sctx = SpeculativeContext::new(draft_config);
+    sctx.reset();
+    dflash_predict_with(&mut sctx, draft_weights, draft_config, 0, 0);
+    let marginals_view: Vec<&[f32]> = (0..sctx.steps_populated)
+        .map(|step| sctx.marginal_slice(step, draft_config.vocab_size))
+        .collect();
+
+    let mut tree_builder = TreeBuilder::new(draft_config);
 
     for _ in 0..warmup {
-        let _ = build_dd_tree(&marginals, draft_config);
+        let _ = tree_builder.build(&marginals_view, draft_config, &NoPruner, false);
     }
 
     let start = Instant::now();
     for _ in 0..iters {
-        let _ = build_dd_tree(&marginals, draft_config);
+        let _ = tree_builder.build(&marginals_view, draft_config, &NoPruner, false);
     }
     let elapsed = start.elapsed();
 
@@ -206,7 +217,7 @@ fn bench_speculative(
     iters: usize,
 ) -> BenchResult {
     let mut rng = Rng::new(99);
-    let mut verifier = SimulatedVerifier::new(0.75);
+    let mut verifier = SimulatedVerifier::new(0.75, draft_config);
 
     for _ in 0..warmup {
         let _ =
@@ -242,16 +253,30 @@ fn bench_speculative_ar(
     iters: usize,
 ) -> BenchResult {
     let mut rng = Rng::new(99);
+    let mut sctx = SpeculativeContext::new(draft_config);
+    let mut tree_builder = TreeBuilder::new(draft_config);
 
     for _ in 0..warmup {
-        let _ = run_speculative_ar_step(draft_weights, draft_config, &mut rng);
+        let _ = run_speculative_ar_step(
+            &mut sctx,
+            &mut tree_builder,
+            draft_weights,
+            draft_config,
+            &mut rng,
+        );
     }
 
     let mut total_accepted = 0usize;
     let start = Instant::now();
     for _ in 0..iters {
-        let accepted = run_speculative_ar_step(draft_weights, draft_config, &mut rng);
-        total_accepted += accepted.len();
+        let accepted = run_speculative_ar_step(
+            &mut sctx,
+            &mut tree_builder,
+            draft_weights,
+            draft_config,
+            &mut rng,
+        );
+        total_accepted += accepted;
     }
     let elapsed = start.elapsed();
 
@@ -268,53 +293,61 @@ fn bench_speculative_ar(
 
 /// AR draft + DDTree + simulated acceptance + bonus token.
 fn run_speculative_ar_step(
+    sctx: &mut SpeculativeContext,
+    tree_builder: &mut TreeBuilder,
     draft_weights: &TransformerWeights,
     draft_config: &Config,
     rng: &mut Rng,
-) -> Vec<usize> {
-    let draft_result = dflash_predict_ar(draft_weights, draft_config, 0, 0, rng);
-    let tree = build_dd_tree(&draft_result.marginals, draft_config);
+) -> usize {
+    // 1. Zero-alloc AR draft
+    sctx.reset();
+    let steps = dflash_predict_ar_with(sctx, draft_weights, draft_config, 0, 0, rng);
+    let vocab_size = draft_config.vocab_size;
 
-    // Extract best path (highest-scored token at each depth)
-    let max_depth = tree.iter().map(|n| n.depth).max().unwrap_or(0);
-    let mut path = Vec::with_capacity(max_depth + 1);
-    for depth in 0..=max_depth {
-        let best = tree
-            .iter()
-            .filter(|n| n.depth == depth)
-            .max_by_key(|n| (n.score * 1e6) as i64);
-        match best {
-            Some(node) => path.push(node.token_idx),
-            None => break,
-        }
-    }
+    // 2. Build tree from marginals
+    let marginals_view: Vec<&[f32]> = (0..steps)
+        .map(|step| sctx.marginal_slice(step, vocab_size))
+        .collect();
+    let tree = tree_builder.build(&marginals_view, draft_config, &NoPruner, false);
 
-    if path.is_empty() {
-        return vec![sample_from_distribution(
-            draft_result
-                .marginals
-                .first()
-                .map(|m| m.as_slice())
-                .unwrap_or(&[1.0]),
+    // 3. Extract best path
+    extract_best_path_into(tree, &mut sctx.path_buf);
+
+    if sctx.path_buf.is_empty() {
+        let first_marginal = sctx.marginal_slice(0, vocab_size);
+        return sample_from_distribution(
+            if first_marginal.is_empty() {
+                &[1.0]
+            } else {
+                first_marginal
+            },
             rng,
-        )];
+        );
     }
 
-    // Simulated acceptance: 75% cap
+    // 4. Simulated acceptance: 75% cap
     let acceptance_rate = 0.75;
-    let max_accept = ((path.len() as f32) * acceptance_rate).ceil() as usize;
-    let accepted: Vec<usize> = path.into_iter().take(max_accept.max(1)).collect();
+    let max_accept = ((sctx.path_buf.len() as f32) * acceptance_rate).ceil() as usize;
+    sctx.accepted_buf.clear();
+    sctx.accepted_buf
+        .extend(sctx.path_buf.iter().take(max_accept.max(1)).copied());
 
-    // Bonus token: if all accepted, sample +1 from last marginal
-    if accepted.len() == max_accept && !draft_result.marginals.is_empty() {
-        let last_marginal = draft_result.marginals.last().unwrap();
-        let bonus = sample_from_distribution(last_marginal, rng);
-        let mut result = accepted;
-        result.push(bonus);
-        return result;
+    // 5. Bonus token
+    if sctx.accepted_buf.len() == max_accept && steps > 0 {
+        let last_step = steps - 1;
+        let last_marginal = sctx.marginal_slice(last_step, vocab_size);
+        let bonus = sample_from_distribution(
+            if last_marginal.is_empty() {
+                &[1.0]
+            } else {
+                last_marginal
+            },
+            rng,
+        );
+        sctx.accepted_buf.push(bonus);
     }
 
-    accepted
+    sctx.accepted_buf.len()
 }
 
 /// Benchmark: Chain-seed DDTree vs regular DDTree.
@@ -325,19 +358,26 @@ pub fn bench_ddtree_chain_seed(
     warmup: usize,
     iters: usize,
 ) -> (BenchResult, BenchResult) {
-    let marginals = dflash_predict(draft_weights, draft_config, 0, 0);
+    let mut sctx = SpeculativeContext::new(draft_config);
+    sctx.reset();
+    dflash_predict_with(&mut sctx, draft_weights, draft_config, 0, 0);
+    let mv: Vec<&[f32]> = (0..sctx.steps_populated)
+        .map(|step| sctx.marginal_slice(step, draft_config.vocab_size))
+        .collect();
+
+    let mut tree_builder = TreeBuilder::new(draft_config);
 
     // Warmup
     for _ in 0..warmup {
-        let _ = build_dd_tree_pruned(&marginals, draft_config, &NoPruner, false);
-        let _ = build_dd_tree_pruned(&marginals, draft_config, &NoPruner, true);
+        let _ = tree_builder.build(&mv, draft_config, &NoPruner, false);
+        let _ = tree_builder.build(&mv, draft_config, &NoPruner, true);
     }
 
     // Benchmark no-chain
     let start = Instant::now();
     let mut total_nodes_no_chain = 0usize;
     for _ in 0..iters {
-        let tree = build_dd_tree_pruned(&marginals, draft_config, &NoPruner, false);
+        let tree = tree_builder.build(&mv, draft_config, &NoPruner, false);
         total_nodes_no_chain += tree.len();
     }
     let elapsed_no_chain = start.elapsed();
@@ -346,7 +386,7 @@ pub fn bench_ddtree_chain_seed(
     let start = Instant::now();
     let mut total_nodes_chain = 0usize;
     for _ in 0..iters {
-        let tree = build_dd_tree_pruned(&marginals, draft_config, &NoPruner, true);
+        let tree = tree_builder.build(&mv, draft_config, &NoPruner, true);
         total_nodes_chain += tree.len();
     }
     let elapsed_chain = start.elapsed();
@@ -381,7 +421,14 @@ pub fn bench_ddtree_budget_sweep(
     warmup: usize,
     iters: usize,
 ) -> Vec<BenchResult> {
-    let marginals = dflash_predict(draft_weights, draft_config, 0, 0);
+    let mut sctx = SpeculativeContext::new(draft_config);
+    sctx.reset();
+    dflash_predict_with(&mut sctx, draft_weights, draft_config, 0, 0);
+    let mv: Vec<&[f32]> = (0..sctx.steps_populated)
+        .map(|step| sctx.marginal_slice(step, draft_config.vocab_size))
+        .collect();
+
+    let mut tree_builder = TreeBuilder::new(draft_config);
     let mut results = Vec::with_capacity(budgets.len() * 2);
 
     for &budget in budgets {
@@ -390,15 +437,15 @@ pub fn bench_ddtree_budget_sweep(
 
         // Warmup
         for _ in 0..warmup {
-            let _ = build_dd_tree_pruned(&marginals, &sweep_config, &NoPruner, false);
-            let _ = build_dd_tree_pruned(&marginals, &sweep_config, &NoPruner, true);
+            let _ = tree_builder.build(&mv, &sweep_config, &NoPruner, false);
+            let _ = tree_builder.build(&mv, &sweep_config, &NoPruner, true);
         }
 
         // Benchmark no-chain
         let start = Instant::now();
         let mut total_nodes = 0usize;
         for _ in 0..iters {
-            let tree = build_dd_tree_pruned(&marginals, &sweep_config, &NoPruner, false);
+            let tree = tree_builder.build(&mv, &sweep_config, &NoPruner, false);
             total_nodes += tree.len();
         }
         let elapsed = start.elapsed();
@@ -415,7 +462,7 @@ pub fn bench_ddtree_budget_sweep(
         let start = Instant::now();
         let mut total_nodes = 0usize;
         for _ in 0..iters {
-            let tree = build_dd_tree_pruned(&marginals, &sweep_config, &NoPruner, true);
+            let tree = tree_builder.build(&mv, &sweep_config, &NoPruner, true);
             total_nodes += tree.len();
         }
         let elapsed = start.elapsed();
@@ -444,7 +491,7 @@ fn bench_leviathan(
     iters: usize,
 ) -> BenchResult {
     let mut rng = Rng::new(99);
-    let mut verifier = LeviathanVerifier::new(target_weights, target_config);
+    let mut verifier = LeviathanVerifier::new(target_weights, target_config, draft_config);
 
     for _ in 0..warmup {
         let _ =
@@ -485,7 +532,7 @@ fn bench_snapshot_rollback(
 ) -> (BenchResult, BenchResult) {
     // ── No-rollback: standard Leviathan (resets cache each step) ──
     let mut rng_no_rb = Rng::new(99);
-    let mut verifier = LeviathanVerifier::new(target_weights, target_config);
+    let mut verifier = LeviathanVerifier::new(target_weights, target_config, draft_config);
 
     for _ in 0..warmup {
         let _ = speculative_step_verifier(
@@ -521,19 +568,29 @@ fn bench_snapshot_rollback(
         color: (180, 100, 220),
     };
 
-    // ── With rollback: speculative_step_rollback (snapshots + restores) ──
+    // ── With rollback: speculative_step_rollback_with (zero-alloc, snapshots + restores) ──
     let mut rng_rb = Rng::new(99);
     let mut target_ctx = ForwardContext::new(target_config);
+    let mut target_cache = MultiLayerKVCache::new(target_config);
+    let mut draft_sctx = SpeculativeContext::new(draft_config);
+    let mut tree_builder = TreeBuilder::new(draft_config);
+    let mut probs_buf = vec![0.0f32; target_config.vocab_size];
+    let mut residual_buf = vec![0.0f32; target_config.vocab_size];
 
     for _ in 0..warmup {
-        let mut cache = MultiLayerKVCache::new(target_config);
-        let _ = speculative_step_rollback(
+        target_cache.reset();
+        draft_sctx.reset();
+        let _ = speculative_step_rollback_with(
+            &mut draft_sctx,
+            &mut tree_builder,
             draft_weights,
             draft_config,
             target_weights,
             target_config,
             &mut target_ctx,
-            &mut cache,
+            &mut target_cache,
+            &mut probs_buf,
+            &mut residual_buf,
             0,
             0,
             &mut rng_rb,
@@ -543,14 +600,19 @@ fn bench_snapshot_rollback(
     let mut total_rb = 0usize;
     let start = Instant::now();
     for _ in 0..iters {
-        let mut cache = MultiLayerKVCache::new(target_config);
-        let (accepted, _) = speculative_step_rollback(
+        target_cache.reset();
+        draft_sctx.reset();
+        let (accepted, _) = speculative_step_rollback_with(
+            &mut draft_sctx,
+            &mut tree_builder,
             draft_weights,
             draft_config,
             target_weights,
             target_config,
             &mut target_ctx,
-            &mut cache,
+            &mut target_cache,
+            &mut probs_buf,
+            &mut residual_buf,
             0,
             0,
             &mut rng_rb,
@@ -585,7 +647,7 @@ fn bench_conditioned_vs_unconditioned(
 ) -> (BenchResult, BenchResult) {
     // ── Unconditioned: SimulatedVerifier (standard DFlash) ──
     let mut rng_uncond = Rng::new(99);
-    let mut verifier = SimulatedVerifier::new(0.75);
+    let mut verifier = SimulatedVerifier::new(0.75, draft_config);
 
     for _ in 0..warmup {
         let _ = speculative_step_verifier(
@@ -621,19 +683,27 @@ fn bench_conditioned_vs_unconditioned(
         color: (255, 140, 0),
     };
 
-    // ── Conditioned: target hidden state seeds draft KV cache ──
+    // ── Conditioned: target hidden state seeds draft KV cache (zero-alloc) ──
     let mut rng_cond = Rng::new(99);
     let mut target_ctx = ForwardContext::new(target_config);
+    let mut target_cache = MultiLayerKVCache::new(target_config);
+    let mut draft_sctx = SpeculativeContext::new(draft_config);
+    let mut tree_builder = TreeBuilder::new(draft_config);
+    let mut probs_buf = vec![0.0f32; target_config.vocab_size];
 
     for _ in 0..warmup {
-        let mut cache = MultiLayerKVCache::new(target_config);
-        let _ = speculative_step_conditioned(
+        target_cache.reset();
+        draft_sctx.reset();
+        let _ = speculative_step_conditioned_with(
+            &mut draft_sctx,
+            &mut tree_builder,
             draft_weights,
             draft_config,
             target_weights,
             target_config,
             &mut target_ctx,
-            &mut cache,
+            &mut target_cache,
+            &mut probs_buf,
             0,
             0,
             &mut rng_cond,
@@ -643,14 +713,18 @@ fn bench_conditioned_vs_unconditioned(
     let mut total_cond = 0usize;
     let start = Instant::now();
     for _ in 0..iters {
-        let mut cache = MultiLayerKVCache::new(target_config);
-        let (accepted, _) = speculative_step_conditioned(
+        target_cache.reset();
+        draft_sctx.reset();
+        let (accepted, _) = speculative_step_conditioned_with(
+            &mut draft_sctx,
+            &mut tree_builder,
             draft_weights,
             draft_config,
             target_weights,
             target_config,
             &mut target_ctx,
-            &mut cache,
+            &mut target_cache,
+            &mut probs_buf,
             0,
             0,
             &mut rng_cond,
@@ -682,18 +756,32 @@ fn bench_prefill_compression(
         .collect();
 
     let scorer = AttentionScorer;
+    let mut scores_buf = vec![0.0f32; prompt_len];
+    let mut sctx = SpeculativeContext::new(draft_config);
 
     // ── No compression (keep_ratio=1.0) ──
     for _ in 0..warmup {
-        let scores = scorer.score(draft_weights, draft_config, &prompt_tokens);
-        let _ = compress_prompt(&scores, 1.0, 0, 0);
+        scorer.score_with(
+            &mut sctx,
+            draft_weights,
+            draft_config,
+            &prompt_tokens,
+            &mut scores_buf,
+        );
+        let _ = compress_prompt(&scores_buf, 1.0, 0, 0);
     }
 
     let mut total_nocompress = 0usize;
     let start = Instant::now();
     for _ in 0..iters {
-        let scores = scorer.score(draft_weights, draft_config, &prompt_tokens);
-        let selected = compress_prompt(&scores, 1.0, 0, 0);
+        scorer.score_with(
+            &mut sctx,
+            draft_weights,
+            draft_config,
+            &prompt_tokens,
+            &mut scores_buf,
+        );
+        let selected = compress_prompt(&scores_buf, 1.0, 0, 0);
         total_nocompress += selected.len();
     }
     let elapsed_nocompress = start.elapsed();
@@ -708,15 +796,27 @@ fn bench_prefill_compression(
 
     // ── Compressed (keep_ratio=0.1) ──
     for _ in 0..warmup {
-        let scores = scorer.score(draft_weights, draft_config, &prompt_tokens);
-        let _ = compress_prompt(&scores, 0.1, 0, 0);
+        scorer.score_with(
+            &mut sctx,
+            draft_weights,
+            draft_config,
+            &prompt_tokens,
+            &mut scores_buf,
+        );
+        let _ = compress_prompt(&scores_buf, 0.1, 0, 0);
     }
 
     let mut total_compress = 0usize;
     let start = Instant::now();
     for _ in 0..iters {
-        let scores = scorer.score(draft_weights, draft_config, &prompt_tokens);
-        let selected = compress_prompt(&scores, 0.1, 0, 0);
+        scorer.score_with(
+            &mut sctx,
+            draft_weights,
+            draft_config,
+            &prompt_tokens,
+            &mut scores_buf,
+        );
+        let selected = compress_prompt(&scores_buf, 0.1, 0, 0);
         total_compress += selected.len();
     }
     let elapsed_compress = start.elapsed();

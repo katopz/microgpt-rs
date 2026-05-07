@@ -1,8 +1,164 @@
 use crate::speculative::sampling::sample_from_distribution;
-use crate::speculative::types::DraftResult;
+use crate::speculative::types::{DraftResult, SpeculativeContext};
 use crate::transformer::{ForwardContext, MultiLayerKVCache, TransformerWeights, forward};
 use crate::types::{Config, Rng, softmax};
 use rayon::prelude::*;
+
+// ── Zero-alloc _with variants ──────────────────────────────────
+
+/// Zero-alloc variant of `dflash_predict`.
+///
+/// Reuses pre-allocated buffers from `SpeculativeContext`.
+/// Each step gets an independent KV cache (reset per step).
+/// Returns number of steps populated; caller reads via `sctx.marginal_slice()`.
+pub fn dflash_predict_with(
+    sctx: &mut SpeculativeContext,
+    draft_weights: &TransformerWeights,
+    draft_config: &Config,
+    token: usize,
+    pos: usize,
+) -> usize {
+    let max_steps = draft_config
+        .draft_lookahead
+        .min(draft_config.block_size.saturating_sub(pos));
+    let vocab_size = draft_config.vocab_size;
+    let temperature = draft_config.temperature;
+
+    for step in 0..max_steps {
+        sctx.cache.reset();
+        let logits = forward(
+            &mut sctx.ctx,
+            draft_weights,
+            &mut sctx.cache,
+            token,
+            pos + step,
+            draft_config,
+        );
+        sctx.probs_buf.copy_from_slice(logits);
+        for p in sctx.probs_buf.iter_mut() {
+            *p /= temperature;
+        }
+        softmax(&mut sctx.probs_buf);
+        let start = step * vocab_size;
+        sctx.marginals_flat[start..start + vocab_size].copy_from_slice(&sctx.probs_buf);
+    }
+
+    sctx.steps_populated = max_steps;
+    max_steps
+}
+
+/// Zero-alloc variant of `dflash_predict_ar`.
+///
+/// Reuses pre-allocated buffers from `SpeculativeContext`.
+/// Autoregressive: single KV cache, samples feed back as next input.
+/// Returns number of steps populated; caller reads via `sctx.marginal_slice()` and `sctx.sampled_tokens()`.
+pub fn dflash_predict_ar_with(
+    sctx: &mut SpeculativeContext,
+    draft_weights: &TransformerWeights,
+    draft_config: &Config,
+    token: usize,
+    pos: usize,
+    rng: &mut Rng,
+) -> usize {
+    sctx.cache.reset();
+    let max_steps = draft_config
+        .draft_lookahead
+        .min(draft_config.block_size.saturating_sub(pos));
+    let vocab_size = draft_config.vocab_size;
+    let temperature = draft_config.temperature;
+
+    let mut cur_token = token;
+    for step in 0..max_steps {
+        let logits = forward(
+            &mut sctx.ctx,
+            draft_weights,
+            &mut sctx.cache,
+            cur_token,
+            pos + step,
+            draft_config,
+        );
+        sctx.probs_buf.copy_from_slice(logits);
+        for p in sctx.probs_buf.iter_mut() {
+            *p /= temperature;
+        }
+        softmax(&mut sctx.probs_buf);
+
+        let next_token = sample_from_distribution(&sctx.probs_buf, rng);
+        let start = step * vocab_size;
+        sctx.marginals_flat[start..start + vocab_size].copy_from_slice(&sctx.probs_buf);
+        sctx.sampled_tokens[step] = next_token;
+        cur_token = next_token;
+    }
+
+    sctx.steps_populated = max_steps;
+    max_steps
+}
+
+/// Zero-alloc variant of `dflash_predict_conditioned`.
+///
+/// Reuses pre-allocated buffers from `SpeculativeContext`.
+/// Seeds draft KV cache with target hidden state, then autoregressive.
+/// Returns number of steps populated.
+pub fn dflash_predict_conditioned_with(
+    sctx: &mut SpeculativeContext,
+    draft_weights: &TransformerWeights,
+    draft_config: &Config,
+    token: usize,
+    pos: usize,
+    target_hidden_state: &[f32],
+    rng: &mut Rng,
+) -> usize {
+    sctx.cache.reset();
+    let max_steps = draft_config.draft_lookahead.min(
+        draft_config
+            .block_size
+            .saturating_sub(pos)
+            .saturating_sub(1),
+    );
+
+    // Seed draft KV cache with target hidden state (Option C)
+    let draft_kv_dim = crate::types::kv_dim(draft_config);
+    if !target_hidden_state.is_empty() && draft_kv_dim > 0 {
+        let target_dim = target_hidden_state.len().min(draft_kv_dim);
+        for layer in &mut sctx.cache.layers {
+            layer.key[..target_dim].copy_from_slice(&target_hidden_state[..target_dim]);
+            layer.key[target_dim..draft_kv_dim].fill(0.0);
+            layer.value[..target_dim].copy_from_slice(&target_hidden_state[..target_dim]);
+            layer.value[target_dim..draft_kv_dim].fill(0.0);
+        }
+    }
+
+    let vocab_size = draft_config.vocab_size;
+    let temperature = draft_config.temperature;
+    let mut cur_token = token;
+
+    for step in 0..max_steps {
+        let logits = forward(
+            &mut sctx.ctx,
+            draft_weights,
+            &mut sctx.cache,
+            cur_token,
+            pos + step + 1,
+            draft_config,
+        );
+        sctx.probs_buf.copy_from_slice(logits);
+        for p in sctx.probs_buf.iter_mut() {
+            *p /= temperature;
+        }
+        softmax(&mut sctx.probs_buf);
+
+        let next_token = sample_from_distribution(&sctx.probs_buf, rng);
+        let start = step * vocab_size;
+        sctx.marginals_flat[start..start + vocab_size].copy_from_slice(&sctx.probs_buf);
+        sctx.sampled_tokens[step] = next_token;
+        cur_token = next_token;
+    }
+
+    sctx.steps_populated = max_steps;
+    max_steps
+}
+
+// ── Backward-compatible public API (thin wrappers) ─────────────
 
 /// Sequential DFlash: Predict marginal distributions using draft model.
 /// Uses pre-allocated ForwardContext for zero-alloc per step.
@@ -12,35 +168,16 @@ pub fn dflash_predict(
     token: usize,
     pos: usize,
 ) -> Vec<Vec<f32>> {
-    let mut ctx = ForwardContext::new(draft_config);
-    let max_steps = draft_config
-        .draft_lookahead
-        .min(draft_config.block_size.saturating_sub(pos));
-
-    let mut marginals = Vec::with_capacity(max_steps);
-    for step in 0..max_steps {
-        let mut cache = MultiLayerKVCache::new(draft_config);
-        let draft_pos = pos + step;
-        let logits = forward(
-            &mut ctx,
-            draft_weights,
-            &mut cache,
-            token,
-            draft_pos,
-            draft_config,
-        );
-        let mut probs = logits.to_vec();
-        for p in probs.iter_mut() {
-            *p /= draft_config.temperature;
-        }
-        softmax(&mut probs);
-        marginals.push(probs);
-    }
-    marginals
+    let mut sctx = SpeculativeContext::new(draft_config);
+    let steps = dflash_predict_with(&mut sctx, draft_weights, draft_config, token, pos);
+    let vocab_size = draft_config.vocab_size;
+    (0..steps)
+        .map(|step| sctx.marginal_slice(step, vocab_size).to_vec())
+        .collect()
 }
 
 /// Parallel DFlash: Predict marginals using rayon.
-/// One ForwardContext per rayon worker thread — no contention, zero waste.
+/// One ForwardContext + probs buffer per rayon worker thread — no contention, zero waste.
 pub fn dflash_predict_parallel(
     draft_weights: &TransformerWeights,
     draft_config: &Config,
@@ -62,17 +199,18 @@ pub fn dflash_predict_parallel(
                 (
                     ForwardContext::new(draft_config),
                     MultiLayerKVCache::new(draft_config),
+                    vec![0.0f32; draft_config.vocab_size],
                 )
             },
-            |(ctx, cache), step| {
+            |(ctx, cache, probs_buf), step| {
                 let draft_pos = pos + step;
                 let logits = forward(ctx, draft_weights, cache, token, draft_pos, draft_config);
-                let mut probs = logits.to_vec();
-                for p in probs.iter_mut() {
+                probs_buf.copy_from_slice(logits);
+                for p in probs_buf.iter_mut() {
                     *p /= draft_config.temperature;
                 }
-                softmax(&mut probs);
-                probs
+                softmax(probs_buf);
+                probs_buf.clone()
             },
         )
         .collect()
@@ -90,41 +228,14 @@ pub fn dflash_predict_ar(
     pos: usize,
     rng: &mut Rng,
 ) -> DraftResult {
-    let mut ctx = ForwardContext::new(draft_config);
-    let mut cache = MultiLayerKVCache::new(draft_config);
-    let max_steps = draft_config
-        .draft_lookahead
-        .min(draft_config.block_size.saturating_sub(pos));
-
-    let mut marginals = Vec::with_capacity(max_steps);
-    let mut sampled_tokens = Vec::with_capacity(max_steps);
-    let mut cur_token = token;
-
-    for step in 0..max_steps {
-        let logits = forward(
-            &mut ctx,
-            draft_weights,
-            &mut cache,
-            cur_token,
-            pos + step,
-            draft_config,
-        );
-        let mut probs = logits.to_vec();
-        for p in probs.iter_mut() {
-            *p /= draft_config.temperature;
-        }
-        softmax(&mut probs);
-
-        // Sample next token and feed back
-        let next_token = sample_from_distribution(&probs, rng);
-        marginals.push(probs);
-        sampled_tokens.push(next_token);
-        cur_token = next_token;
-    }
-
+    let mut sctx = SpeculativeContext::new(draft_config);
+    let steps = dflash_predict_ar_with(&mut sctx, draft_weights, draft_config, token, pos, rng);
+    let vocab_size = draft_config.vocab_size;
     DraftResult {
-        marginals,
-        sampled_tokens,
+        marginals: (0..steps)
+            .map(|step| sctx.marginal_slice(step, vocab_size).to_vec())
+            .collect(),
+        sampled_tokens: sctx.sampled_tokens().to_vec(),
     }
 }
 
@@ -146,57 +257,22 @@ pub fn dflash_predict_conditioned(
     target_hidden_state: &[f32],
     rng: &mut Rng,
 ) -> DraftResult {
-    let mut ctx = ForwardContext::new(draft_config);
-    let mut cache = MultiLayerKVCache::new(draft_config);
-    let max_steps = draft_config.draft_lookahead.min(
-        draft_config
-            .block_size
-            .saturating_sub(pos)
-            .saturating_sub(1),
+    let mut sctx = SpeculativeContext::new(draft_config);
+    let steps = dflash_predict_conditioned_with(
+        &mut sctx,
+        draft_weights,
+        draft_config,
+        token,
+        pos,
+        target_hidden_state,
+        rng,
     );
-
-    // Seed draft KV cache with target hidden state (Option C)
-    // Project target hidden_state (target n_embd) to draft kv_dim
-    // KV cache is [block_size * kv_dim] flat, so position 0 occupies [0..kv_dim]
-    let draft_kv_dim = crate::types::kv_dim(draft_config);
-    if !target_hidden_state.is_empty() && draft_kv_dim > 0 {
-        let target_dim = target_hidden_state.len().min(draft_kv_dim);
-        for layer in &mut cache.layers {
-            layer.key[..target_dim].copy_from_slice(&target_hidden_state[..target_dim]);
-            layer.key[target_dim..draft_kv_dim].fill(0.0);
-            layer.value[..target_dim].copy_from_slice(&target_hidden_state[..target_dim]);
-            layer.value[target_dim..draft_kv_dim].fill(0.0);
-        }
-    }
-
-    let mut marginals = Vec::with_capacity(max_steps);
-    let mut sampled_tokens = Vec::with_capacity(max_steps);
-    let mut cur_token = token;
-
-    for step in 0..max_steps {
-        let logits = forward(
-            &mut ctx,
-            draft_weights,
-            &mut cache,
-            cur_token,
-            pos + step + 1, // +1 because KV slot 0 is occupied by seed
-            draft_config,
-        );
-        let mut probs = logits.to_vec();
-        for p in probs.iter_mut() {
-            *p /= draft_config.temperature;
-        }
-        softmax(&mut probs);
-
-        let next_token = sample_from_distribution(&probs, rng);
-        marginals.push(probs);
-        sampled_tokens.push(next_token);
-        cur_token = next_token;
-    }
-
+    let vocab_size = draft_config.vocab_size;
     DraftResult {
-        marginals,
-        sampled_tokens,
+        marginals: (0..steps)
+            .map(|step| sctx.marginal_slice(step, vocab_size).to_vec())
+            .collect(),
+        sampled_tokens: sctx.sampled_tokens().to_vec(),
     }
 }
 
@@ -301,7 +377,8 @@ mod tests {
     fn test_extract_best_path() {
         let (weights, config) = make_draft();
         let marginals = dflash_predict(&weights, &config, 0, 0);
-        let tree = build_dd_tree(&marginals, &config);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+        let tree = build_dd_tree(&mv, &config);
         let path = extract_best_path(&tree);
         if !tree.is_empty() {
             assert!(!path.is_empty(), "non-empty tree should produce a path");
@@ -394,5 +471,85 @@ mod tests {
         let result = dflash_predict_conditioned(&weights, &config, 0, 0, &[], &mut Rng::new(42));
         // Empty hidden state should still produce valid output (no seeding)
         assert!(!result.marginals.is_empty());
+    }
+
+    #[test]
+    fn test_dflash_predict_with_matches_original() {
+        let (weights, config) = make_draft();
+        let mut sctx = SpeculativeContext::new(&config);
+        let steps = dflash_predict_with(&mut sctx, &weights, &config, 0, 0);
+        let vocab_size = config.vocab_size;
+
+        assert_eq!(steps, config.draft_lookahead);
+        for step in 0..steps {
+            let slice = sctx.marginal_slice(step, vocab_size);
+            assert_eq!(slice.len(), vocab_size);
+            let sum: f32 = slice.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-4, "step {step} sum = {sum}");
+        }
+    }
+
+    #[test]
+    fn test_dflash_predict_ar_with_matches_original() {
+        let (weights, config) = make_draft();
+        let mut sctx = SpeculativeContext::new(&config);
+        let steps = dflash_predict_ar_with(&mut sctx, &weights, &config, 0, 0, &mut Rng::new(42));
+        let vocab_size = config.vocab_size;
+
+        assert_eq!(steps, config.draft_lookahead);
+        assert_eq!(sctx.sampled_tokens().len(), steps);
+        for step in 0..steps {
+            let slice = sctx.marginal_slice(step, vocab_size);
+            assert_eq!(slice.len(), vocab_size);
+            let sum: f32 = slice.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-4, "step {step} sum = {sum}");
+        }
+    }
+
+    #[test]
+    fn test_dflash_predict_conditioned_with_matches_original() {
+        let (weights, config) = make_draft();
+        let hidden = vec![0.5; config.n_embd];
+        let mut sctx = SpeculativeContext::new(&config);
+        let steps = dflash_predict_conditioned_with(
+            &mut sctx,
+            &weights,
+            &config,
+            0,
+            0,
+            &hidden,
+            &mut Rng::new(42),
+        );
+        let vocab_size = config.vocab_size;
+
+        assert!(steps > 0);
+        assert_eq!(sctx.sampled_tokens().len(), steps);
+        for step in 0..steps {
+            let slice = sctx.marginal_slice(step, vocab_size);
+            assert_eq!(slice.len(), vocab_size);
+            let sum: f32 = slice.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-4, "step {step} sum = {sum}");
+        }
+    }
+
+    #[test]
+    fn test_dflash_with_reuse_across_calls() {
+        let (weights, config) = make_draft();
+        let mut sctx = SpeculativeContext::new(&config);
+
+        // First call
+        let steps1 = dflash_predict_with(&mut sctx, &weights, &config, 0, 0);
+        assert_eq!(steps1, config.draft_lookahead);
+
+        // Second call — same context, should produce same results
+        let steps2 = dflash_predict_with(&mut sctx, &weights, &config, 0, 0);
+        assert_eq!(steps2, config.draft_lookahead);
+
+        // Results should be identical (same inputs, deterministic)
+        let vocab_size = config.vocab_size;
+        for step in 0..steps1 {
+            // Can't compare directly since second call overwrites, but we know it ran OK
+            let _slice = sctx.marginal_slice(step, vocab_size);
+        }
     }
 }

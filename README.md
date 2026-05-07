@@ -45,6 +45,15 @@ Matching the talos-vs-macbook reference model:
 | `draft_lookahead` | 8 |
 | `tree_budget` | 16 nodes |
 
+### Zero-Alloc Architecture
+
+All hot paths use pre-allocated buffers created once, reused across decode steps:
+
+- **`SpeculativeContext`** — holds `ForwardContext`, `MultiLayerKVCache`, flat marginals buffer, probs buffer, sampled/accepted tokens, residual scratch, p-distributions flat buffer
+- **`TreeBuilder`** — holds `BinaryHeap`, tree `Vec`, chain nodes/parent tokens; `clear()` reuses capacity
+- **`_with` variants** — `dflash_predict_with`, `dflash_predict_ar_with`, `generate_into`, `score_with`, `sample_residual_distribution_into` — borrow pre-allocated buffers instead of allocating per call
+- **`generate_batch`** — rayon parallel multi-sample generation with per-worker `ForwardContext` + `KVCache`
+
 ### Forward Pass
 
 ```
@@ -168,33 +177,47 @@ pub enum SolveEvent {
 
 ## 📊 Benchmark Results
 
-Run on Apple Silicon (single-threaded, `--release` profile, 50k iterations):
+Run on Apple Silicon (single-threaded, `--release` profile, 50k iterations, **zero-alloc hot paths**):
 
 **Models:** Target (embd=16, heads=4, mlp=64) · Draft (embd=4, heads=2, mlp=16)
 
 ```
 Method                         Throughput         μs/step  Avg Accept Len
 ───────────────────────────────────────────────────────────────────────────────
-Transformer AR                  979,889 tok/s         1.02            1.00
-DFlash                         3,074,414 tok/s         2.60            8.00
-DDTree Build                     313,919 trees/s       3.19            —
-Speculative (Simulated)          844,947 tok/s         5.92            5.00
-Speculative (AR Draft)         1,227,674 tok/s         5.70            7.00
-Leviathan (Algorithm 1)    †    108,885 tok/s        10.83            1.18
-Leviathan (no rollback)    †    108,827 tok/s        10.83            1.18
-Leviathan (w/ rollback)    †    161,324 tok/s         7.28            1.18
-Spec (unconditioned)             842,657 tok/s         5.93            5.00
-Spec (conditioned)    †         972,163 tok/s         6.94            6.74
-Prefill (no compress)          2,691,452 tok/s        23.78           64.00
-Prefill (compressed)             291,819 tok/s        23.99            7.00
-DDTree (no chain)                316,003 tok/s         3.16           16.00
-DDTree (chain-seed)              316,849 tok/s         3.16           16.00
+Transformer AR                  723,675 tok/s         1.38            1.00
+DFlash                         4,125,661 tok/s         1.94            8.00
+DDTree Build                     383,817 trees/s       2.61            —
+Speculative (Simulated)        1,072,079 tok/s         4.66            5.00
+Speculative (AR Draft)         1,511,882 tok/s         4.63            7.00
+Leviathan (Algorithm 1)    †    111,887 tok/s        10.54            1.18
+Leviathan (no rollback)    †    112,220 tok/s        10.50            1.18
+Leviathan (w/ rollback)    †    198,380 tok/s         5.92            1.18
+Spec (unconditioned)           1,072,739 tok/s         4.66            5.00
+Spec (conditioned)    †        1,118,092 tok/s         6.03            6.74
+Prefill (no compress)         19,157,126 tok/s         3.34           64.00
+Prefill (compressed)           1,946,902 tok/s         3.60            7.00
+DDTree (no chain)                384,190 trees/s       2.60           16.00
+DDTree (chain-seed)              403,230 trees/s       2.48           16.00
 ───────────────────────────────────────────────────────────────────────────────
-📈 Best speedup: 1.45x (Speculative AR Draft vs AR)
+📈 Best speedup: 1.48x (Speculative vs AR)
 † Requires --features leviathan
 ```
 
-![Benchmark Chart](bench/015_bench_result.png)
+### Zero-Alloc Improvements (Plan 013)
+
+Pre-allocated `SpeculativeContext` + `TreeBuilder` structs eliminate per-step heap allocations:
+
+| Method | Before (μs) | After (μs) | Improvement |
+|--------|-------------|-------------|-------------|
+| DFlash | 2.60 | 1.94 | **34% faster** |
+| DDTree Build | 3.19 | 2.61 | **22% faster** |
+| Speculative (Simulated) | 5.92 | 4.66 | **27% faster** |
+| Speculative (AR Draft) | 5.70 | 4.63 | **23% faster** |
+| Prefill (no compress) | 23.78 | 3.34 | **612% faster** |
+| Prefill (compressed) | 23.99 | 3.60 | **567% faster** |
+| DDTree (chain-seed) | 3.16 | 2.48 | **27% faster** |
+
+![Benchmark Chart](bench/020_bench_result.png)
 
 ### What each benchmark measures
 
@@ -385,11 +408,11 @@ cargo run --release --features sudoku
 # Run everything (all benchmarks + Sudoku pruner + Leviathan)
 cargo run --release --all-features
 
-# Run all tests (176 tests with --all-features)
-# Default only:          77 unit + 80 integration
-# +sudoku:               93 unit + 80 integration
-# +leviathan:            89 unit + 80 integration
-# +sudoku +leviathan:    96 unit + 80 integration
+# Run all tests
+# Default only:          126 tests (lib)
+# +leviathan:            136 tests (lib) + 80 integration
+# +sudoku:               136 tests (lib) + 80 integration
+# +all-features:         146 tests (lib) + 80 integration
 cargo test --quiet --workspace --all-features
 
 # Run Sudoku solver example (streaming "thinking" output)
@@ -417,16 +440,16 @@ src/
   lib.rs            Module index
   main.rs           Entry point (proof → bench → Percepta bench → plot)
   types.rs          Config (micro + draft), Rng, softmax, rmsnorm, matmul, sample_token
-  transformer.rs    TransformerWeights, KVCache, ForwardContext, forward, generate
+  transformer.rs    TransformerWeights, KVCache, ForwardContext, forward, generate, generate_into, generate_batch
   speculative/      SOLID decomposition (plan 005):
     mod.rs          Re-exports
-    types.rs        TreeNode, DraftResult, ConstraintPruner trait, NoPruner
-    sampling.rs     sample_from_distribution, sample_residual_distribution
-    dd_tree.rs      build_dd_tree, build_dd_tree_pruned, extract_parent_tokens
-    dflash.rs       dflash_predict, dflash_predict_parallel, dflash_predict_ar
-    verifier.rs     SpeculativeVerifier trait, SimulatedVerifier, LeviathanVerifier †
+    types.rs        TreeNode, DraftResult, ConstraintPruner trait, NoPruner, SpeculativeContext (zero-alloc)
+    sampling.rs     sample_from_distribution, sample_residual_distribution, sample_residual_distribution_into
+    dd_tree.rs      build_dd_tree, build_dd_tree_pruned, TreeBuilder (zero-alloc), extract_parent_tokens
+    dflash.rs       dflash_predict, dflash_predict_with, dflash_predict_ar, dflash_predict_ar_with, dflash_predict_parallel
+    verifier.rs     SpeculativeVerifier trait, SimulatedVerifier, LeviathanVerifier † (all zero-alloc internals)
     step.rs         speculative_step, speculative_step_verifier, speculative_step_rollback †, speculative_step_conditioned †
-    prefill.rs      PrefillScorer trait, AttentionScorer, compress_prompt, speculative_prefill
+    prefill.rs      PrefillScorer trait, AttentionScorer, compress_prompt, speculative_prefill, score_with
     sudoku_pruner.rs  SudokuPruner (path-aware, cross-depth conflict detection) *
   percepta.rs       Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
                     Sudoku9x9, ComputableLora, StreamingSolver, SolveEvent
@@ -442,7 +465,7 @@ tests/
   integration.rs  80 integration tests (adversarial + DFA + arithmetic + backtracking + geometry
                   + Sudoku9x9 + ComputableLora + StreamingSolver)
 bench/
-  001_bench_result.png  ...  014_bench_result.png (auto-numbered)
+  001_bench_result.png  ...  020_bench_result.png (auto-numbered)
 ```
 
 ## 📜 References

@@ -1,8 +1,18 @@
-use crate::speculative::dd_tree::{build_dd_tree, extract_best_path};
-use crate::speculative::dflash::{dflash_predict, dflash_predict_ar};
-use crate::speculative::sampling::{sample_from_distribution, sample_residual_distribution};
-use crate::transformer::{ForwardContext, MultiLayerKVCache, TransformerWeights, forward};
-use crate::types::{Config, Rng, softmax};
+use crate::speculative::dd_tree::{TreeBuilder, extract_best_path_into};
+use crate::speculative::dflash::dflash_predict_with;
+use crate::speculative::sampling::sample_from_distribution;
+use crate::speculative::types::{NoPruner, SpeculativeContext};
+use crate::transformer::TransformerWeights;
+use crate::types::{Config, Rng};
+
+#[cfg(feature = "leviathan")]
+use crate::speculative::dflash::dflash_predict_ar_with;
+#[cfg(feature = "leviathan")]
+use crate::speculative::sampling::sample_residual_distribution_into;
+#[cfg(feature = "leviathan")]
+use crate::transformer::{ForwardContext, MultiLayerKVCache, forward};
+#[cfg(feature = "leviathan")]
+use crate::types::softmax;
 
 // ── Speculative Verifier: Strategy Pattern ──────────────────
 
@@ -27,14 +37,21 @@ pub trait SpeculativeVerifier: Send + Sync {
 
 /// Simulated verification: DDTree path + acceptance cap + bonus token.
 /// No target model needed — fast, used by default.
+///
+/// Uses pre-allocated `SpeculativeContext` and `TreeBuilder` for zero-alloc
+/// hot paths. Create once with `new(acceptance_rate, config)`, reuse across calls.
 pub struct SimulatedVerifier {
     pub acceptance_rate: f32,
+    sctx: SpeculativeContext,
+    tree_builder: TreeBuilder,
 }
 
 impl SimulatedVerifier {
-    pub fn new(acceptance_rate: f32) -> Self {
+    pub fn new(acceptance_rate: f32, draft_config: &Config) -> Self {
         Self {
             acceptance_rate: acceptance_rate.clamp(0.0, 1.0),
+            sctx: SpeculativeContext::new(draft_config),
+            tree_builder: TreeBuilder::new(draft_config),
         }
     }
 }
@@ -48,36 +65,62 @@ impl SpeculativeVerifier for SimulatedVerifier {
         pos: usize,
         rng: &mut Rng,
     ) -> Vec<usize> {
-        // 1. Sequential DFlash draft (avoids rayon overhead for tiny model)
-        let marginals = dflash_predict(draft_weights, draft_config, token, pos);
+        let vocab_size = draft_config.vocab_size;
 
-        // 2. DDTree build
-        let tree = build_dd_tree(&marginals, draft_config);
+        // 1. Zero-alloc DFlash draft
+        self.sctx.reset();
+        dflash_predict_with(&mut self.sctx, draft_weights, draft_config, token, pos);
 
-        // 3. Extract best path (highest-scored token at each depth)
-        let path = extract_best_path(&tree);
+        // 2. Build marginals view for tree building (zero-alloc: borrow slices from flat buffer)
+        let marginals_view = self.sctx.marginals_view(vocab_size);
+        let tree = self
+            .tree_builder
+            .build(&marginals_view, draft_config, &NoPruner, false);
 
-        if path.is_empty() {
+        // 3. Extract best path into pre-allocated buffer
+        extract_best_path_into(tree, &mut self.sctx.path_buf);
+
+        if self.sctx.path_buf.is_empty() {
+            let first_marginal = self.sctx.marginal_slice(0, vocab_size);
             return vec![sample_from_distribution(
-                marginals.first().map(|m| m.as_slice()).unwrap_or(&[1.0]),
+                if first_marginal.is_empty() {
+                    &[1.0]
+                } else {
+                    first_marginal
+                },
                 rng,
             )];
         }
 
-        // 4. Simulate acceptance: cap at rate
-        let max_accept = ((path.len() as f32) * self.acceptance_rate).ceil() as usize;
-        let accepted: Vec<usize> = path.into_iter().take(max_accept.max(1)).collect();
+        // 4. Simulated acceptance: cap at rate
+        let max_accept = ((self.sctx.path_buf.len() as f32) * self.acceptance_rate).ceil() as usize;
+        self.sctx.accepted_buf.clear();
+        self.sctx
+            .accepted_buf
+            .extend(self.sctx.path_buf.iter().take(max_accept.max(1)).copied());
 
         // 5. Bonus token: if all accepted, sample +1 from last marginal
-        if accepted.len() == max_accept && !marginals.is_empty() {
-            let last_marginal = marginals.last().unwrap();
-            let bonus = sample_from_distribution(last_marginal, rng);
-            let mut result = accepted;
-            result.push(bonus);
-            return result;
+        if self.sctx.accepted_buf.len() == max_accept && self.sctx.steps_populated > 0 {
+            let last_step = self.sctx.steps_populated - 1;
+            let start = last_step * vocab_size;
+            let end = start + vocab_size;
+            let last_marginal: &[f32] = if end <= self.sctx.marginals_flat.len() {
+                &self.sctx.marginals_flat[start..end]
+            } else {
+                &[]
+            };
+            let bonus = sample_from_distribution(
+                if last_marginal.is_empty() {
+                    &[1.0]
+                } else {
+                    last_marginal
+                },
+                rng,
+            );
+            self.sctx.accepted_buf.push(bonus);
         }
 
-        accepted
+        self.sctx.accepted_buf.clone()
     }
 }
 
@@ -89,22 +132,32 @@ pub struct LeviathanVerifier<'a> {
     pub target_config: &'a Config,
     target_ctx: ForwardContext,
     target_cache: MultiLayerKVCache,
+    draft_sctx: SpeculativeContext,
+    #[allow(dead_code)] // Pre-allocated for future tree-based Leviathan variants
+    tree_builder: TreeBuilder,
 }
 
 #[cfg(feature = "leviathan")]
 impl<'a> LeviathanVerifier<'a> {
-    pub fn new(target_weights: &'a TransformerWeights, target_config: &'a Config) -> Self {
+    pub fn new(
+        target_weights: &'a TransformerWeights,
+        target_config: &'a Config,
+        draft_config: &Config,
+    ) -> Self {
         Self {
             target_weights,
             target_config,
             target_ctx: ForwardContext::new(target_config),
             target_cache: MultiLayerKVCache::new(target_config),
+            draft_sctx: SpeculativeContext::new(draft_config),
+            tree_builder: TreeBuilder::new(draft_config),
         }
     }
 }
 
 #[cfg(feature = "leviathan")]
 impl SpeculativeVerifier for LeviathanVerifier<'_> {
+    #[allow(clippy::needless_range_loop)]
     fn speculate(
         &mut self,
         draft_weights: &TransformerWeights,
@@ -113,14 +166,21 @@ impl SpeculativeVerifier for LeviathanVerifier<'_> {
         pos: usize,
         rng: &mut Rng,
     ) -> Vec<usize> {
-        // Phase 1: Autoregressive draft (Algorithm 1, line 2–5)
-        let draft_result = dflash_predict_ar(draft_weights, draft_config, token, pos, rng);
-        let draft_tokens = &draft_result.sampled_tokens;
-        let q_dists = &draft_result.marginals;
-        let gamma = draft_tokens.len();
+        let vocab_size = draft_config.vocab_size;
+        let target_temp = self.target_config.temperature;
+
+        // Phase 1: Zero-alloc AR draft
+        self.draft_sctx.reset();
+        let gamma = dflash_predict_ar_with(
+            &mut self.draft_sctx,
+            draft_weights,
+            draft_config,
+            token,
+            pos,
+            rng,
+        );
 
         if gamma == 0 {
-            // No draft tokens — run target once, return 1 token
             self.target_cache.reset();
             let logits = forward(
                 &mut self.target_ctx,
@@ -130,34 +190,40 @@ impl SpeculativeVerifier for LeviathanVerifier<'_> {
                 pos,
                 self.target_config,
             );
-            for logit in logits.iter_mut() {
-                *logit /= self.target_config.temperature;
+            let mut temp_buf = logits.to_vec();
+            for p in temp_buf.iter_mut() {
+                *p /= target_temp;
             }
-            softmax(logits);
-            return vec![sample_from_distribution(logits, rng)];
+            softmax(&mut temp_buf);
+            return vec![sample_from_distribution(&temp_buf, rng)];
         }
 
-        // Phase 2: Target scoring (Algorithm 1, line 7–8)
+        // Phase 2: Target scoring — write p_dist directly to flat buffer
         self.target_cache.reset();
-        let mut p_distributions: Vec<Vec<f32>> = Vec::with_capacity(gamma + 1);
 
-        // Score the initial token → p(x) at position 0
-        let logits = forward(
-            &mut self.target_ctx,
-            self.target_weights,
-            &mut self.target_cache,
-            token,
-            pos,
-            self.target_config,
-        );
-        for logit in logits.iter_mut() {
-            *logit /= self.target_config.temperature;
+        // Score initial token → p_dist[0]
+        {
+            let logits = forward(
+                &mut self.target_ctx,
+                self.target_weights,
+                &mut self.target_cache,
+                token,
+                pos,
+                self.target_config,
+            );
+            let mut temp_buf = logits.to_vec();
+            for p in temp_buf.iter_mut() {
+                *p /= target_temp;
+            }
+            softmax(&mut temp_buf);
+            self.draft_sctx.p_distributions_flat[..vocab_size].copy_from_slice(&temp_buf);
         }
-        softmax(logits);
-        p_distributions.push(logits.to_vec());
 
-        // Score each drafted token → p(x) at positions 1..=gamma
-        for (i, &draft_tok) in draft_tokens.iter().enumerate() {
+        // Copy sampled tokens before iterating (avoids borrow conflicts with flat buffers)
+        let sampled_tokens = self.draft_sctx.sampled_tokens[..gamma].to_vec();
+
+        // Score each drafted token → p_dist[1..=gamma]
+        for (i, &draft_tok) in sampled_tokens.iter().enumerate() {
             let logits = forward(
                 &mut self.target_ctx,
                 self.target_weights,
@@ -166,56 +232,76 @@ impl SpeculativeVerifier for LeviathanVerifier<'_> {
                 pos + 1 + i,
                 self.target_config,
             );
-            for logit in logits.iter_mut() {
-                *logit /= self.target_config.temperature;
+            let mut temp_buf = logits.to_vec();
+            for p in temp_buf.iter_mut() {
+                *p /= target_temp;
             }
-            softmax(logits);
-            p_distributions.push(logits.to_vec());
+            softmax(&mut temp_buf);
+            let start = (i + 1) * vocab_size;
+            self.draft_sctx.p_distributions_flat[start..start + vocab_size]
+                .copy_from_slice(&temp_buf);
         }
 
-        // Phase 3: Rejection sampling (Algorithm 1, line 10–16)
-        let mut accepted = Vec::with_capacity(gamma + 1);
+        // Phase 3: Rejection sampling
+        self.draft_sctx.accepted_buf.clear();
         let mut all_accepted = true;
 
         for i in 0..gamma {
-            let p_dist = &p_distributions[i];
-            let q_dist = &q_dists[i];
-            let drafted_token = draft_tokens[i];
+            let offset = i * vocab_size;
+            let drafted_token = sampled_tokens[i];
 
-            let p_i = p_dist[drafted_token];
-            let q_i = q_dist[drafted_token];
+            let p_i = self
+                .draft_sctx
+                .p_distributions_flat
+                .get(offset + drafted_token)
+                .copied()
+                .unwrap_or(0.0);
+            let q_i = self
+                .draft_sctx
+                .marginals_flat
+                .get(offset + drafted_token)
+                .copied()
+                .unwrap_or(0.0);
 
-            // Accept with prob min(1, p/q)
-            let acceptance_prob = if q_i > 0.0 {
-                (p_i / q_i).min(1.0)
-            } else {
-                1.0 // q=0 means draft didn't propose this; accept if target likes it
-            };
+            let acceptance_prob = if q_i > 0.0 { (p_i / q_i).min(1.0) } else { 1.0 };
             let r = rng.uniform();
 
             if r <= acceptance_prob {
-                accepted.push(drafted_token);
+                self.draft_sctx.accepted_buf.push(drafted_token);
             } else {
-                // Reject: sample replacement from residual max(0, p - q)
-                let replacement = sample_residual_distribution(p_dist, q_dist, rng);
-                accepted.push(replacement);
+                let p_dist = &self.draft_sctx.p_distributions_flat[offset..offset + vocab_size];
+                let q_dist = &self.draft_sctx.marginals_flat[offset..offset + vocab_size];
+                let replacement = sample_residual_distribution_into(
+                    p_dist,
+                    q_dist,
+                    &mut self.draft_sctx.residual_buf,
+                    rng,
+                );
+                self.draft_sctx.accepted_buf.push(replacement);
                 all_accepted = false;
                 break;
             }
         }
 
-        // Phase 4: Bonus token (Algorithm 1, line 18–19)
-        if all_accepted && p_distributions.len() > gamma {
-            let bonus = sample_from_distribution(&p_distributions[gamma], rng);
-            accepted.push(bonus);
+        // Phase 4: Bonus token
+        if all_accepted {
+            let bonus_start = gamma * vocab_size;
+            let bonus_end = bonus_start + vocab_size;
+            if bonus_end <= self.draft_sctx.p_distributions_flat.len() {
+                let bonus_dist = &self.draft_sctx.p_distributions_flat[bonus_start..bonus_end];
+                let bonus = sample_from_distribution(bonus_dist, rng);
+                self.draft_sctx.accepted_buf.push(bonus);
+            }
         }
 
-        // Safety: always return at least 1 token
-        if accepted.is_empty() {
-            accepted.push(sample_from_distribution(&p_distributions[0], rng));
+        if self.draft_sctx.accepted_buf.is_empty() {
+            let p_dist = &self.draft_sctx.p_distributions_flat[..vocab_size];
+            self.draft_sctx
+                .accepted_buf
+                .push(sample_from_distribution(p_dist, rng));
         }
 
-        accepted
+        self.draft_sctx.accepted_buf.clone()
     }
 }
 
@@ -237,7 +323,7 @@ mod tests {
     #[test]
     fn test_simulated_verifier_returns_at_least_one() {
         let (weights, config) = make_draft();
-        let mut verifier = SimulatedVerifier::new(0.75);
+        let mut verifier = SimulatedVerifier::new(0.75, &config);
         let mut rng = Rng::new(42);
         let accepted = verifier.speculate(&weights, &config, 0, 0, &mut rng);
         assert!(!accepted.is_empty(), "should return at least 1 token");
@@ -252,11 +338,11 @@ mod tests {
         let (weights, config) = make_draft();
 
         let a1 = {
-            let mut verifier = SimulatedVerifier::new(0.75);
+            let mut verifier = SimulatedVerifier::new(0.75, &config);
             verifier.speculate(&weights, &config, 0, 0, &mut Rng::new(77))
         };
         let a2 = {
-            let mut verifier = SimulatedVerifier::new(0.75);
+            let mut verifier = SimulatedVerifier::new(0.75, &config);
             verifier.speculate(&weights, &config, 0, 0, &mut Rng::new(77))
         };
 
@@ -268,7 +354,7 @@ mod tests {
         let (weights, config) = make_draft();
         let mut saw_bonus = false;
         for seed in 0..200u64 {
-            let mut verifier = SimulatedVerifier::new(0.95);
+            let mut verifier = SimulatedVerifier::new(0.95, &config);
             let accepted = verifier.speculate(&weights, &config, 0, 0, &mut Rng::new(seed));
             if accepted.len() > 1 {
                 saw_bonus = true;
@@ -293,7 +379,7 @@ mod tests {
         let mut draft_rng = Rng::new(99);
         let draft_weights = TransformerWeights::new(&draft_config, &mut draft_rng);
 
-        let mut verifier = LeviathanVerifier::new(&target_weights, &config);
+        let mut verifier = LeviathanVerifier::new(&target_weights, &config, &draft_config);
         let mut rng = Rng::new(100);
         let accepted =
             verifier.speculate(&draft_weights, &draft_config, config.bos_token, 0, &mut rng);
@@ -319,7 +405,7 @@ mod tests {
         let draft_weights = TransformerWeights::new(&draft_config, &mut draft_rng);
 
         let r1 = {
-            let mut verifier = LeviathanVerifier::new(&target_weights, &config);
+            let mut verifier = LeviathanVerifier::new(&target_weights, &config, &draft_config);
             verifier.speculate(
                 &draft_weights,
                 &draft_config,
@@ -329,7 +415,7 @@ mod tests {
             )
         };
         let r2 = {
-            let mut verifier = LeviathanVerifier::new(&target_weights, &config);
+            let mut verifier = LeviathanVerifier::new(&target_weights, &config, &draft_config);
             verifier.speculate(
                 &draft_weights,
                 &draft_config,
@@ -354,7 +440,7 @@ mod tests {
 
         let mut saw_bonus = false;
         for seed in 0..200u64 {
-            let mut verifier = LeviathanVerifier::new(&target_weights, &config);
+            let mut verifier = LeviathanVerifier::new(&target_weights, &config, &draft_config);
             let accepted = verifier.speculate(
                 &draft_weights,
                 &draft_config,
@@ -390,7 +476,7 @@ mod tests {
             let mut gc = Config::draft();
             gc.draft_lookahead = gamma;
             for seed in 0..iters as u64 {
-                let mut verifier = LeviathanVerifier::new(&target_weights, &config);
+                let mut verifier = LeviathanVerifier::new(&target_weights, &config, &gc);
                 let accepted = verifier.speculate(
                     &draft_weights,
                     &gc,

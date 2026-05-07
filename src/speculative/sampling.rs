@@ -13,32 +13,48 @@ pub fn sample_from_distribution(probs: &[f32], rng: &mut Rng) -> usize {
     probs.len().saturating_sub(1)
 }
 
-/// Residual distribution sampling (Equation 3 from Leviathan et al. 2022).
+/// Residual distribution sampling into pre-allocated scratch buffer (zero-alloc).
 ///
 /// `p'(x) = normalize(max(0, p(x) - q(x)))`
 ///
 /// Samples from tokens the target model likes *more* than the draft model.
 /// Falls back to `sample_from_distribution(p)` if distributions are identical.
+///
+/// `scratch` must be `>= p.len()`. Written to but contents not meaningful after return.
 #[cfg_attr(not(feature = "leviathan"), allow(dead_code))]
-pub fn sample_residual_distribution(p: &[f32], q: &[f32], rng: &mut Rng) -> usize {
-    let mut residual: Vec<f32> = p
-        .iter()
-        .zip(q.iter())
-        .map(|(&p_val, &q_val)| (p_val - q_val).max(0.0))
-        .collect();
+pub fn sample_residual_distribution_into(
+    p: &[f32],
+    q: &[f32],
+    scratch: &mut [f32],
+    rng: &mut Rng,
+) -> usize {
+    let len = p.len().min(scratch.len());
+    for i in 0..len {
+        scratch[i] = (p[i] - q[i]).max(0.0);
+    }
 
-    let sum: f32 = residual.iter().sum();
+    let sum: f32 = scratch[..len].iter().sum();
 
     if sum > 0.0 {
         let inv_sum = 1.0 / sum;
-        for val in &mut residual {
+        for val in &mut scratch[..len] {
             *val *= inv_sum;
         }
-        sample_from_distribution(&residual, rng)
+        sample_from_distribution(&scratch[..len], rng)
     } else {
         // Distributions identical — fallback to target distribution
         sample_from_distribution(p, rng)
     }
+}
+
+/// Residual distribution sampling (Equation 3 from Leviathan et al. 2022).
+///
+/// Allocating wrapper around `sample_residual_distribution_into`.
+/// Prefer `_into` variant with `SpeculativeContext::residual_buf` for hot paths.
+#[cfg_attr(not(feature = "leviathan"), allow(dead_code))]
+pub fn sample_residual_distribution(p: &[f32], q: &[f32], rng: &mut Rng) -> usize {
+    let mut scratch = vec![0.0f32; p.len()];
+    sample_residual_distribution_into(p, q, &mut scratch, rng)
 }
 
 #[cfg(test)]

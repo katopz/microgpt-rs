@@ -23,6 +23,16 @@ use crate::transformer::{ForwardContext, MultiLayerKVCache, forward};
 #[cfg(feature = "leviathan")]
 use crate::types::softmax;
 
+// Zero-alloc _with imports
+#[cfg(feature = "leviathan")]
+use crate::speculative::dd_tree::TreeBuilder;
+#[cfg(feature = "leviathan")]
+use crate::speculative::dflash::{dflash_predict_conditioned_with, dflash_predict_with};
+#[cfg(feature = "leviathan")]
+use crate::speculative::sampling::sample_residual_distribution_into;
+#[cfg(feature = "leviathan")]
+use crate::speculative::types::{NoPruner, SpeculativeContext};
+
 /// Speculative decoding step with a custom verifier.
 /// Pass any `SpeculativeVerifier` to control how drafts are verified.
 pub fn speculative_step_verifier(
@@ -47,7 +57,7 @@ pub fn speculative_step(
     pos: usize,
     rng: &mut Rng,
 ) -> (Vec<usize>, usize) {
-    let mut verifier = SimulatedVerifier::new(0.75);
+    let mut verifier = SimulatedVerifier::new(0.75, draft_config);
     speculative_step_verifier(draft_weights, draft_config, token, pos, rng, &mut verifier)
 }
 
@@ -75,9 +85,10 @@ pub async fn speculative_step_rest(
 ) -> Vec<usize> {
     // 1. Draft marginals via DFlash
     let marginals = dflash_predict(draft_weights, draft_config, token, pos);
+    let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
 
     // 2. Build initial DDTree
-    let mut tree = build_dd_tree(&marginals, draft_config);
+    let mut tree = build_dd_tree(&mv, draft_config);
 
     // 3. Run target model forward to get hidden state
     let mut target_ctx = ForwardContext::new(target_config);
@@ -100,7 +111,7 @@ pub async fn speculative_step_rest(
     // 5. Merge retrieved branches into DDTree
     merge_retrieved_branches(
         &mut tree,
-        &marginals,
+        &mv,
         draft_config,
         &retrieved.token_sequences,
         &retrieved.scores,
@@ -159,9 +170,10 @@ pub fn speculative_step_rollback(
 ) -> (Vec<usize>, usize) {
     // 1. Draft marginals via DFlash
     let marginals = dflash_predict(draft_weights, draft_config, token, pos);
+    let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
 
     // 2. Build DDTree
-    let tree = build_dd_tree(&marginals, draft_config);
+    let tree = build_dd_tree(&mv, draft_config);
 
     // 3. Extract candidate paths (top-3 root branches)
     let paths = extract_ddtree_paths(&tree);
@@ -299,7 +311,12 @@ pub fn speculative_step_conditioned(
         dflash_predict_conditioned(draft_weights, draft_config, token, pos, &hidden, rng);
 
     // 3. Build DDTree from conditioned marginals
-    let tree = build_dd_tree(&draft_result.marginals, draft_config);
+    let mv: Vec<&[f32]> = draft_result
+        .marginals
+        .iter()
+        .map(|s| s.as_slice())
+        .collect();
+    let tree = build_dd_tree(&mv, draft_config);
     let path = extract_best_path(&tree);
 
     if path.is_empty() {
@@ -320,6 +337,221 @@ pub fn speculative_step_conditioned(
     // 5. Bonus token if all accepted
     if accepted.len() == max_accept && !draft_result.marginals.is_empty() {
         let last_marginal = draft_result.marginals.last().unwrap();
+        let bonus = sample_from_distribution(last_marginal, rng);
+        let mut result = accepted;
+        result.push(bonus);
+        let len = result.len();
+        return (result, len);
+    }
+
+    let len = accepted.len();
+    (accepted, len)
+}
+
+/// Zero-alloc variant of [`speculative_step_rollback`].
+///
+/// Reuses pre-allocated buffers from `SpeculativeContext`, `TreeBuilder`,
+/// `probs_buf`, and `residual_buf` to minimize allocations in the hot path.
+#[cfg(feature = "leviathan")]
+#[allow(clippy::too_many_arguments)]
+pub fn speculative_step_rollback_with(
+    draft_sctx: &mut SpeculativeContext,
+    tree_builder: &mut TreeBuilder,
+    draft_weights: &TransformerWeights,
+    draft_config: &Config,
+    target_weights: &TransformerWeights,
+    target_config: &Config,
+    target_ctx: &mut ForwardContext,
+    target_cache: &mut MultiLayerKVCache,
+    probs_buf: &mut [f32],
+    residual_buf: &mut [f32],
+    token: usize,
+    pos: usize,
+    rng: &mut Rng,
+) -> (Vec<usize>, usize) {
+    // 1. Draft marginals via DFlash (zero-alloc into draft_sctx flat buffer)
+    let num_steps = dflash_predict_with(draft_sctx, draft_weights, draft_config, token, pos);
+    let vocab_size = draft_config.vocab_size;
+
+    // Convert flat marginals to Vec<&[f32]> for tree builder (borrowed slices, no alloc)
+    let marginals: Vec<&[f32]> = (0..num_steps)
+        .map(|step| draft_sctx.marginal_slice(step, vocab_size))
+        .collect();
+
+    // 2. Build DDTree (reuses pre-allocated heap/tree buffers)
+    let tree = tree_builder.build(&marginals, draft_config, &NoPruner, false);
+
+    // 3. Extract candidate paths (top-3 root branches)
+    let paths = extract_ddtree_paths(tree);
+
+    if paths.is_empty() {
+        let fallback = sample_from_distribution(marginals.first().copied().unwrap_or(&[1.0]), rng);
+        return (vec![fallback], 1);
+    }
+
+    // 4. Snapshot target KV cache at current position
+    let snapshot = target_cache.snapshot(pos, target_config);
+
+    // 5. Try each candidate path with rollback on rejection
+    for path in &paths {
+        target_cache.restore(&snapshot, target_config);
+
+        let mut accepted = Vec::with_capacity(path.len());
+        let mut all_accepted = true;
+
+        // Score initial token with target (zero-alloc: reuse probs_buf)
+        let logits = forward(
+            target_ctx,
+            target_weights,
+            target_cache,
+            token,
+            pos,
+            target_config,
+        );
+        probs_buf.copy_from_slice(logits);
+        for p in probs_buf.iter_mut() {
+            *p /= target_config.temperature;
+        }
+        softmax(probs_buf);
+
+        for (i, &draft_tok) in path.iter().enumerate() {
+            let q_dist = marginals.get(i).copied().unwrap_or(&[]);
+            let q_i = q_dist.get(draft_tok).copied().unwrap_or(0.0);
+            let p_i = probs_buf.get(draft_tok).copied().unwrap_or(0.0);
+
+            let acceptance_prob = if q_i > 0.0 { (p_i / q_i).min(1.0) } else { 1.0 };
+
+            if rng.uniform() <= acceptance_prob {
+                accepted.push(draft_tok);
+                if i + 1 < path.len() {
+                    let logits = forward(
+                        target_ctx,
+                        target_weights,
+                        target_cache,
+                        draft_tok,
+                        pos + 1 + i,
+                        target_config,
+                    );
+                    probs_buf.copy_from_slice(logits);
+                    for p in probs_buf.iter_mut() {
+                        *p /= target_config.temperature;
+                    }
+                    softmax(probs_buf);
+                }
+            } else {
+                let replacement =
+                    sample_residual_distribution_into(probs_buf, q_dist, residual_buf, rng);
+                accepted.push(replacement);
+                all_accepted = false;
+                break;
+            }
+        }
+
+        if all_accepted && !probs_buf.is_empty() {
+            let bonus = sample_from_distribution(probs_buf, rng);
+            accepted.push(bonus);
+        }
+
+        if !accepted.is_empty() {
+            let len = accepted.len();
+            return (accepted, len);
+        }
+    }
+
+    // All paths exhausted: restore and sample from target
+    target_cache.restore(&snapshot, target_config);
+    let logits = forward(
+        target_ctx,
+        target_weights,
+        target_cache,
+        token,
+        pos,
+        target_config,
+    );
+    probs_buf.copy_from_slice(logits);
+    for p in probs_buf.iter_mut() {
+        *p /= target_config.temperature;
+    }
+    softmax(probs_buf);
+    let fallback = sample_from_distribution(probs_buf, rng);
+    (vec![fallback], 1)
+}
+
+/// Zero-alloc variant of [`speculative_step_conditioned`].
+///
+/// Reuses pre-allocated buffers from `SpeculativeContext`, `TreeBuilder`,
+/// and `probs_buf` to minimize allocations in the hot path.
+#[cfg(feature = "leviathan")]
+#[allow(clippy::too_many_arguments)]
+pub fn speculative_step_conditioned_with(
+    draft_sctx: &mut SpeculativeContext,
+    tree_builder: &mut TreeBuilder,
+    draft_weights: &TransformerWeights,
+    draft_config: &Config,
+    target_weights: &TransformerWeights,
+    target_config: &Config,
+    target_ctx: &mut ForwardContext,
+    target_cache: &mut MultiLayerKVCache,
+    probs_buf: &mut [f32],
+    token: usize,
+    pos: usize,
+    rng: &mut Rng,
+) -> (Vec<usize>, usize) {
+    // 1. Run target forward to get logits (zero-alloc: copy into probs_buf)
+    let logits = forward(
+        target_ctx,
+        target_weights,
+        target_cache,
+        token,
+        pos,
+        target_config,
+    );
+    probs_buf.copy_from_slice(logits);
+    for p in probs_buf.iter_mut() {
+        *p /= target_config.temperature;
+    }
+    softmax(probs_buf);
+
+    // 2. Conditioned draft using target hidden state (no clone — borrow directly)
+    let hidden = &target_ctx.hidden_state;
+    let num_steps = dflash_predict_conditioned_with(
+        draft_sctx,
+        draft_weights,
+        draft_config,
+        token,
+        pos,
+        hidden,
+        rng,
+    );
+    let vocab_size = draft_config.vocab_size;
+
+    // Convert flat marginals to Vec<&[f32]> for tree builder (borrowed slices, no alloc)
+    let marginals: Vec<&[f32]> = (0..num_steps)
+        .map(|step| draft_sctx.marginal_slice(step, vocab_size))
+        .collect();
+
+    // Pre-extract marginals info before releasing immutable borrow on draft_sctx
+    let has_marginals = !marginals.is_empty();
+    let last_marginal = marginals.last().copied().unwrap_or(&[]);
+
+    // 3. Build DDTree (reuses pre-allocated heap/tree buffers)
+    let tree = tree_builder.build(&marginals, draft_config, &NoPruner, false);
+
+    // Extract best path (small Vec alloc acceptable — avoids borrow conflict with marginals)
+    let path = extract_best_path(tree);
+
+    if path.is_empty() {
+        let fallback = sample_from_distribution(probs_buf, rng);
+        return (vec![fallback], 1);
+    }
+
+    // 4. Simulated acceptance (75% cap)
+    let acceptance_rate = 0.75;
+    let max_accept = ((path.len() as f32) * acceptance_rate).ceil() as usize;
+    let accepted: Vec<usize> = path.into_iter().take(max_accept.max(1)).collect();
+
+    // 5. Bonus token if all accepted
+    if accepted.len() == max_accept && has_marginals {
         let bonus = sample_from_distribution(last_marginal, rng);
         let mut result = accepted;
         result.push(bonus);
@@ -426,7 +658,7 @@ mod tests {
         use crate::speculative::verifier::SimulatedVerifier;
 
         let (weights, config) = make_draft();
-        let mut verifier = SimulatedVerifier::new(0.75);
+        let mut verifier = SimulatedVerifier::new(0.75, &config);
         let mut rng = Rng::new(42);
         let (accepted, len) =
             speculative_step_verifier(&weights, &config, 0, 0, &mut rng, &mut verifier);
@@ -444,11 +676,11 @@ mod tests {
         let (weights, config) = make_draft();
 
         let (a1, l1) = {
-            let mut verifier = SimulatedVerifier::new(0.75);
+            let mut verifier = SimulatedVerifier::new(0.75, &config);
             speculative_step_verifier(&weights, &config, 0, 0, &mut Rng::new(77), &mut verifier)
         };
         let (a2, l2) = {
-            let mut verifier = SimulatedVerifier::new(0.75);
+            let mut verifier = SimulatedVerifier::new(0.75, &config);
             speculative_step_verifier(&weights, &config, 0, 0, &mut Rng::new(77), &mut verifier)
         };
 
@@ -463,7 +695,7 @@ mod tests {
         let (weights, config) = make_draft();
         let mut saw_bonus = false;
         for seed in 0..200u64 {
-            let mut verifier = SimulatedVerifier::new(0.95);
+            let mut verifier = SimulatedVerifier::new(0.95, &config);
             let (accepted, _) = speculative_step_verifier(
                 &weights,
                 &config,
@@ -678,7 +910,7 @@ mod tests {
         };
 
         let (uncond_accepted, _) = {
-            let mut verifier = SimulatedVerifier::new(0.75);
+            let mut verifier = SimulatedVerifier::new(0.75, &draft_config);
             speculative_step_verifier(
                 &draft_weights,
                 &draft_config,
@@ -700,7 +932,8 @@ mod tests {
     fn test_extract_ddtree_paths() {
         let (weights, config) = make_draft();
         let marginals = dflash_predict(&weights, &config, 0, 0);
-        let tree = build_dd_tree(&marginals, &config);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+        let tree = build_dd_tree(&mv, &config);
         let paths = extract_ddtree_paths(&tree);
 
         if !tree.is_empty() {

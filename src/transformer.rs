@@ -1,4 +1,5 @@
 use crate::types::{self, *};
+use rayon::prelude::*;
 
 /// Per-layer transformer weights.
 /// Each layer has its own attention and MLP parameters.
@@ -378,16 +379,20 @@ pub fn forward<'a>(
     &mut ctx.logits
 }
 
-/// Generate tokens autoregressively. Returns generated token ids.
-pub fn generate(
+/// Zero-alloc generation: `ctx`, `cache`, `tokens` all provided by caller.
+///
+/// `tokens` is cleared and filled with generated token ids.
+/// `ctx` and `cache` are reused across calls.
+pub fn generate_into(
+    ctx: &mut ForwardContext,
+    cache: &mut MultiLayerKVCache,
     weights: &TransformerWeights,
     config: &Config,
     rng: &mut Rng,
     n_tokens: usize,
-) -> Vec<usize> {
-    let mut ctx = ForwardContext::new(config);
-    let mut cache = MultiLayerKVCache::new(config);
-    let mut tokens = Vec::with_capacity(n_tokens);
+    tokens: &mut Vec<usize>,
+) {
+    tokens.clear();
     let mut token = config.bos_token;
     let mut pos = 0;
 
@@ -398,7 +403,7 @@ pub fn generate(
             token = config.bos_token;
         }
 
-        let logits = forward(&mut ctx, weights, &mut cache, token, pos, config);
+        let logits = forward(ctx, weights, cache, token, pos, config);
 
         for logit in logits.iter_mut() {
             *logit /= config.temperature;
@@ -417,8 +422,53 @@ pub fn generate(
             pos += 1;
         }
     }
+}
 
+/// Generate tokens autoregressively. Returns generated token ids.
+pub fn generate(
+    weights: &TransformerWeights,
+    config: &Config,
+    rng: &mut Rng,
+    n_tokens: usize,
+) -> Vec<usize> {
+    let mut ctx = ForwardContext::new(config);
+    let mut cache = MultiLayerKVCache::new(config);
+    let mut tokens = Vec::new();
+    generate_into(
+        &mut ctx,
+        &mut cache,
+        weights,
+        config,
+        rng,
+        n_tokens,
+        &mut tokens,
+    );
     tokens
+}
+
+/// Generate multiple samples in parallel using rayon.
+///
+/// Each sample gets its own `ForwardContext` + `MultiLayerKVCache` via `map_init`,
+/// so there's no contention. The `seeds` slice provides one seed per sample.
+/// Returns `Vec<Vec<usize>>` with one token sequence per sample.
+pub fn generate_batch(
+    weights: &TransformerWeights,
+    config: &Config,
+    seeds: &[u64],
+    n_tokens: usize,
+) -> Vec<Vec<usize>> {
+    seeds
+        .par_iter()
+        .map_init(
+            || (ForwardContext::new(config), MultiLayerKVCache::new(config)),
+            |(ctx, cache), &seed| {
+                let mut rng = Rng::new(seed);
+                let mut tokens = Vec::with_capacity(n_tokens);
+                generate_into(ctx, cache, weights, config, &mut rng, n_tokens, &mut tokens);
+                tokens
+            },
+        )
+        .collect()
 }
 
 /// Convert token ids to readable characters (a-z, _ for BOS).

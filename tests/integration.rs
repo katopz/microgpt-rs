@@ -452,7 +452,8 @@ fn test_dflash_positions_differ() {
 fn test_ddtree_respects_budget() {
     let (weights, config) = make_draft();
     let marginals = speculative::dflash_predict(&weights, &config, 0, 0);
-    let tree = speculative::build_dd_tree(&marginals, &config);
+    let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+    let tree = speculative::build_dd_tree(&mv, &config);
     assert!(
         tree.len() <= config.tree_budget,
         "tree size {} exceeds budget {}",
@@ -466,7 +467,8 @@ fn test_ddtree_respects_budget() {
 fn test_ddtree_scores_descending() {
     let (weights, config) = make_draft();
     let marginals = speculative::dflash_predict(&weights, &config, 0, 0);
-    let tree = speculative::build_dd_tree(&marginals, &config);
+    let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+    let tree = speculative::build_dd_tree(&mv, &config);
     for window in tree.windows(2) {
         assert!(
             window[0].score >= window[1].score,
@@ -481,7 +483,8 @@ fn test_ddtree_scores_descending() {
 fn test_ddtree_depth_within_lookahead() {
     let (weights, config) = make_draft();
     let marginals = speculative::dflash_predict(&weights, &config, 0, 0);
-    let tree = speculative::build_dd_tree(&marginals, &config);
+    let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+    let tree = speculative::build_dd_tree(&mv, &config);
     for node in &tree {
         assert!(
             node.depth < config.draft_lookahead,
@@ -496,7 +499,8 @@ fn test_ddtree_depth_within_lookahead() {
 fn test_ddtree_valid_token_indices() {
     let (weights, config) = make_draft();
     let marginals = speculative::dflash_predict(&weights, &config, 0, 0);
-    let tree = speculative::build_dd_tree(&marginals, &config);
+    let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+    let tree = speculative::build_dd_tree(&mv, &config);
     for node in &tree {
         assert!(
             node.token_idx < config.vocab_size,

@@ -263,9 +263,10 @@ fn run_speculative(initial: Sudoku9x9, tx: mpsc::Sender<Msg>, cancel: Arc<Atomic
         ..Config::draft()
     };
 
-    let tree_unpruned = build_dd_tree(&marginals, &config);
-    let tree_static = build_dd_tree_pruned(&marginals, &config, &StaticOnlyPruner(&pruner), false);
-    let tree_aware = build_dd_tree_pruned(&marginals, &config, &pruner, false);
+    let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+    let tree_unpruned = build_dd_tree(&mv, &config);
+    let tree_static = build_dd_tree_pruned(&mv, &config, &StaticOnlyPruner(&pruner), false);
+    let tree_aware = build_dd_tree_pruned(&mv, &config, &pruner, false);
 
     let _ = tx.send(Msg::Tokens(
         tree_unpruned.len() + tree_static.len() + tree_aware.len(),

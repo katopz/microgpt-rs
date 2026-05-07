@@ -4,7 +4,8 @@
 //! then compresses the prompt to top-`keep_ratio` spans before target prefill.
 //! Inspired by [Cross-Family Speculative Prefill](https://arxiv.org/abs/2603.02631).
 
-use crate::transformer::{ForwardContext, MultiLayerKVCache, TransformerWeights, forward};
+use crate::speculative::types::SpeculativeContext;
+use crate::transformer::{TransformerWeights, forward};
 use crate::types::Config;
 
 // ── Scoring Trait ──────────────────────────────────────────────
@@ -18,6 +19,21 @@ pub trait PrefillScorer: Send + Sync {
         draft_config: &Config,
         prompt_tokens: &[usize],
     ) -> Vec<f32>;
+
+    /// Zero-alloc variant: writes scores into pre-allocated buffer.
+    /// `scores` must be `>= prompt_tokens.len()`. Written up to `prompt_tokens.len()`.
+    fn score_into(
+        &self,
+        draft_weights: &TransformerWeights,
+        draft_config: &Config,
+        prompt_tokens: &[usize],
+        scores: &mut [f32],
+    ) {
+        // Default: allocate and copy
+        let result = self.score(draft_weights, draft_config, prompt_tokens);
+        let len = result.len().min(scores.len());
+        scores[..len].copy_from_slice(&result[..len]);
+    }
 }
 
 // ── Scorer Implementations ─────────────────────────────────────
@@ -30,6 +46,51 @@ pub trait PrefillScorer: Send + Sync {
 /// (the self-attention weight) serves as a proxy for per-token importance.
 pub struct AttentionScorer;
 
+impl AttentionScorer {
+    /// Zero-alloc scoring using pre-allocated context.
+    /// `scores` must be `>= prompt_tokens.len()`.
+    pub fn score_with(
+        &self,
+        sctx: &mut SpeculativeContext,
+        draft_weights: &TransformerWeights,
+        draft_config: &Config,
+        prompt_tokens: &[usize],
+        scores: &mut [f32],
+    ) {
+        if prompt_tokens.is_empty() {
+            return;
+        }
+
+        sctx.cache.reset();
+
+        let len = prompt_tokens.len().min(scores.len());
+        scores[..len].fill(0.0f32);
+
+        for (pos, &token) in prompt_tokens.iter().enumerate() {
+            if pos >= draft_config.block_size {
+                break;
+            }
+            let _logits = forward(
+                &mut sctx.ctx,
+                draft_weights,
+                &mut sctx.cache,
+                token,
+                pos,
+                draft_config,
+            );
+            scores[pos] = sctx.ctx.scores[pos];
+        }
+
+        // Normalize scores to [0, 1] range
+        let max_score = scores[..len].iter().cloned().fold(0.0f32, f32::max);
+        if max_score > 0.0 {
+            for s in scores[..len].iter_mut() {
+                *s /= max_score;
+            }
+        }
+    }
+}
+
 impl PrefillScorer for AttentionScorer {
     fn score(
         &self,
@@ -41,37 +102,15 @@ impl PrefillScorer for AttentionScorer {
             return Vec::new();
         }
 
-        let mut ctx = ForwardContext::new(draft_config);
-        let mut cache = MultiLayerKVCache::new(draft_config);
-
+        let mut sctx = SpeculativeContext::new(draft_config);
         let mut scores = vec![0.0f32; prompt_tokens.len()];
-
-        for (pos, &token) in prompt_tokens.iter().enumerate() {
-            let _logits = forward(
-                &mut ctx,
-                draft_weights,
-                &mut cache,
-                token,
-                pos,
-                draft_config,
-            );
-
-            // After forward(), ctx.scores[0..=pos] holds the last head's softmax'd
-            // attention weights. The self-attention weight at [pos] indicates how
-            // strongly this position attends to itself relative to all prior positions.
-            if pos < draft_config.block_size {
-                scores[pos] = ctx.scores[pos];
-            }
-        }
-
-        // Normalize scores to [0, 1] range
-        let max_score = scores.iter().cloned().fold(0.0f32, f32::max);
-        if max_score > 0.0 {
-            for s in scores.iter_mut() {
-                *s /= max_score;
-            }
-        }
-
+        self.score_with(
+            &mut sctx,
+            draft_weights,
+            draft_config,
+            prompt_tokens,
+            &mut scores,
+        );
         scores
     }
 }
@@ -470,7 +509,7 @@ mod tests {
         //    (simulates what speculative_step_rest does after prefill)
         let next_pos = filled_positions;
         let last_token = prompt_tokens[*compressed_indices.last().unwrap()];
-        let mut verifier = SimulatedVerifier::new(0.75);
+        let mut verifier = SimulatedVerifier::new(0.75, &config);
         let mut step_rng = Rng::new(123);
         let (accepted, accept_len) = speculative_step_verifier(
             &weights,
