@@ -3,6 +3,37 @@
 ## Source
 Techniques distilled from [Luce-Org/lucebox-hub](https://github.com/Luce-Org/lucebox-hub/) — open LLM inference optimized per-chip. We take the algorithmic ideas (chain-seed DDTree, importance scoring, rollback) and implement them on CPU without CUDA.
 
+## Plan Dependency Map
+
+```
+Plan 009 (REST)              Plan 010 (Multi-Layer)        Plan 011 (GQA + Paged)
+     │                              │                            │
+     │ hidden_state                 │ MultiLayerKVCache          │ n_kv_head, kv_dim()
+     │ RestClient                   │ LayerWeights               │ PagedKVCache (pending)
+     │ merge_retrieved_branches()   │ Config::small_target()     │ Config::gqa_draft()
+     │                              │ Config.n_layer             │
+     ▼                              ▼                            ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     Lucebox Techniques (This Doc)                       │
+│                                                                         │
+│  Chain-Seed DDTree ────── uses build_dd_tree_pruned() +                │
+│                           coexists with merge_retrieved_branches        │
+│                                                                         │
+│  Budget Sweep ─────────── uses Config.tree_budget,                     │
+│                           sweeps micro/draft/small_target/gqa           │
+│                                                                         │
+│  KV Snapshot/Rollback ─── uses MultiLayerKVCache.layers,               │
+│                           kv_dim(), forward() per layer                 │
+│                           future: PagedKVCache.fork()                   │
+│                                                                         │
+│  Speculative Prefill ──── uses hidden_state for scoring,                │
+│                           draft model + MultiLayerKVCache,              │
+│                           bridge to speculative_step_rest()             │
+│                                                                         │
+│  Target-Conditioned ───── uses hidden_state + MultiLayerKVCache         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
 ## Technique 1: Chain-Seed DDTree
 
 ### Problem

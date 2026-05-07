@@ -174,6 +174,29 @@ High-level entry points that compose the full speculative decoding pipeline.
 
 Augments speculative decoding with historically successful token sequences retrieved from an external vector store.
 
+### REST Architecture
+
+```
+Target Model Forward Pass
+    │
+    ├─ ctx.x (hidden state) ──► copy to embedding buffer ──► POST /search/vector
+    │                                                          │
+    │                                                          ▼
+    │                                                    anyrag returns
+    │                                                    historical continuations
+    │                                                    (token sequences from
+    │                                                     past successful compilations)
+    │                                                          │
+    ▼                                                          ▼
+DDTree Build ◄──────── merge retrieved sequences as candidate branches
+    │
+    ▼
+ConstraintPruner validates
+    │
+    ▼
+Target Verification
+```
+
 ### RestClient
 
 ```rust
