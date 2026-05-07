@@ -96,7 +96,7 @@ pub trait ConstraintPruner: Send + Sync {
 
 - `parent_tokens[k]` = token placed at depth `k` in the current branch path
 - `SudokuPruner` checks cross-depth row/col/box conflicts incrementally — O(parent_tokens.len()) per check, no board copy needed
-- `extract_parent_tokens(parent_path, num_tokens)` decodes the `TreeNode::parent_path` bitfield (5 bits per depth, max 12 depths)
+- `extract_parent_tokens(parent_path, num_tokens)` decodes the `TreeNode::parent_path` bitfield (16 bits per depth, u128 bitfield)
 
 **3-level comparison** (Arto Inkala, 8 depths, budget=100):
 
@@ -433,10 +433,8 @@ cargo run --release --features sudoku
 cargo run --release --all-features
 
 # Run all tests
-# Default only:          126 tests (lib)
-# +leviathan:            136 tests (lib) + 80 integration
-# +sudoku:               136 tests (lib) + 80 integration
-# +all-features:         146 tests (lib) + 80 integration
+# Default:              145 tests (lib) + 80 integration = 225 total
+# +all-features:        196 tests (lib) + 80 integration = 276 total
 cargo test --quiet --workspace --all-features
 
 # Run Sudoku solver example (streaming "thinking" output)
@@ -458,6 +456,19 @@ cargo clippy --all-targets --all-features --quiet
 - `bench/NNN_bench_result.png`: auto-numbered horizontal bar chart (plotters)
 - `bench/NNN_results.csv`: paired CSV for regression tracking (commit, date, method, throughput, latency)
 
+### Feature Flags
+
+| Flag | Dependencies | Description |
+|------|-------------|-------------|
+| `leviathan` | — | Leviathan Algorithm 1 verification (real p/q rejection) |
+| `sudoku` | — | SudokuPruner constraint pruning + examples |
+| `validator` | `syn`, `proc-macro2` | SynPruner + partial parser |
+| `rest` | `reqwest`, `tokio` | REST module |
+| `gpu` | `wgpu`, `bytemuck`, `pollster`, `safetensors` | wgpu context & buffers |
+| `full` | all above | Enable all features |
+
+Build with `--features <flag>` or `--all-features`.
+
 ## 📁 Project Structure
 
 ```
@@ -465,23 +476,30 @@ src/
   lib.rs            Module index
   main.rs           Entry point (proof → bench → Percepta bench → plot)
   types.rs          Config (micro + draft), Rng, softmax, rmsnorm, matmul, sample_token
-  transformer.rs    TransformerWeights, KVCache, ForwardContext, forward, generate, generate_into, generate_batch
+  transformer.rs    TransformerWeights, KVCache, PagedKVCache, ForwardContext, forward, forward_paged, generate, generate_into, generate_batch
   speculative/      SOLID decomposition (plan 005):
     mod.rs          Re-exports
-    types.rs        TreeNode, DraftResult, ConstraintPruner trait, NoPruner, SpeculativeContext (zero-alloc)
+    types.rs        TreeNode, DraftResult, ConstraintPruner trait, NoPruner, SpeculativeContext (zero-alloc), DDTreeBranchCache (wraps PagedKVCache)
     sampling.rs     sample_from_distribution, sample_residual_distribution, sample_residual_distribution_into
-    dd_tree.rs      build_dd_tree, build_dd_tree_pruned, TreeBuilder (zero-alloc), extract_parent_tokens
+    dd_tree.rs      build_dd_tree, build_dd_tree_pruned, TreeBuilder (zero-alloc, parent_tokens_buf), extract_parent_tokens, extract_parent_tokens_into
     dflash.rs       dflash_predict, dflash_predict_with, dflash_predict_ar, dflash_predict_ar_with, dflash_predict_parallel
     verifier.rs     SpeculativeVerifier trait, SimulatedVerifier, LeviathanVerifier † (all zero-alloc internals)
     step.rs         speculative_step, speculative_step_verifier, speculative_step_rollback †, speculative_step_conditioned †
     prefill.rs      PrefillScorer trait, AttentionScorer, compress_prompt, speculative_prefill, score_with
     sudoku_pruner.rs  SudokuPruner (path-aware, cross-depth conflict detection) *
+  tokenizer/        BPE tokenizer (encode/decode/train, Config::bpe())
+  validator/        SynPruner + partial parser ‡
+  gpu/              wgpu context & buffers §
+  rest/             REST module ¶
   percepta.rs       Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
                     Sudoku9x9, ComputableLora, StreamingSolver, SolveEvent
   benchmark.rs      BenchResult, run_all, save_results_csv (AR / DFlash / DDTree / Speculative / AR Draft / Leviathan †)
   plot.rs           plot_results → PNG horizontal bar chart
   † behind --features leviathan
   * behind --features sudoku
+  ‡ behind --features validator
+  § behind --features gpu
+  ¶ behind --features rest
 examples/
   sudoku_9x9.rs          Streaming solver with "thinking" output + hull compression stats *
   sudoku_speculative.rs  3-column DDTree comparison: Unpruned / Static-Only / Path-Aware *
