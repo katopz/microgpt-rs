@@ -22,10 +22,10 @@ pub struct BenchResult {
     pub color: (u8, u8, u8),
 }
 
-/// Save benchmark results to `bench/results.csv` (append, create if missing).
+/// Save benchmark results to numbered CSV (e.g. `bench/024_results.csv`).
 ///
 /// CSV columns: `commit,date,method,throughput,us_per_step,avg_accept_len`
-/// One row per benchmark method per run. Safe to call multiple times — always appends.
+/// One file per run, numbered to match the PNG chart. Always writes header + data.
 pub fn save_results_csv(results: &[BenchResult], path: &str) -> std::io::Result<()> {
     let commit = std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
@@ -36,19 +36,12 @@ pub fn save_results_csv(results: &[BenchResult], path: &str) -> std::io::Result<
 
     let date = chrono_like_now();
 
-    let file_exists = std::path::Path::new(path).exists();
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let mut file = std::fs::File::create(path)?;
 
-    // Write header if file is new
-    if !file_exists {
-        writeln!(
-            file,
-            "commit,date,method,throughput,us_per_step,avg_accept_len"
-        )?;
-    }
+    writeln!(
+        file,
+        "commit,date,method,throughput,us_per_step,avg_accept_len"
+    )?;
 
     for r in results {
         writeln!(
