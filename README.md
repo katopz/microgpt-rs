@@ -217,7 +217,7 @@ Pre-allocated `SpeculativeContext` + `TreeBuilder` structs eliminate per-step he
 | Prefill (compressed) | 23.99 | 3.60 | **567% faster** |
 | DDTree (chain-seed) | 3.16 | 2.48 | **27% faster** |
 
-![Benchmark Chart](bench/020_bench_result.png)
+![Benchmark Chart](bench/021_bench_result.png)
 
 ### What each benchmark measures
 
@@ -431,7 +431,7 @@ cargo clippy --all-targets --all-features --quiet
 ### Output
 
 - Console: transformer proof + benchmark table
-- `bench/NNN_bench_result.png`: auto-numbered bar chart (plotters)
+- `bench/NNN_bench_result.png`: auto-numbered horizontal bar chart (plotters)
 
 ## 📁 Project Structure
 
@@ -465,7 +465,7 @@ tests/
   integration.rs  80 integration tests (adversarial + DFA + arithmetic + backtracking + geometry
                   + Sudoku9x9 + ComputableLora + StreamingSolver)
 bench/
-  001_bench_result.png  ...  020_bench_result.png (auto-numbered)
+  001_bench_result.png  ...  021_bench_result.png (auto-numbered)
 ```
 
 ## 📜 References
