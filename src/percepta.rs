@@ -7,7 +7,7 @@
 //!
 //! Integration points with microgpt-rs:
 //! - DDTree branch pruning: validate drafted tokens before target verification
-//! - Computable LoRA: encode state-machine rules as 2D key embeddings
+//! - Deterministic Validator: encode state-machine rules as 2D key embeddings
 //! - "Free embedding" bridge: project hidden states to 2D for fast retrieval
 
 /// 2D vector for geometric attention operations.
@@ -383,16 +383,16 @@ impl Sudoku9x9 {
     }
 }
 
-// ── Computable LoRA: Deterministic Rules Engine ──────────────────
+// ── Symbolic Validator: Deterministic Rules Engine ──────────────────
 
 /// Neuro-symbolic intercept: prunes LLM-drafted tokens against
 /// deterministic constraints. Invalid moves get probability 0.0.
 ///
 /// This is the bridge between speculative decoding (DDTree) and
 /// the Percepta execution trace. The LLM proposes, the rules dispose.
-pub struct ComputableLora;
+pub struct SymbolicValidator;
 
-impl ComputableLora {
+impl SymbolicValidator {
     /// Filter drafted (digit, log_prob) pairs through Sudoku constraints.
     /// Returns only valid moves, sorted by probability descending.
     ///

@@ -2,7 +2,7 @@
 
 ## sudoku_9x9
 
-Streaming "Thinking" Sudoku solver demonstrating the Computable LoRA concept:
+Streaming "Thinking" Sudoku solver demonstrating the Deterministic Validator concept:
 - Deterministic rules engine prunes LLM hallucinations
 - O(log N) attention retrieves execution state via convex hull
 - Streaming output shows step-by-step constraint satisfaction
@@ -13,7 +13,7 @@ cargo run --example sudoku_9x9 --features sudoku
 
 ## sudoku_speculative
 
-DDTree + Computable LoRA pruning with 3-level comparison:
+DDTree + Deterministic Validator pruning with 3-level comparison:
 - **Unpruned**: Draft model proposes all high-probability tokens
 - **Static-Only**: Prunes against initial board, ignores cross-depth conflicts
 - **Path-Aware**: Prunes against initial board AND parent tokens in same path

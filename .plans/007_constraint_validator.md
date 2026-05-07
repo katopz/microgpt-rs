@@ -2,8 +2,9 @@
 
 > **Rename Note**: The `clora` module was renamed to `validator` because it contains
 > deterministic syntax validation code (SynPruner, PartialParser), not neural LoRA weights.
-> Feature flag: `clora` → `validator`. Module path: `src/clora/` → `src/validator/`.
+> Feature flag: `clora` → `validator` (previously `clora`). Module path: `src/clora/` → `src/validator/`.
 > The actual LoRA adapter (`lora.bin`) lives in the `gpu` feature (Plan 008).
+> The concept "Computable LoRA" / "cLoRA" is now called "Deterministic Validator".
 
 ## Objective
 
@@ -50,9 +51,9 @@ The plan must specify a concrete `Config::bpe()` that keeps weights in the low-M
 
 ### ~~Blocker 4: Plan creates 3 new top-level modules at once~~ ✅ RESOLVED
 
-The project's pattern is incremental: one module per plan, behind feature flags (sudoku → plan 002/005/006, leviathan → plan 004). The original plan proposed `clora/`, `tokenizer/`, `data/` simultaneously.
+The project's pattern is incremental: one module per plan, behind feature flags (sudoku → plan 002/005/006, leviathan → plan 004). The original plan proposed `clora/` (now `validator/`), `tokenizer/`, `data/` simultaneously.
 
-**Resolution**: ~~Phase per module.~~ **RESOLVED** — the project now has established patterns (`rest/`, `speculative/` submodules). The incremental phase approach is confirmed and working. Phase 1 = `tokenizer/` only. Phase 2 = `clora/` only. Phase 3 = `data/` = separate plan 009.
+**Resolution**: ~~Phase per module.~~ **RESOLVED** — the project now has established patterns (`rest/`, `speculative/` submodules). The incremental phase approach is confirmed and working. Phase 1 = `tokenizer/` only. Phase 2 = `clora/` (now `validator/`) only. Phase 3 = `data/` = separate plan 009.
 
 ### Non-Blocker: `ConstraintPruner::is_valid` doesn't carry tokenizer
 
@@ -80,7 +81,7 @@ The following changes have landed since this plan was written:
 | `extract_parent_tokens` still returns `Vec<usize>` | — | ⚠️ Allocates per call |
 | `TreeNode.parent_path` still `u64` with 5-bit encoding | — | ⚠️ Max token = 31 |
 | No BPE tokenizer | — | ❌ Not started |
-| No SynPruner / clora module | — | ❌ Not started |
+| No SynPruner / validator module (previously clora) | — | ❌ Not started |
 
 ### Remaining Blockers
 
@@ -98,7 +99,7 @@ Blockers 2 and 4 are resolved.
 │                               DDTree Branches                   │
 │                                      │                           │
 │                          ┌───────────▼───────────┐              │
-│                          │   SynPruner (cLoRA)    │              │
+│                          │   SynPruner (Validator)│              │
 │                          │   ┌─────────────────┐  │              │
 │                          │   │ bracket balance  │  │  Tier 0 DFA │
 │                          │   │ keyword accept   │  │  ~100ns/tok │
@@ -267,7 +268,7 @@ src/
 │   ├── mod.rs                      # Re-exports
 │   ├── types.rs                    # BpeTokenizer, MergeRule, SpecialTokens
 │   └── bpe.rs                      # encode(), decode(), train()
-├── clora/                          # NEW (Phase 2 — same plan, later task)
+├── validator/                      # NEW (Phase 2 — same plan, later task, previously clora/)
 │   ├── mod.rs                      # Re-exports
 │   ├── types.rs                    # PruneResult, ErrorKind, CompilerFeedback
 │   ├── syn_pruner.rs               # ConstraintPruner impl — bracket balancer + syn
@@ -278,7 +279,7 @@ src/
 │   └── ...
 ├── transformer.rs                  # EXISTING (unchanged — already parameterized)
 ├── types.rs                        # EXISTING (add Config::bpe(), Config::bpe_draft())
-└── lib.rs                          # EXISTING (add mod tokenizer, mod clora)
+└── lib.rs                          # EXISTING (add mod tokenizer, mod validator — previously mod clora)
 ```
 
 Plan 009 creates `data/` for the training data pipeline. Plan 008 covers wgpu GPU-accelerated LoRA training.
@@ -303,17 +304,17 @@ crossterm = "0.28"
 default = []
 leviathan = []
 sudoku = []
-clora = ["syn", "proc-macro2"]     # gates clora/ module — syn becomes required dep
+validator = ["syn", "proc-macro2"] # gates validator/ module (previously clora) — syn becomes required dep
 ```
 
-**Note**: `syn` and `proc-macro2` are **optional dependencies** gated behind the `clora` feature. They are NOT dev-dependencies. The tokenizer and BPE training work without them. Only the `SynPruner` (Phase 2) requires `syn`.
+**Note**: `syn` and `proc-macro2` are **optional dependencies** gated behind the `validator` feature (previously `clora`). They are NOT dev-dependencies. The tokenizer and BPE training work without them. Only the `SynPruner` (Phase 2) requires `syn`.
 
 ### PartialParser (Fixes Blocker 3 — Realistic Scope)
 
 NOT a full Rust parser. A **bracket balancer + keyword acceptor**:
 
 ```rust
-// clora/partial_parser.rs
+// validator/partial_parser.rs (previously clora/)
 
 /// Incremental bracket balancer for Rust syntax.
 /// Fast enough for per-token DDTree validation (~50ns per call).
@@ -332,9 +333,9 @@ NOT a full Rust parser. A **bracket balancer + keyword acceptor**:
 ///
 /// ## Honest Assessment (vs Research Ambition)
 ///
-/// The research describes a "Computable LoRA" using Percepta 2D convex-hull
+/// The research describes a "Deterministic Validator" (previously "Computable LoRA") using Percepta 2D convex-hull
 /// attention to execute an AST parser at O(log n) per token. This PartialParser
-/// is "Phase 0 cLoRA" — a pragmatic baseline that:
+/// is "Phase 0 Deterministic Validator" — a pragmatic baseline that:
 /// - Catches ~10-20% of invalid branches (unbalanced delimiters)
 /// - Has near-zero false negatives (rarely prunes valid code)
 /// - Runs at ~50ns/tok (well within DDTree budget)
@@ -406,7 +407,7 @@ impl PartialParser {
 ### SynPruner Implementation
 
 ```rust
-// clora/syn_pruner.rs
+// validator/syn_pruner.rs (previously clora/)
 
 /// Compiler-in-the-Loop pruner — two-tier validation.
 ///
@@ -545,12 +546,12 @@ At 27M lines, BPE training takes ~30-60 minutes on a modern CPU. Output: ~4096 t
 
 Common merges expected: `fn `, `pub `, `let `, `mut `, `impl `, ` ->`, `::`, `use `, `Result<`, `Option<`, `self::`, `Vec<`, `String`, `async `, `#[`, `fn(`, `return`, `match `, `struct `, `enum `, `trait `.
 
-## Phase 2: SynPruner (cLoRA Core)
+## Phase 2: SynPruner (Deterministic Validator Core)
 
 ### 2.1 Module Structure
 
 ```
-src/clora/
+src/validator/                    # previously src/clora/
 ├── mod.rs              # pub mod types; pub mod partial_parser; pub mod syn_pruner;
 ├── types.rs            # PruneResult, ErrorKind, CompilerFeedback
 ├── partial_parser.rs   # Bracket balancer DFA (~150 lines)
@@ -561,7 +562,7 @@ src/clora/
 
 ```rust
 // Usage in speculative step:
-use crate::clora::syn_pruner::SynPruner;
+use crate::validator::syn_pruner::SynPruner;    // previously crate::clora
 
 let tokenizer = Arc::new(BpeTokenizer::load("rust_bpe.json")?);
 let pruner = SynPruner::new(tokenizer);
@@ -579,7 +580,7 @@ for path in extract_best_path(&tree) {
 ### 2.3 Error Feedback (Self-Correction Loop)
 
 ```rust
-// clora/types.rs
+// validator/types.rs (previously clora/types.rs)
 
 /// Compiler error → steering context for next LLM draft.
 pub struct CompilerFeedback {
@@ -617,7 +618,7 @@ impl CompilerFeedback {
 ## Phase 3: Training Data Pipeline (Separate Plan 009)
 
 The training data pipeline (`src/data/`) is deferred to plan 009 because:
-1. It depends on `tokenizer/` and `clora/` being complete
+1. It depends on `tokenizer/` and `validator/` (previously `clora/`) being complete
 2. It introduces new dependencies (`walkdir`, `tempfile`)
 3. The pipeline is a batch tool, not a runtime component
 
@@ -662,29 +663,29 @@ Plan 009 will cover:
 - [x] 1.9 Run `cargo clippy --all-features`, `cargo test --all-features`
 - [x] 1.10 Commit with message `feat: BPE tokenizer for Rust source code`
 
-### Phase 2: SynPruner (cLoRA Core)
+### Phase 2: SynPruner (Deterministic Validator Core)
 
 - [x] 2.1 Add `syn` and `proc-macro2` to `Cargo.toml` under `[dependencies]` with `optional = true`
-- [x] 2.2 Add `clora = ["syn", "proc-macro2"]` to `[features]`
-- [x] 2.3 Create `src/clora/mod.rs` with re-exports (behind `#[cfg(feature = "clora")]`)
-- [x] 2.4 Create `src/clora/types.rs` with `PruneResult`, `ErrorKind`, `CompilerFeedback`
-- [x] 2.5 Create `src/clora/partial_parser.rs` with bracket balancer DFA
-- [x] 2.6 Create `src/clora/syn_pruner.rs` with `SynPruner` implementing `ConstraintPruner`
-- [x] 2.7 Add `pub mod clora;` to `src/lib.rs` (behind `#[cfg(feature = "clora")]`)
+- [x] 2.2 Add `validator = ["syn", "proc-macro2"]` to `[features]` (previously `clora`)
+- [x] 2.3 Create `src/validator/mod.rs` with re-exports (behind `#[cfg(feature = "validator")]`)
+- [x] 2.4 Create `src/validator/types.rs` with `PruneResult`, `ErrorKind`, `CompilerFeedback`
+- [x] 2.5 Create `src/validator/partial_parser.rs` with bracket balancer DFA
+- [x] 2.6 Create `src/validator/syn_pruner.rs` with `SynPruner` implementing `ConstraintPruner`
+- [x] 2.7 Add `pub mod validator;` to `src/lib.rs` (behind `#[cfg(feature = "validator")]`)
 - [x] 2.8 Add tests: partial parser accepts valid fragments, rejects unbalanced
 - [x] 2.9 Add tests: SynPruner prunes invalid Rust, accepts valid Rust
 - [x] 2.10 Add benchmark: SynPruner overhead vs NoPruner on DDTree build
-- [x] 2.11 Run `cargo test --features clora`, `cargo clippy --features clora`
-- [x] 2.12 Commit with message `feat: SynPruner cLoRA — bracket balance + syn validation`
+- [x] 2.11 Run `cargo test --features validator`, `cargo clippy --features validator`
+- [x] 2.12 Commit with message `feat: SynPruner validator — bracket balance + syn validation` (previously "SynPruner cLoRA")
 
 ### Phase 3: Integration & Validation
 
-- [x] 3.1 Create example: `examples/clora_demo.rs` (behind `clora` feature)
+- [x] 3.1 Create example: `examples/validator_demo.rs` (behind `validator` feature, previously `clora`)
 - [x] 3.2 Demo shows: BPE encode → draft → SynPruner → syn validate → output
-- [x] 3.3 Run baseline benchmark (no cLoRA) → `bench/027_bench_result.png`
-- [x] 3.4 Run cLoRA benchmark (with SynPruner) → `bench/030_bench_result.png`
+- [x] 3.3 Run baseline benchmark (no Deterministic Validator) → `bench/027_bench_result.png`
+- [x] 3.4 Run Deterministic Validator benchmark (with SynPruner) → `bench/030_bench_result.png`
 - [x] 3.5 Measure DDTree build time overhead: target ≤5%
-- [x] 3.6 Commit with message `feat: cLoRA demo + benchmark`
+- [x] 3.6 Commit with message `feat: validator demo + benchmark` (previously "cLoRA demo")
 
 ## Feature Flags
 
@@ -693,7 +694,7 @@ Plan 009 will cover:
 default = []
 leviathan = []
 sudoku = []
-clora = ["syn", "proc-macro2"]
+validator = ["syn", "proc-macro2"]  # previously clora
 ```
 
 ## Key Risks & Mitigations
@@ -726,17 +727,17 @@ clora = ["syn", "proc-macro2"]
 | `src/tokenizer/bpe.rs` | New | 1 | No |
 | `src/types.rs` | Add Config::bpe() (`n_layer` already exists from Plan 010) | 1 | No |
 | `src/lib.rs` | Add mod tokenizer | 1 | No |
-| `src/clora/mod.rs` | New | 2 | No |
-| `src/clora/types.rs` | New | 2 | No |
-| `src/clora/partial_parser.rs` | New | 2 | No |
-| `src/clora/syn_pruner.rs` | New | 2 | No |
-| `examples/clora_demo.rs` | New | 3 | No |
-| `src/benchmark.rs` | Add BPE + clora benches | 1-3 | No |
+| `src/validator/mod.rs` | New | 2 | No |
+| `src/validator/types.rs` | New | 2 | No |
+| `src/validator/partial_parser.rs` | New | 2 | No |
+| `src/validator/syn_pruner.rs` | New | 2 | No |
+| `examples/validator_demo.rs` | New | 3 | No |
+| `src/benchmark.rs` | Add BPE + validator benches | 1-3 | No |
 
 ## References
 
 - `.research/01_Advanced Neuro-Symbolic Rust Translation.md` — Grand Unification architecture
-- `.research/00_Neuro-Symbolic LLM Architecture.md` — Original cLoRA concept
+- `.research/00_Neuro-Symbolic LLM Architecture.md` — Original Deterministic Validator concept (previously "cLoRA")
 - `.plans/004_leviathan_distill.md` — SpeculativeVerifier trait pattern
 - `.plans/005_speculative_module_refactor.md` — ConstraintPruner trait, DDTree pruning
 - `anyrag/README.md` — RAG pipeline, concept sharding, JSONL export, `/knowledge/export`

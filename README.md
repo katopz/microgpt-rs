@@ -17,7 +17,7 @@ Inspired by [microgpt-c](https://github.com/nicholasgasior/microgpt-c), [talos-v
 - **Residual Distribution Sampling** — `max(0, p−q)` normalized distribution for sampling replacement tokens on rejection (Algorithm 1, Equation 3).
 - **Constraint Pruner** — Pluggable `ConstraintPruner` trait for neuro-symbolic intercept: deterministic rules engine prunes invalid branches before target verification.
 - **Path-Aware Pruning** — `SudokuPruner` validates against accumulated path state (initial board + parent tokens), catching cross-depth row/col/box conflicts that static-only pruning misses.
-- **Computable LoRA** — LLM drafts tokens via semantic probability, deterministic rules engine validates via mathematical constraints, only valid branches reach verification. Demonstrated with 9×9 Sudoku.
+- **Deterministic Validator** — LLM drafts tokens via semantic probability, deterministic rules engine validates via mathematical constraints, only valid branches reach verification. Demonstrated with 9×9 Sudoku.
 - **Streaming Solver** — `StreamingSolver` emits `Try`/`Accepted`/`Contradiction`/`Backtrack`/`Solved` events for real-time visualization of the search process.
 - **Percepta O(log N) Attention** — 2D convex hull KV cache with ternary search, proving LLMs can execute programs internally via geometric attention. Includes adversarial failure tests.
 - **TUI Visualization** — Ratatui-based terminal UI showing the Sudoku solver in real-time: color-coded grid, step/trace panels, speculative mode comparison (behind `--features sudoku`).
@@ -121,7 +121,7 @@ pub trait SpeculativeVerifier: Send + Sync {
 
 `SimulatedVerifier` is fast (no target model). `LeviathanVerifier` is the full Algorithm 1 — mathematically proven distribution-preserving, but needs large model asymmetry to be faster than pure AR.
 
-## 🧠 Computable LoRA: Neuro-Symbolic Intercept
+## 🧠 Deterministic Validator: Neuro-Symbolic Intercept
 
 The core idea: LLMs draft tokens from semantic probability, but can't natively enforce hard constraints. A deterministic rules engine sits between draft and verification:
 
@@ -131,7 +131,7 @@ LLM drafts logits → ConstraintPruner filters invalid → DDTree builds valid-o
 
 ### Sudoku as the LLM Problem
 
-Standard LLMs are notoriously bad at Sudoku (constraint-satisfaction / Exact Cover problem). They predict tokens from semantic probability but can't backtrack or run spatial checks. The Computable LoRA intercept forces mathematical validity on top of semantic probability.
+Standard LLMs are notoriously bad at Sudoku (constraint-satisfaction / Exact Cover problem). They predict tokens from semantic probability but can't backtrack or run spatial checks. The Deterministic Validator intercept forces mathematical validity on top of semantic probability.
 
 ### Public API
 
@@ -140,9 +140,9 @@ Standard LLMs are notoriously bad at Sudoku (constraint-satisfaction / Exact Cov
 let board = Sudoku9x9::arto_inkala();  // 21 clues, 60 empty cells
 let valid = board.is_valid_move(0, 1, 4);  // Check row/col/box constraints
 
-// Computable LoRA: filter draft logits through constraints
+// Deterministic Validator: filter draft logits through constraints
 let drafts = vec![(1, 0.15), (3, 0.12), (4, 0.20), (5, 0.08), (8, 0.11)];
-let valid_drafts = ComputableLora::prune_drafts(&board, 0, 1, &drafts);
+let valid_drafts = SymbolicValidator::prune_drafts(&board, 0, 1, &drafts);
 // Returns only digits valid at (0,1): [(4, 0.20), (1, 0.15)]
 
 // Streaming solver with event trace
@@ -340,7 +340,7 @@ Percepta:  ternary search hull  → O(log H) per step (H = hull size ≤ N)
 | **Backtracking search works** | 4×4 Sudoku + 8-Queens solved via attention-tracked DFS | `test_sudoku_4x4_backtracking`, `test_nqueens_8_backtracking` |
 | **Hull captures search peaks** | Backtrack valleys compressed, solution retained | `test_sudoku_4x4_hull_captures_search` |
 | **9×9 Sudoku solved** | Arto Inkala "World's Hardest" in 49,559 steps, 7 hull vertices | `test_sudoku9x9_solve_arto_inkala` |
-| **Computable LoRA prunes drafts** | Invalid logits filtered before DDTree build | `test_computable_lora_prune_drafts` |
+| **Deterministic Validator prunes drafts** | Invalid logits filtered before DDTree build | `test_computable_lora_prune_drafts` |
 | **Path-aware pruning catches cross-depth conflicts** | Same-digit same-row conflicts between parent/child depths | `test_ddtree_path_aware_catches_cross_depth_conflicts` |
 
 ### Adversarial Findings (Limitations Discovered)
@@ -486,7 +486,7 @@ src/
   gpu/              wgpu context & buffers §
   rest/             REST module ¶
   percepta.rs       Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
-                    Sudoku9x9, ComputableLora, StreamingSolver, SolveEvent
+                    Sudoku9x9, SymbolicValidator, StreamingSolver, SolveEvent
   benchmark.rs      BenchResult, run_all, save_results_csv (AR / DFlash / DDTree / Speculative / AR Draft / Leviathan)
   plot.rs           plot_results → PNG horizontal bar chart
   * behind --features sudoku
@@ -499,7 +499,7 @@ examples/
   sudoku_tui.rs          Ratatui TUI: real-time grid visualization + speculative mode *
 tests/
   integration.rs  80 integration tests (adversarial + DFA + arithmetic + backtracking + geometry
-                  + Sudoku9x9 + ComputableLora + StreamingSolver)
+                  + Sudoku9x9 + SymbolicValidator + StreamingSolver)
 bench/
   001_bench_result.png  ...  026_bench_result.png (auto-numbered)
   001_results.csv       ...  026_results.csv       (paired CSV, same index as PNG)

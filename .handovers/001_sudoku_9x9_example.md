@@ -2,11 +2,11 @@
 
 ## What Happened
 
-Implemented a complete 9×9 Sudoku solver with Percepta-style "streaming thinking" output, demonstrating the **Computable LoRA** concept from the Gemini PoC. The work distills the Gemini proposal into our existing `KVCache2D` architecture and creates a runnable example that matches the web demo experience.
+Implemented a complete 9×9 Sudoku solver with Percepta-style "streaming thinking" output, demonstrating the **Deterministic Validator** (previously called Computable LoRA) concept from the Gemini PoC. The work distills the Gemini proposal into our existing `KVCache2D` architecture and creates a runnable example that matches the web demo experience.
 
 The Gemini PoC showed a mock `SudokuState` + `SpeculativeSudokuDrafter` with hardcoded logits. We aligned it with our real implementation:
 - Our `Sudoku9x9` replaces Gemini's `SudokuState` (production-quality, 9×9 instead of mock)
-- Our `ComputableLora::prune_drafts` replaces Gemini's inline validation loop
+- Our `SymbolicValidator::prune_drafts` (previously `ComputableLora`) replaces Gemini's inline validation loop
 - Our `StreamingSolver` + `SolveEvent` enum provides the "LLM thinking" output
 - Our `KVCache2D::fast_attention` provides the O(log N) state retrieval (Gemini didn't have this)
 
@@ -14,13 +14,13 @@ The Gemini PoC showed a mock `SudokuState` + `SpeculativeSudokuDrafter` with har
 
 - **Plan**: `.plans/001_sudoku_9x9_example.md` — 7 tasks, all complete
 - **Code**:
-  - `src/percepta.rs` — Added `Sudoku9x9`, `ComputableLora`, `SolveEvent`, `StreamingSolver` (public API, ~380 lines)
+  - `src/percepta.rs` — Added `Sudoku9x9`, `SymbolicValidator` (previously `ComputableLora`), `SolveEvent`, `StreamingSolver` (public API, ~380 lines)
   - `src/speculative.rs` — Added `ConstraintPruner` trait, `NoPruner`, `SudokuPruner`, `build_dd_tree_pruned` (~200 lines)
-  - `examples/sudoku_9x9.rs` — Runnable example with Computable LoRA demo + streaming solve
+  - `examples/sudoku_9x9.rs` — Runnable example with Deterministic Validator demo + streaming solve
   - `examples/sudoku_speculative.rs` — End-to-end DDTree pruning comparison demo
 - **Tests**: 
   - `src/speculative.rs` — 10 new unit tests (pruner behavior, tree size, valid-only guarantee)
-  - `tests/integration.rs` — 9 integration tests (solver, display, computable lora, streaming)
+  - `tests/integration.rs` — 9 integration tests (solver, display, validator, streaming)
 - **Commits**: `097fd48`, `5a1116a` on `main`
 
 ## Reflection: Struggling / Solved
@@ -40,14 +40,14 @@ The Gemini PoC showed a mock `SudokuState` + `SpeculativeSudokuDrafter` with har
 ## Results
 
 ### Example 1: `cargo run --example sudoku_9x9`
-- Computable LoRA intercept demo (LLM proposes 5 digits, rules engine prunes to 1)
+- Deterministic Validator intercept demo (LLM proposes 5 digits, rules engine prunes to 1)
 - Streaming "thinking" output with ~25 key moments
 - Arto Inkala puzzle solved: **49,559 steps, 7 hull vertices, 7,079.9x compression**
 - O(49,559) → O(log 7) ≈ O(3) attention speedup
 - Linear and fast attention scores match perfectly
 
 ### Example 2: `cargo run --example sudoku_speculative`
-- DDTree comparison: without vs with Computable LoRA pruning
+- DDTree comparison: without vs with Deterministic Validator pruning
 - **52% valid unpruned → 100% valid pruned** (48 invalid branches eliminated)
 - Token distribution shows exactly which digits were pruned per depth
 - Cell (1,2): pruned [3,5,7,8,9], kept [1,2,4,6]
@@ -79,8 +79,8 @@ cargo test --quiet
 # Run only 9x9 tests
 cargo test --quiet sudoku9x9
 
-# Run only computable_lora tests
-cargo test --quiet computable_lora
+# Run only validator tests (previously computable_lora)
+cargo test --quiet validator
 
 # Run only streaming tests
 cargo test --quiet streaming

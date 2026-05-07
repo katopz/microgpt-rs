@@ -8,7 +8,7 @@ use std::cmp::Ordering;
 
 /// Trait for pruning drafted tokens against deterministic constraints.
 ///
-/// The Computable LoRA concept: before the target model verifies drafted
+/// The Deterministic Validator concept: before the target model verifies drafted
 /// branches, a rules engine prunes invalid ones. This prevents the DDTree
 /// from wasting budget on branches that can never be accepted.
 ///

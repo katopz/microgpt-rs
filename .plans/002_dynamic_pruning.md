@@ -83,4 +83,4 @@ This is O(parent_tokens.len()) per check, which is O(lookahead) — negligible.
 - Path-aware pruner catches cross-depth row/col/box conflicts
 - Tree with path-aware pruning ≤ tree with static pruning
 - 100% valid placements against accumulated state (not just initial board)
-- Demonstrates the full Computable LoRA promise: LLM drafts, rules engine validates
+- Demonstrates the full Deterministic Validator promise: LLM drafts, rules engine validates
