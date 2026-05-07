@@ -21,6 +21,21 @@ pub fn extract_parent_tokens(parent_path: u128, num_tokens: usize) -> Vec<usize>
         .collect()
 }
 
+/// Zero-alloc variant of [`extract_parent_tokens`].
+/// Writes `num_tokens` parent tokens into `buf`, which must be large enough.
+/// Returns the slice `&buf[..num_tokens]`.
+#[inline]
+pub fn extract_parent_tokens_into(
+    parent_path: u128,
+    num_tokens: usize,
+    buf: &mut [usize],
+) -> &[usize] {
+    for (k, slot) in buf.iter_mut().enumerate().take(num_tokens) {
+        *slot = ((parent_path >> ((num_tokens - 1 - k) * 16)) & 0xFFFF) as usize;
+    }
+    &buf[..num_tokens]
+}
+
 /// DDTree: Build verification tree from marginals using Best-First Search.
 /// Returns tree nodes ordered by score (best first).
 ///
@@ -177,6 +192,7 @@ pub struct TreeBuilder {
     tree: Vec<TreeNode>,
     chain_nodes: Vec<TreeNode>,
     chain_parent_tokens: Vec<usize>,
+    parent_tokens_buf: Vec<usize>,
 }
 
 impl TreeBuilder {
@@ -187,6 +203,7 @@ impl TreeBuilder {
             tree: Vec::with_capacity(config.tree_budget),
             chain_nodes: Vec::with_capacity(config.draft_lookahead),
             chain_parent_tokens: Vec::with_capacity(config.draft_lookahead),
+            parent_tokens_buf: vec![0usize; config.draft_lookahead + 1],
         }
     }
 
@@ -281,14 +298,17 @@ impl TreeBuilder {
                     };
 
                     // Parent tokens for pruning: chain tokens at depths 0..depth-1
-                    let sibling_parent_tokens =
-                        extract_parent_tokens(chain_node.parent_path >> 16, depth);
+                    let sibling_parent_tokens = extract_parent_tokens_into(
+                        chain_node.parent_path >> 16,
+                        depth,
+                        &mut self.parent_tokens_buf,
+                    );
 
                     for (i, &prob) in marginals[depth].iter().enumerate() {
                         if i == chain_node.token_idx {
                             continue;
                         }
-                        if prob > 0.0 && pruner.is_valid(depth, i, &sibling_parent_tokens) {
+                        if prob > 0.0 && pruner.is_valid(depth, i, sibling_parent_tokens) {
                             let sibling_path = if depth == 0 {
                                 i as u128
                             } else {
@@ -310,9 +330,13 @@ impl TreeBuilder {
                 let last = self.chain_nodes.last().unwrap();
                 if last.depth + 1 < marginals.len() {
                     let next_depth = last.depth + 1;
-                    let parent_tokens = extract_parent_tokens(last.parent_path, last.depth + 1);
+                    let parent_tokens = extract_parent_tokens_into(
+                        last.parent_path,
+                        last.depth + 1,
+                        &mut self.parent_tokens_buf,
+                    );
                     for (i, &prob) in marginals[next_depth].iter().enumerate() {
-                        if prob > 0.0 && pruner.is_valid(next_depth, i, &parent_tokens) {
+                        if prob > 0.0 && pruner.is_valid(next_depth, i, parent_tokens) {
                             self.heap.push(TreeNode {
                                 score: last.score + prob.ln(),
                                 depth: next_depth,
@@ -347,10 +371,14 @@ impl TreeBuilder {
             if best.depth + 1 < marginals.len() {
                 let next_depth = best.depth + 1;
                 // Extract parent tokens from path bitfield for path-aware pruning
-                let parent_tokens = extract_parent_tokens(best.parent_path, best.depth + 1);
+                let parent_tokens = extract_parent_tokens_into(
+                    best.parent_path,
+                    best.depth + 1,
+                    &mut self.parent_tokens_buf,
+                );
                 for (i, &prob) in marginals[next_depth].iter().enumerate() {
                     // NEURO-SYMBOLIC INTERCEPT: prune before adding to heap
-                    if prob > 0.0 && pruner.is_valid(next_depth, i, &parent_tokens) {
+                    if prob > 0.0 && pruner.is_valid(next_depth, i, parent_tokens) {
                         self.heap.push(TreeNode {
                             score: best.score + prob.ln(),
                             depth: next_depth,
