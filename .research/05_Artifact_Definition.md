@@ -57,6 +57,39 @@ Curators upload specialized `domain_validator.wasm` files that encode domain-spe
 
 **License:** MIT (open source). Basic validators ship with the engine. Domain validators are Curator artifacts on the marketplace.
 
+### WASM Production Pipeline (Plan 015)
+
+**Runtime:** Wasmtime (Bytecode Alliance). Rust-native, capability-based sandboxing, 5-10% overhead vs native.
+
+**Repo Split:**
+
+| Component | Repo | License |
+|-----------|------|---------|
+| `WasmPruner` runtime | `microgpt-rs` (`--features wasm`) | MIT |
+| `riir-validator-sdk` | New repo `riir-validator-sdk` | MIT |
+| Marketplace hosting | Private repo `riir-forge` | Proprietary |
+| Semantic validator | Private repo `aegis-validator` | Proprietary |
+
+**Curator Workflow:**
+
+```
+cargo add riir-validator-sdk
+       ↓
+Implement Validator trait
+       ↓
+cargo build --target wasm32-unknown-unknown --release
+       ↓
+riir-validator-check validator.wasm (local quality gate)
+       ↓
+Upload to riir-forge marketplace (hosted, Curator IP protected)
+```
+
+**WASM ABI Constraints:**
+- No WASI imports (fully sandboxed — no filesystem, no network, no env)
+- No floating-point (integer logic only, deterministic across platforms)
+- Max memory: 64 pages (4MB)
+- Max execution: 100μs per `is_valid` call (fuel-based enforcement)
+
 ---
 
 ## Artifact 2: The Neural Adapter
@@ -87,6 +120,48 @@ Curators upload specialized `domain_lora.bin` files:
 - `tokio_lora.bin` — makes the LLM naturally output correct async runtime code
 
 **License:** Proprietary (SaaS). Hosted on the platform, never distributed. This is the fuel for the engine.
+
+### .bin Production Pipeline (anyrag Plan 003 + microgpt-rs Plan 008)
+
+**The 32-day self-improving cycle:**
+
+```
+Deterministic Validator forces valid Rust output
+       ↓
+anyrag records TranslationEpisode (source, generated, compilation result)
+       ↓
+EpisodicIngester stores episodes in Turso DB
+       ↓
+Curator::synthesize_training_data() filters successful episodes
+       ↓
+KnowledgeExporter::export_for_lora() produces JSONL training data
+       ↓
+microgpt-rs Plan 008: wgpu LoRA Trainer consumes JSONL → trains lora.bin
+       ↓
+SelfImprovingCycle hot-reloads lora.bin into inference engine
+       ↓
+LLM is permanently smarter, Validator intervenes less
+```
+
+**Data schema (from anyrag Plan 003):**
+
+```rust
+pub struct TranslationEpisode {
+    pub id: Uuid,                    // Uuid::now_v7()
+    pub source_language: String,     // "python"
+    pub source_code: String,         // original Python
+    pub generated_rust: String,      // translated Rust
+    pub compilation_result: CompilationResult,  // Success(warnings) | Failed(error) | NotCompiled
+    pub created_at: DateTime<Utc>,
+}
+```
+
+**Export format:** JSONL consumed by microgpt-rs wgpu trainer:
+```jsonl
+{"input": "def add(a, b): return a + b", "output": "fn add(a: i32, b: i32) -> i32 { a + b }", "verified": true}
+```
+
+**Config compatibility:** `Config::bpe()` (vocab=4096, embd=32) → `Config::small_target()` (4 layers, embd=64) → future `Config::validator_target()` (4 layers, embd=256).
 
 ---
 
@@ -145,8 +220,12 @@ Validator prunes → Valid code saved → Train Adapter → LLM gets smarter
 
 ## Action Items
 
-- [ ] Rename `ComputableLora` struct to `SymbolicIntercept` or remove it (functionality already in `ConstraintPruner` implementations)
-- [ ] Implement actual LoRA weight loading (rank-decomposed matrices A, B)
-- [ ] Design `.safetensors` schema for Neural Adapter files
-- [ ] Design `.wasm` interface for Curator-uploaded Deterministic Validators
-- [ ] Update README to use "Deterministic Validator" and "Neural Adapter" terminology
+- [x] Rename `ComputableLora` struct to `SymbolicValidator` (completed in commit `939e430`)
+- [x] Update README to use "Deterministic Validator" and "Neural Adapter" terminology (completed in commit `939e430`)
+- [x] Design `.wasm` interface for Curator-uploaded Deterministic Validators (Plan 015)
+- [ ] Implement actual LoRA weight loading (rank-decomposed matrices A, B) — Plan 008
+- [ ] Implement `WasmPruner` runtime in microgpt-rs (`--features wasm`) — Plan 015 Phase 1
+- [ ] Create `riir-validator-sdk` repo (MIT) — Plan 015 Phase 2
+- [ ] Design `.safetensors` schema for Neural Adapter files — Plan 008
+- [ ] Implement anyrag `SelfImprovingCycle` (32-day loop) — anyrag Plan 003
+- [ ] Implement anyrag `KnowledgeExporter::export_for_lora()` — anyrag Plan 003
