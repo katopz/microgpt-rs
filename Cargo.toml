@@ -42,3 +42,7 @@ required-features = ["sudoku"]
 [[example]]
 name = "sudoku_tui"
 required-features = ["sudoku"]
+
+[[example]]
+name = "clora_demo"
+required-features = ["clora"]
