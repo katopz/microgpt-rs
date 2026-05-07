@@ -5,8 +5,10 @@ use crate::speculative::{
 };
 use crate::transformer::{
     ForwardContext, MultiLayerKVCache, PagedKVCache, TransformerWeights, forward, forward_paged,
+    generate_into, tokens_to_string,
 };
 use crate::types::{Config, Rng, softmax};
+use rayon::prelude::*;
 use std::io::Write;
 use std::time::Instant;
 
@@ -956,4 +958,152 @@ pub fn bench_paged_vs_flat_cache(config: &Config) -> (BenchResult, BenchResult) 
     };
 
     (flat_result, paged_result)
+}
+
+/// Run all core benchmarks in parallel using rayon's `par_iter`.
+///
+/// Same core benchmarks as `run_all()` but runs them concurrently via
+/// rayon. Feature-gated and setup-heavy benchmarks are appended sequentially.
+pub fn run_all_parallel(config: &Config) -> Vec<BenchResult> {
+    let mut rng = Rng::new(42);
+    let weights = TransformerWeights::new(config, &mut rng);
+
+    let draft_config = Config::draft();
+    let mut draft_rng = Rng::new(99);
+    let draft_weights = TransformerWeights::new(&draft_config, &mut draft_rng);
+
+    let warmup = 1000;
+    let iters = 50000;
+
+    println!("\n📊 Running benchmarks in parallel ({iters} iterations, {warmup} warmup)...");
+
+    #[derive(Clone, Copy)]
+    enum BenchKind {
+        Ar,
+        DFlash,
+        DdTree,
+        Speculative,
+        SpeculativeAr,
+    }
+
+    let core_kinds = [
+        BenchKind::Ar,
+        BenchKind::DFlash,
+        BenchKind::DdTree,
+        BenchKind::Speculative,
+        BenchKind::SpeculativeAr,
+    ];
+
+    let mut results: Vec<BenchResult> = core_kinds
+        .par_iter()
+        .map(|&kind| match kind {
+            BenchKind::Ar => bench_ar(&weights, config, warmup, iters),
+            BenchKind::DFlash => bench_dflash(&draft_weights, &draft_config, warmup, iters),
+            BenchKind::DdTree => bench_ddtree(&draft_weights, &draft_config, warmup, iters),
+            BenchKind::Speculative => {
+                bench_speculative(&draft_weights, &draft_config, warmup, iters)
+            }
+            BenchKind::SpeculativeAr => {
+                bench_speculative_ar(&draft_weights, &draft_config, warmup, iters)
+            }
+        })
+        .collect();
+
+    #[cfg(feature = "leviathan")]
+    {
+        let leviathan = bench_leviathan(
+            &draft_weights,
+            &draft_config,
+            &weights,
+            config,
+            warmup,
+            iters,
+        );
+        results.push(leviathan);
+
+        let (no_rollback, with_rollback) = bench_snapshot_rollback(
+            &draft_weights,
+            &draft_config,
+            &weights,
+            config,
+            warmup,
+            iters,
+        );
+        results.push(no_rollback);
+        results.push(with_rollback);
+
+        let (uncond_br, cond_br) = bench_conditioned_vs_unconditioned(
+            &draft_weights,
+            &draft_config,
+            &weights,
+            config,
+            warmup,
+            iters,
+        );
+        results.push(uncond_br);
+        results.push(cond_br);
+    }
+
+    let (nocompress_br, compress_br) =
+        bench_prefill_compression(&draft_weights, &draft_config, warmup, iters);
+    results.push(nocompress_br);
+    results.push(compress_br);
+
+    let (no_chain, chain) = bench_ddtree_chain_seed(&draft_weights, &draft_config, warmup, iters);
+    results.push(no_chain);
+    results.push(chain);
+
+    let (flat_br, paged_br) = bench_paged_vs_flat_cache(config);
+    results.push(flat_br);
+    results.push(paged_br);
+
+    results
+}
+
+/// Generate multiple text samples in parallel using rayon's `par_iter`.
+///
+/// Each sample gets its own `ForwardContext` + `MultiLayerKVCache` via
+/// `map_init`, so there's no contention. Prints each sample's output
+/// in order after all complete.
+pub fn generate_batch(count: usize, max_tokens: usize) {
+    let config = Config::micro();
+    let mut rng = Rng::new(42);
+    let weights = TransformerWeights::new(&config, &mut rng);
+
+    println!("\n📝 Generating {count} samples ({max_tokens} tokens each) in parallel...");
+
+    let seeds: Vec<u64> = (0..count).map(|i| 42 + i as u64).collect();
+
+    let mut samples: Vec<(usize, Vec<usize>)> = seeds
+        .par_iter()
+        .enumerate()
+        .map_init(
+            || {
+                (
+                    ForwardContext::new(&config),
+                    MultiLayerKVCache::new(&config),
+                )
+            },
+            |(ctx, cache), (idx, &seed)| {
+                let mut sample_rng = Rng::new(seed);
+                let mut tokens = Vec::with_capacity(max_tokens);
+                generate_into(
+                    ctx,
+                    cache,
+                    &weights,
+                    &config,
+                    &mut sample_rng,
+                    max_tokens,
+                    &mut tokens,
+                );
+                (idx, tokens)
+            },
+        )
+        .collect();
+
+    samples.sort_by_key(|(idx, _)| *idx);
+    for (idx, tokens) in &samples {
+        let text = tokens_to_string(tokens);
+        println!("  Sample {}: \"{text}\"", idx + 1);
+    }
 }

@@ -121,10 +121,10 @@ dflash_predict_parallel:
 
 ## Success Criteria
 
-- [ ] All existing tests pass (zero regressions)
-- [ ] New `forward_paged()` passes same correctness tests as `forward()`
-- [ ] Paged branch exploration uses less memory than flat snapshot/restore
-- [ ] Rayon threshold prevents parallelism overhead on micro configs
-- [ ] Benchmark comparison shows paged cache overhead is < 10% vs flat cache
-- [ ] Zero clippy warnings
-- [ ] Clean commit on `develop` branch
+- [x] All existing tests pass (zero regressions)
+- [x] New `forward_paged()` passes same correctness tests as `forward()`
+- [x] Paged branch exploration uses less memory than flat snapshot/restore
+- [x] Rayon threshold prevents parallelism overhead on micro configs
+- [x] Benchmark comparison shows paged cache overhead is < 10% vs flat cache
+- [x] Zero clippy warnings
+- [x] Clean commit on `develop` branch

@@ -242,6 +242,27 @@ impl DDTreeBranchCache {
         forward_paged(ctx, weights, &mut self.paged, seq_idx, token, pos, config)
     }
 
+    /// Rollback a branch to a given position, freeing exclusive pages.
+    ///
+    /// Keeps pages covering positions `[0..at_pos)` and truncates the rest.
+    /// Pages exclusively owned by this branch (not shared with other branches)
+    /// are returned to the free list. Shared prefix pages are preserved.
+    pub fn rollback_branch(&mut self, seq_idx: usize, at_pos: usize) {
+        self.paged.rollback(seq_idx, at_pos);
+    }
+
+    /// Fully discard a branch, freeing all its exclusive pages.
+    ///
+    /// Rolls back to position 0 and decrements `branch_count` if the branch
+    /// is not the trunk (seq 0). The trunk cannot be discarded — use `reset()`
+    /// to clear everything.
+    pub fn discard_branch(&mut self, seq_idx: usize) {
+        self.paged.rollback(seq_idx, 0);
+        if seq_idx > 0 && self.branch_count > 1 {
+            self.branch_count -= 1;
+        }
+    }
+
     /// Reset all branches, freeing pages back to pool.
     pub fn reset(&mut self) {
         self.paged.reset();
@@ -371,5 +392,131 @@ mod tests {
             cache.branch_count, 1,
             "reset should restore branch_count to 1"
         );
+    }
+
+    #[test]
+    fn test_branch_cache_rollback_branch_allows_forward_after() {
+        let config = Config::draft();
+        let mut cache = DDTreeBranchCache::new(&config, 4);
+
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+        let mut ctx = ForwardContext::new(&config);
+
+        // Trunk: pos 0, 1, 2, 3
+        for pos in 0..4 {
+            let _ = cache.forward_branch(&mut ctx, &weights, 0, pos, pos, &config);
+        }
+
+        // Rollback trunk to pos 2
+        cache.rollback_branch(0, 2);
+
+        // Forward should still work after rollback — pages for pos 0..2 are intact
+        let logits = cache.forward_branch(&mut ctx, &weights, 0, 5, 2, &config);
+        assert_eq!(logits.len(), config.vocab_size);
+        for (i, &l) in logits.iter().enumerate() {
+            assert!(
+                l.is_finite(),
+                "logit {i} after rollback should be finite: {l}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_branch_cache_discard_branch_decrements_count() {
+        let config = Config::draft();
+        let mut cache = DDTreeBranchCache::new(&config, 8);
+
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+        let mut ctx = ForwardContext::new(&config);
+
+        // Trunk at pos 0
+        let _ = cache.forward_branch(&mut ctx, &weights, 0, 0, 0, &config);
+
+        // Fork a branch
+        let branch = cache.fork_branch(0, 0);
+        assert_ne!(branch, 0, "fork should return new seq_idx");
+        assert_eq!(cache.branch_count, 2);
+
+        // Forward on branch
+        let _ = cache.forward_branch(&mut ctx, &weights, branch, 5, 1, &config);
+
+        // Discard branch
+        cache.discard_branch(branch);
+        assert_eq!(
+            cache.branch_count, 1,
+            "discard should decrement branch_count"
+        );
+    }
+
+    #[test]
+    fn test_branch_cache_discard_trunk_does_not_decrement() {
+        let config = Config::draft();
+        let mut cache = DDTreeBranchCache::new(&config, 4);
+
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+        let mut ctx = ForwardContext::new(&config);
+
+        let _ = cache.forward_branch(&mut ctx, &weights, 0, 0, 0, &config);
+
+        // Discard trunk (seq 0) should not decrement branch_count
+        cache.discard_branch(0);
+        assert_eq!(
+            cache.branch_count, 1,
+            "discarding trunk should not decrement branch_count"
+        );
+    }
+
+    #[test]
+    fn test_branch_cache_rollback_shared_pages_preserved() {
+        let config = Config::draft();
+        let mut cache = DDTreeBranchCache::new(&config, 4);
+
+        let mut rng = Rng::new(42);
+        let weights = TransformerWeights::new(&config, &mut rng);
+        let mut ctx = ForwardContext::new(&config);
+
+        // Trunk: pos 0, 1, 2
+        for pos in 0..3 {
+            let _ = cache.forward_branch(&mut ctx, &weights, 0, pos, pos, &config);
+        }
+
+        // Capture trunk state at pos 2 before branching
+        let _trunk_logits = cache
+            .forward_branch(&mut ctx, &weights, 0, 0, 3, &config)
+            .to_vec();
+
+        // Fork at pos 1
+        let branch = cache.fork_branch(0, 1);
+        assert_ne!(branch, 0, "fork should return new seq_idx");
+
+        // Forward on branch to allocate exclusive pages
+        let _ = cache.forward_branch(&mut ctx, &weights, branch, 5, 1, &config);
+        let _ = cache.forward_branch(&mut ctx, &weights, branch, 7, 2, &config);
+
+        // Rollback branch to pos 1 — shared prefix pages should be preserved
+        cache.rollback_branch(branch, 1);
+
+        // Trunk should still work: shared pages (pos 0) were not freed
+        let trunk_logits_after = cache
+            .forward_branch(&mut ctx, &weights, 0, 1, 3, &config)
+            .to_vec();
+        for (i, &l) in trunk_logits_after.iter().enumerate() {
+            assert!(
+                l.is_finite(),
+                "trunk logit {i} should be finite after branch rollback: {l}"
+            );
+        }
+
+        // Forking again from trunk should succeed — shared pages are intact
+        let branch2 = cache.fork_branch(0, 1);
+        assert_ne!(branch2, 0, "fork after rollback should return new seq_idx");
+        let logits2 = cache.forward_branch(&mut ctx, &weights, branch2, 3, 1, &config);
+        assert_eq!(logits2.len(), config.vocab_size);
+        for (i, &l) in logits2.iter().enumerate() {
+            assert!(l.is_finite(), "branch2 logit {i} should be finite: {l}");
+        }
     }
 }

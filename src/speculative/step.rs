@@ -525,10 +525,12 @@ pub fn speculative_step_rollback_paged(
     branch_cache.reset();
     let _ = branch_cache.forward_branch(draft_ctx, draft_weights, 0, token, pos, draft_config);
 
-    // Fork branches from the trunk at current position
+    // Fork branches from the trunk at current position, tracking seq indices
+    let mut branch_seqs: Vec<usize> = Vec::with_capacity(paths.len());
     for (path_idx, path) in paths.iter().enumerate() {
         if path_idx == 0 {
             // First path continues on trunk (seq 0)
+            branch_seqs.push(0);
             for (depth, &tok) in path.iter().enumerate() {
                 let _ = branch_cache.forward_branch(
                     draft_ctx,
@@ -542,6 +544,7 @@ pub fn speculative_step_rollback_paged(
         } else {
             // Subsequent paths fork from trunk
             let branch_seq = branch_cache.fork_branch(0, pos + 1);
+            branch_seqs.push(branch_seq);
             for (depth, &tok) in path.iter().enumerate() {
                 let _ = branch_cache.forward_branch(
                     draft_ctx,
@@ -558,8 +561,8 @@ pub fn speculative_step_rollback_paged(
     // 5. Snapshot target KV cache at current position for verification rollback
     let snapshot = target_cache.snapshot(pos, target_config);
 
-    // 6. Verify candidate paths against target model (same as speculative_step_rollback)
-    for path in &paths {
+    // 6. Verify candidate paths against target model with draft branch rollback
+    for (path_idx, path) in paths.iter().enumerate() {
         target_cache.restore(&snapshot, target_config);
 
         let mut accepted = Vec::with_capacity(path.len());
@@ -618,13 +621,28 @@ pub fn speculative_step_rollback_paged(
         }
 
         if !accepted.is_empty() {
+            // Rollback draft branch to accepted position, freeing exclusive pages
+            let seq = branch_seqs[path_idx];
+            let rollback_pos = pos + 1 + accepted.len();
+            branch_cache.rollback_branch(seq, rollback_pos);
             let len = accepted.len();
             return (accepted, len);
         }
+
+        // Path fully rejected: rollback/discard draft branch to free pages
+        let seq = branch_seqs[path_idx];
+        if seq == 0 {
+            // Trunk: rollback to prompt position to undo failed draft tokens
+            branch_cache.rollback_branch(0, pos + 1);
+        } else {
+            // Non-trunk branch: discard entirely
+            branch_cache.discard_branch(seq);
+        }
     }
 
-    // All paths exhausted: restore and sample from target
+    // All paths exhausted: restore target and rollback draft trunk, then sample
     target_cache.restore(&snapshot, target_config);
+    branch_cache.rollback_branch(0, pos + 1);
     let logits = forward(
         target_ctx,
         target_weights,

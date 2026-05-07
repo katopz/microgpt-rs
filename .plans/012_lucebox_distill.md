@@ -229,7 +229,7 @@ pub struct KVCache {
 - [x] **3.7** Add unit test: snapshot/rollback is correct with GQA kv_dim < n_embd (plan 011)
 - [x] **3.8** Add bench: snapshot/rollback overhead vs full clone vs no-rollback
   - `bench_snapshot_rollback()` in `benchmark.rs` — compares Leviathan (no rollback) vs Leviathan (w/ rollback)
-- [ ] **3.9** **Deferred to plan 011 §Phase 4:** PagedKVCache fork-based rollback (page table CoW instead of data copy)
+- [x] **3.9** **Deferred to plan 011 §Phase 4:** PagedKVCache fork-based rollback (page table CoW instead of data copy)
 
 **Memory estimate (micro config):**
 - Per layer: `2 × pos × kv_dim × 4 bytes`
