@@ -179,31 +179,33 @@ pub enum SolveEvent {
 
 Run on Apple Silicon (single-threaded, `--release` profile, 50k iterations, **zero-alloc hot paths**):
 
-**Models:** Target (embd=16, heads=4, mlp=64) · Draft (embd=4, heads=2, mlp=16)
+**Models:** Target (embd=16, heads=4, mlp=64) · Draft (embd=4, heads=2, mlp=16) · Benchmark run `042` (commit `eb2daa9`)
 
 ```
 Method                         Throughput         μs/step  Avg Accept Len
 ───────────────────────────────────────────────────────────────────────────────
-Transformer AR                  1,190,696 tok/s       0.84            1.00
-DFlash                         4,039,625 tok/s       1.98            8.00
-DDTree Build                     375,898 trees/s      2.66            —
-Speculative (Simulated)        1,050,841 tok/s       4.76            5.00
-Speculative (AR Draft)         1,444,189 tok/s       4.84            7.00
+Transformer AR                  1,183,952 tok/s       0.84            1.00
+DFlash                         4,103,213 tok/s       1.95            8.00
+DDTree Build                     359,998 trees/s      2.78            —
+Speculative (Simulated)        1,038,308 tok/s       4.82            5.00
+Speculative (AR Draft)         1,479,221 tok/s       4.73            7.00
 Leviathan (Algorithm 1)    †    110,710 tok/s      10.65            1.18
 Leviathan (no rollback)    †    110,560 tok/s      10.66            1.18
 Leviathan (w/ rollback)    †    190,535 tok/s       6.17            1.18
 Spec (unconditioned)           1,050,304 tok/s       4.76            5.00
 Spec (conditioned)    †        1,084,945 tok/s       6.22            6.74
-Prefill (no compress)         19,323,759 tok/s       3.31           64.00
-Prefill (compressed)           1,951,118 tok/s       3.59            7.00
-DDTree (no chain)                379,570 trees/s      2.63           16.00
-DDTree (chain-seed)              394,657 trees/s      2.53           16.00
+Prefill (no compress)         19,257,295 tok/s       3.32           64.00
+Prefill (compressed)           1,941,310 tok/s       3.61            7.00
+DDTree (no chain)                358,447 trees/s      2.79           16.00
+DDTree (chain-seed)              393,462 trees/s      2.54           16.00
+forward (flat)                 1,126,860 trees/s      0.89            —
+forward_paged                    980,192 trees/s      1.02            —
 ───────────────────────────────────────────────────────────────────────────────
-📈 Best speedup: 1.21x (Speculative AR Draft vs AR)
+📈 Best speedup: 1.25x (Speculative AR Draft vs AR)
 † Requires --features leviathan
 ```
 
-![Benchmark Chart](bench/023_bench_result.png)
+![Benchmark Chart](bench/042_bench_result.png)
 
 ### What each benchmark measures
 
@@ -256,13 +258,13 @@ Pre-allocated `SpeculativeContext` + `TreeBuilder` structs eliminate per-step he
 
 | Method | Before (μs) | After (μs) | Improvement |
 |--------|-------------|-------------|-------------|
-| DFlash | 2.60 | 1.98 | **31% faster** |
-| DDTree Build | 3.19 | 2.66 | **17% faster** |
-| Speculative (Simulated) | 5.92 | 4.76 | **25% faster** |
-| Speculative (AR Draft) | 5.70 | 4.84 | **18% faster** |
-| Prefill (no compress) | 23.78 | 3.31 | **619% faster** |
-| Prefill (compressed) | 23.99 | 3.59 | **568% faster** |
-| DDTree (chain-seed) | 3.16 | 2.53 | **25% faster** |
+| DFlash | 2.60 | 1.95 | **33% faster** |
+| DDTree Build | 3.19 | 2.78 | **15% faster** |
+| Speculative (Simulated) | 5.92 | 4.82 | **23% faster** |
+| Speculative (AR Draft) | 5.70 | 4.73 | **21% faster** |
+| Prefill (no compress) | 23.78 | 3.32 | **616% faster** |
+| Prefill (compressed) | 23.99 | 3.61 | **565% faster** |
+| DDTree (chain-seed) | 3.16 | 2.54 | **24% faster** |
 
 ### Speculative Decoding Pipeline
 

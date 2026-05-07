@@ -4,18 +4,20 @@
 
 | Method | Throughput | μs/step | Avg Accept Len |
 |--------|-----------|---------|---------------|
-| Transformer AR | 1,102,650 tok/s | 0.91 | 1.00 |
-| DFlash (sequential) | 4,205,854 tok/s | 1.90 | 8.00 |
-| DDTree Build | 362,181 trees/s | 2.76 | 16.00 |
-| Speculative (Simulated) | 1,039,176 tok/s | 4.81 | 5.00 |
-| Speculative (AR Draft) | 1,490,570 tok/s | 4.69 | 7.00 |
+| Transformer AR | 1,183,952 tok/s | 0.84 | 1.00 |
+| DFlash (sequential) | 4,103,213 tok/s | 1.95 | 8.00 |
+| DDTree Build | 359,998 trees/s | 2.78 | — |
+| Speculative (Simulated) | 1,038,308 tok/s | 4.82 | 5.00 |
+| Speculative (AR Draft) | 1,479,221 tok/s | 4.73 | 7.00 |
 | Leviathan (Algorithm 1) | 108,885 tok/s | 10.83 | 1.18 |
 | Leviathan (w/ rollback) | 161,324 tok/s | 7.28 | 1.18 |
 | Spec (conditioned) | 972,163 tok/s | 6.94 | 6.74 |
-| Prefill (no compress) | 16,962,509 tok/s | 3.77 | 64.00 |
-| Prefill (compressed) | 1,714,061 tok/s | 4.08 | 7.00 |
-| DDTree (no chain) | 364,458 trees/s | 2.74 | 16.00 |
-| DDTree (chain-seed) | 385,957 trees/s | 2.59 | 16.00 |
+| Prefill (no compress) | 19,257,295 tok/s | 3.32 | 64.00 |
+| Prefill (compressed) | 1,941,310 tok/s | 3.61 | 7.00 |
+| DDTree (no chain) | 358,447 trees/s | 2.79 | 16.00 |
+| DDTree (chain-seed) | 393,462 trees/s | 2.54 | 16.00 |
+| forward (flat) | 1,126,860 trees/s | 0.89 | — |
+| forward_paged | 980,192 trees/s | 1.02 | — |
 
 Speedup: Speculative vs AR went from **0.72×** → **1.48×** after zero-alloc optimization.
 
@@ -67,12 +69,12 @@ Every `dflash_predict`, `build_dd_tree`, and speculative step was allocating `Ve
 ### Impact
 | Method | Before | After | Change |
 |--------|--------|-------|--------|
-| DFlash | 3,058K tok/s | 4,206K tok/s | **+27%** |
-| DDTree Build | 309K trees/s | 362K trees/s | **+15%** |
-| Speculative (Simulated) | 834K tok/s | 1,039K tok/s | **+20%** |
-| Speculative (AR Draft) | 1,172K tok/s | 1,491K tok/s | **+21%** |
-| Prefill (no compress) | 2,639K tok/s | 16,963K tok/s | **+543%** |
-| Prefill (compressed) | 284K tok/s | 1,714K tok/s | **+504%** |
+| DFlash | 3,058K tok/s | 4,103K tok/s | **+34%** |
+| DDTree Build | 309K trees/s | 360K trees/s | **+16%** |
+| Speculative (Simulated) | 834K tok/s | 1,038K tok/s | **+24%** |
+| Speculative (AR Draft) | 1,172K tok/s | 1,479K tok/s | **+26%** |
+| Prefill (no compress) | 2,639K tok/s | 19,257K tok/s | **+630%** |
+| Prefill (compressed) | 284K tok/s | 1,941K tok/s | **+584%** |
 
 ## Rayon Parallelism
 

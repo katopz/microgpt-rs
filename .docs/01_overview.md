@@ -14,10 +14,10 @@ A from-scratch Rust implementation of a GPT-2 style transformer with speculative
 
 ## Current Capabilities
 
-- Single-token autoregressive generation: ~1.1M tok/s (micro config)
-- DFlash marginal prediction: ~4.2M tok/s
-- DDTree build: ~362K trees/s
-- Speculative decoding: ~1.5M tok/s (AR Draft)
+- Single-token autoregressive generation: ~1.18M tok/s (micro config)
+- DFlash marginal prediction: ~4.1M tok/s
+- DDTree build: ~360K trees/s
+- Speculative decoding: ~1.48M tok/s (AR Draft)
 - 240+ tests passing, zero clippy warnings
 
 ## Module Structure
