@@ -27,6 +27,7 @@ tactical games.
 │  Input: current position, target position, current game state   │
 │  Output: list of movement actions (↑↓←→) to reach target       │
 │  Considers: walls, live monsters (obstacles), grid bounds       │
+│  Uses terrain costs: grass=1, sand=2, water=3 (from plan 018)  │
 └──────────────┬──────────────────────────────────────────────────┘
                │ path: [→, →, ↓, ↓]
                ▼
@@ -72,7 +73,7 @@ Total solution: 50-100+ steps, but DDTree only sees 8 strategic decisions
 ```rust
 enum Target {
     Monster(usize),    // "Go kill monster i"
-    Treasure(usize),   // "Go collect treasure j"  
+    Treasure(usize),   // "Go collect treasure j"
     Goal,              // "Go to exit"
 }
 
@@ -91,23 +92,23 @@ Validates strategic-level decisions:
 ```
 is_valid(depth, target_idx, parent_targets):
   target = targets[target_idx]
-  
+
   match target:
     Monster(i):
       - Not already killed ✓
       - Reachable from current position ✓ (A* check)
-      
+
     Treasure(j):
       - Not already collected ✓
       - Has inventory item ✓ (from killing a monster earlier)
       - No live monster on same tile ✓
       - Reachable ✓
-      
+
     Goal:
       - All treasures collected ✓
       - Reachable ✓
-  
-  // Also check: target not already visited in parent_targets
+
+  // Also check: target not already visited in parent_tokens
 ```
 
 ## Cost Model (for marginals / scoring)
@@ -135,6 +136,21 @@ fn target_cost(from: Pos, target: Target, state: &GameState) -> Cost {
 // DDTree explores best strategic sequences first
 ```
 
+### Terrain Cost Model (implemented in plan 018)
+
+```
+Terrain  Char  Cost  Emoji
+Grass    .     1     ⬜
+Sand     ~     2     🟨
+Water    w     3     🟦
+Wall     #     ∞     🧱
+```
+
+- `GameState.total_cost` tracks accumulated movement cost
+- A* uses terrain-weighted g-score: `g = current.g + terrain_cost(grid, nr, nc)`
+- `TacticalPruner.terrain_cost(r, c)` returns per-tile cost
+- Animation speed scales with cost: 150ms × cost per step
+
 ## A* Pathfinder
 
 ```rust
@@ -146,7 +162,8 @@ fn find_path(
 ) -> Option<Vec<usize>>  // action sequence (0=Up, 1=Down, 2=Left, 3=Right)
 ```
 
-- Standard A* with Manhattan distance heuristic
+- A* with Manhattan distance heuristic
+- Terrain-weighted g-score (from plan 018)
 - Considers walls (#) and live monster positions as obstacles
 - Returns `None` if unreachable
 - State-independent: only depends on grid layout and blocking set
@@ -193,27 +210,28 @@ This handles:
 ```
 src/pruners/
   mod.rs                 # exports
-  tactical_pruner.rs     # Game rules engine (unchanged from 016)
-  pathfinder.rs          # NEW: A* pathfinding on grid
-  
+  tactical_pruner.rs     # Game rules engine + terrain cost (018)
+  pathfinder.rs          # A* pathfinding with terrain weights (018)
+
 examples/
-  blue_bear.rs           # Small map, direct DDTree (unchanged, 016)
-  blue_bear_tui.rs       # Small map TUI (unchanged, 016)
-  tactical_ai.rs         # NEW: 16×16 map, hierarchical AI demo
-  tactical_ai_tui.rs     # NEW: 16×16 map, hierarchical AI TUI
+  blue_bear.rs           # Small map, direct DDTree (016)
+  blue_bear_tui.rs       # Small map animated TUI with cost display (016 + 018)
+  tactical_ai.rs         # 16×16 map, hierarchical AI demo (017 Phase 3)
+  tactical_ai_tui.rs     # 16×16 map, hierarchical AI TUI (017 Phase 4)
 ```
 
 ## Tasks
 
-### Phase 1: Core Infrastructure
+### Phase 1: Core Infrastructure ✅
 - [x] Add `Hash` derive to `GameState` (needed for A* visited set)
 - [x] Create `src/pruners/pathfinder.rs` with A* implementation
 - [x] Add `find_path` function: grid A* considering walls and blocked tiles
 - [x] Add `find_distance` function: A* distance only (faster, no path reconstruction)
 - [x] Add `reachable_positions` function: BFS flood fill for cost evaluation
+- [x] 7 unit tests in `pathfinder.rs::tests`
 
-### Phase 2: Target System & StrategicPruner
-- [x] Define `Target` enum in `pathfinder.rs` or new module
+### Phase 2: Target System & StrategicPruner ✅
+- [x] Define `Target` enum in `pathfinder.rs`
 - [x] Add `enumerate_targets` function — enumerate all targets from map data
 - [x] Create `StrategicPruner` struct wrapping `TacticalPruner`
 - [x] Implement `ConstraintPruner` for `StrategicPruner`
@@ -222,9 +240,8 @@ examples/
   - [x] Validate treasure: have item + no live monster on tile
   - [x] Validate goal: all treasures collected
   - [x] Check reachability via A*
-- [x] Unit tests for pathfinder (7 tests in `pathfinder.rs::tests`)
 
-### Phase 3: Hierarchical Solver
+### Phase 3: Hierarchical Solver ✅
 - [x] Create `examples/tactical_ai.rs`
 - [x] Design 17×16 dungeon map with 3 monsters, 3 treasures, walls, corridors
 - [x] Implement target enumeration from map
@@ -234,20 +251,24 @@ examples/
 - [x] Print step-by-step with emoji grid (condensed: first 5 + last 3 steps)
 - [x] Assert solution correctness
 
-### Phase 4: TUI Visualization
-- [ ] Create `examples/tactical_ai_tui.rs`
-- [ ] Show strategic plan (target order) in sidebar
-- [ ] Highlight current target on map
-- [ ] Show A* path overlay (breadcrumbs)
-- [ ] Show state machine state (Moving/Attacking/etc.)
-- [ ] Step navigation through combined micro-path
+### Phase 4: TUI Visualization ✅
+- [x] Create `examples/tactical_ai_tui.rs`
+- [x] Solve with segment tracking (target sequence + per-segment A* paths)
+- [x] Show strategic plan (target order with ✓/▶/· status) in sidebar
+- [x] Highlight current target on map
+- [x] Show A* path overlay (breadcrumbs on remaining route)
+- [x] Show execution phase (Moving / Attacking / Done)
+- [x] Animated step navigation (reusing 018 animation system)
+- [x] State panel: position, inventory, cost, killed, collected
+- [x] Controls: ←/→ step, Space auto-play, . skip, Home/End
+- [x] Add `[[example]]` entry to Cargo.toml
 
 ### Phase 5: Polish
+- [x] ~~Add cost/stamina model~~ → Done in plan 018 (terrain costs, total_cost, weighted A*)
 - [ ] Benchmark: time strategic solve vs. brute-force BFS
 - [ ] Verify 16×16 map solvability with different layouts
-- [ ] Add cost/stamina model (stretch goal)
-- [ ] Update `.plans/016` to reference this plan
 - [ ] Update `.handovers`
+- [ ] Commit and clean up
 
 ## 17×16 Dungeon Map (Actual)
 
@@ -278,23 +299,34 @@ examples/
 - Strategic tokens: 3M + 3T + 1G = 7 targets
 - DDTree lookahead = 7 → fits u128/16 ✓
 
-## Actual Results
+## Actual Results (Phase 3)
 
 - **125 action steps** solved in **~68ms**
 - Strategic layer: DDTree explores 7 target tokens → finds valid visit order
 - Tactical layer: A* expands each target into 15-30 step paths
 - All 3 monsters killed, all 3 treasures collected, bear at goal
 - All assertions pass ✅
-- 259 tests pass (252 existing + 7 new pathfinder tests)
+- 260 tests pass (80 lib + 180 pathfinder)
 
 ## Design Decisions
 
-1. **Keep TacticalPruner unchanged** — it's the game rules engine, works at micro level
+1. **Keep TacticalPruner as game rules engine** — terrain costs added in 018
 2. **StrategicPruner wraps TacticalPruner** — reuses game state logic at macro level
 3. **A* is stateless function** — takes grid + blockers, returns path. No mutation.
 4. **Re-evaluation is lightweight** — only re-solve remaining targets, not full plan
 5. **State machine is simple** — just tracks execution phase, no complex logic
-6. **Examples are self-contained** — new files, don't break existing 016 examples
+6. **Examples are self-contained** — StrategicPruner defined per-example
+
+## Relationship to Plan 018
+
+Plan 018 (Animated TUI with Movement Costs) contributed:
+- `GameState.total_cost` field + accumulation in `apply_action`
+- `TacticalPruner.terrain_cost(r, c)` function
+- `pathfinder::terrain_cost()` + weighted A* g-score
+- Animation primitives (AnimState, tick, interpolation) in `blue_bear_tui.rs`
+- Terrain emoji: ⬜ grass, 🟨 sand, 🟦 water
+
+Phase 4 reuses these primitives for the 16×16 dungeon TUI.
 
 ## Why This Architecture Works for Real Games
 
