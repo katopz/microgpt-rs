@@ -150,6 +150,15 @@ pub fn run_all(config: &Config) -> Vec<BenchResult> {
     results.push(flat_br);
     results.push(paged_br);
 
+    // WasmPruner vs NoPruner DDTree build comparison
+    #[cfg(feature = "wasm")]
+    results.extend(bench_wasm_vs_no_pruner(
+        &draft_weights,
+        &draft_config,
+        warmup,
+        iters,
+    ));
+
     results
 }
 
@@ -259,7 +268,73 @@ fn bench_ddtree(
     }
 }
 
-/// Speculative decoding with SimulatedVerifier (DFlash + DDTree + simulated 75% acceptance).
+#[cfg(feature = "wasm")]
+fn bench_wasm_vs_no_pruner(
+    draft_weights: &TransformerWeights,
+    draft_config: &Config,
+    warmup: usize,
+    iters: usize,
+) -> Vec<BenchResult> {
+    use crate::wasm::WasmPruner;
+
+    let wasm_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../riir-validator-sdk/target/wasm32-unknown-unknown/release/examples/bracket_validator.wasm");
+
+    let wasm_pruner = match WasmPruner::load_from_file(wasm_path.to_str().unwrap_or("")) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("⚠️  Skipping WasmPruner benchmark: {e}");
+            return Vec::new();
+        }
+    };
+
+    let mut sctx = SpeculativeContext::new(draft_config);
+    sctx.reset();
+    dflash_predict_with(&mut sctx, draft_weights, draft_config, 0, 0);
+    let marginals_view: Vec<&[f32]> = (0..sctx.steps_populated)
+        .map(|step| sctx.marginal_slice(step, draft_config.vocab_size))
+        .collect();
+
+    let mut tree_builder = TreeBuilder::new(draft_config);
+
+    for _ in 0..warmup {
+        let _ = tree_builder.build(&marginals_view, draft_config, &NoPruner, false);
+    }
+    for _ in 0..warmup {
+        let _ = tree_builder.build(&marginals_view, draft_config, &wasm_pruner, false);
+    }
+
+    let start = Instant::now();
+    for _ in 0..iters {
+        let _ = tree_builder.build(&marginals_view, draft_config, &NoPruner, false);
+    }
+    let no_pruner_elapsed = start.elapsed();
+
+    let start = Instant::now();
+    for _ in 0..iters {
+        let _ = tree_builder.build(&marginals_view, draft_config, &wasm_pruner, false);
+    }
+    let wasm_elapsed = start.elapsed();
+
+    let wasm_name = wasm_pruner.name();
+    vec![
+        BenchResult {
+            label: "DDTree+NoPruner".into(),
+            throughput: iters as f64 / no_pruner_elapsed.as_secs_f64(),
+            time_per_step_us: no_pruner_elapsed.as_micros() as f64 / iters as f64,
+            avg_acceptance_len: 0.0,
+            color: (100, 200, 100),
+        },
+        BenchResult {
+            label: format!("DDTree+WasmPruner({wasm_name})"),
+            throughput: iters as f64 / wasm_elapsed.as_secs_f64(),
+            time_per_step_us: wasm_elapsed.as_micros() as f64 / iters as f64,
+            avg_acceptance_len: 0.0,
+            color: (200, 100, 200),
+        },
+    ]
+}
+
 fn bench_speculative(
     draft_weights: &TransformerWeights,
     draft_config: &Config,
@@ -1049,6 +1124,15 @@ pub fn run_all_parallel(config: &Config) -> Vec<BenchResult> {
     let (flat_br, paged_br) = bench_paged_vs_flat_cache(config);
     results.push(flat_br);
     results.push(paged_br);
+
+    // WasmPruner vs NoPruner DDTree build comparison
+    #[cfg(feature = "wasm")]
+    results.extend(bench_wasm_vs_no_pruner(
+        &draft_weights,
+        &draft_config,
+        warmup,
+        iters,
+    ));
 
     results
 }

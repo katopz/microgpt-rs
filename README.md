@@ -459,9 +459,52 @@ cargo clippy --all-targets --all-features --quiet
 | `validator` | `syn`, `proc-macro2` | SynPruner + partial parser |
 | `rest` | `reqwest`, `tokio` | REST module |
 | `gpu` | `wgpu`, `bytemuck`, `pollster`, `safetensors` | wgpu context & buffers |
+| `wasm` | `wasmtime`, `wat` | WASM validator runtime (WasmPruner) |
 | `full` | all above (except leviathan, always on) | Enable all features |
 
 Build with `--features <flag>` or `--all-features`.
+
+## 🔌 WASM Validator Pipeline
+
+Curators can write domain-specific constraint validators in Rust, compile them to `.wasm`, and have the DDTree load them at runtime.
+
+### Quick Start
+
+```sh
+# 1. Write a validator using the SDK
+cargo add riir-validator-sdk
+
+# 2. Implement the Validator trait
+# See: https://github.com/katopz/riir-validator-sdk/examples/
+
+# 3. Build for WASM
+cargo build --target wasm32-unknown-unknown --release
+
+# 4. Check the validator locally
+riir-validator-check target/wasm32-unknown-unknown/release/examples/your_validator.wasm
+
+# 5. Use with microgpt-rs
+cargo run --features wasm
+```
+
+### WASM ABI
+
+| Export | Signature | Description |
+|--------|-----------|-------------|
+| `is_valid` | `(u32, u32, u32, u32) -> u32` | Token-level validation |
+| `validate_string` | `(u32, u32) -> u32` | String-level validation |
+| `name` | `() -> u32` | Pointer to null-terminated name |
+| `version` | `() -> u32` | Packed `(major << 16) \| (minor << 8) \| patch` |
+
+### Constraints
+- **No WASI imports** — fully sandboxed
+- **No floating-point** — deterministic across platforms
+- **Max memory: 64 pages (4MB)**
+- **Max execution: ~100μs per call** — fuel-based enforcement
+
+### Example Validators
+- `bracket_validator` — bracket balancing (like PartialParser)
+- `keyword_validator` — Rust keyword placement rules
 
 ## 📁 Project Structure
 
@@ -485,6 +528,7 @@ src/
   validator/        SynPruner + partial parser ‡
   gpu/              wgpu context & buffers §
   rest/             REST module ¶
+  wasm/             WasmPruner + WASM runtime (abi, state, wasmtime loader) †
   percepta.rs       Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
                     Sudoku9x9, SymbolicValidator, StreamingSolver, SolveEvent
   benchmark.rs      BenchResult, run_all, save_results_csv (AR / DFlash / DDTree / Speculative / AR Draft / Leviathan)
@@ -493,6 +537,7 @@ src/
   ‡ behind --features validator
   § behind --features gpu
   ¶ behind --features rest
+  † behind --features wasm
 examples/
   sudoku_9x9.rs          Streaming solver with "thinking" output + hull compression stats *
   sudoku_speculative.rs  3-column DDTree comparison: Unpruned / Static-Only / Path-Aware *

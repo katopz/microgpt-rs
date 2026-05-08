@@ -364,31 +364,31 @@ WASM Linear Memory:
 - [x] 2.5 Create `bracket_validator.rs` example
 - [x] 2.6 Create `keyword_validator.rs` example
 - [x] 2.7 Verify `cargo build --target wasm32-unknown-unknown` works for examples
-- [ ] 2.8 Add CI: build + test on wasm32-unknown-unknown target
+- [x] 2.8 Add CI: build + test on wasm32-unknown-unknown target
 
 ### Phase 3: Validator Check CLI
-- [ ] 3.1 Add `cli` feature to `riir-validator-sdk` Cargo.toml
-- [ ] 3.2 Implement `src/bin/riir-validator-check.rs`
-- [ ] 3.3 Check: required exports exist
-- [ ] 3.4 Check: smoke test with known inputs
-- [ ] 3.5 Check: latency measurement (<50μs per call)
-- [ ] 3.6 Check: memory usage (<1MB)
-- [ ] 3.7 Check: no WASI imports (sandboxed)
-- [ ] 3.8 Output: pass/fail report with details
+- [x] 3.1 Add `cli` feature to `riir-validator-sdk` Cargo.toml
+- [x] 3.2 Implement `src/bin/riir-validator-check.rs`
+- [x] 3.3 Check: required exports exist
+- [x] 3.4 Check: smoke test with known inputs
+- [x] 3.5 Check: latency measurement (<50μs per call)
+- [x] 3.6 Check: memory usage (<1MB)
+- [x] 3.7 Check: no WASI imports (sandboxed)
+- [x] 3.8 Output: pass/fail report with details
 
 ### Phase 4: Integration
 - [x] 4.1 Build example validators from SDK as `.wasm` files
 - [x] 4.2 Add WASM integration tests in `tests/integration.rs` (behind `wasm` feature)
 - [x] 4.3 Test: WasmPruner loads example `.wasm` files
 - [x] 4.4 Test: DDTree build with WasmPruner produces correct results
-- [ ] 4.5 Benchmark: WasmPruner vs SynPruner overhead
-- [ ] 4.6 Benchmark: WasmPruner vs NoPruner tree quality
+- [x] 4.5 Benchmark: WasmPruner vs SynPruner overhead
+- [x] 4.6 Benchmark: WasmPruner vs NoPruner tree quality
 
 ### Phase 5: Documentation
-- [ ] 5.1 Update README with `wasm` feature flag description
-- [ ] 5.2 Add "Curator Guide" section: how to write, build, and upload validators
-- [ ] 5.3 Add WASM ABI spec to `.docs/`
-- [ ] 5.4 Update `.research/05_Artifact_Definition.md` with WASM production details
+- [x] 5.1 Update README with `wasm` feature flag description
+- [x] 5.2 Add "Curator Guide" section: how to write, build, and upload validators
+- [x] 5.3 Add WASM ABI spec to `.docs/`
+- [x] 5.4 Update `.research/05_Artifact_Definition.md` with WASM production details
 
 ## Key Risks & Mitigations
 

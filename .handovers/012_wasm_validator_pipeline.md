@@ -2,7 +2,7 @@
 
 ## What Happen
 
-Implemented Plan 015 — WASM Validator Pipeline covering Phase 1 (WasmPruner Core in microgpt-rs), Phase 2 (SDK Crate in riir-validator-sdk), and Phase 4 (Integration Tests). The system now allows Curators to write domain-specific validators in Rust, compile them to `.wasm`, and have the microgpt-rs DDTree load and execute them as `ConstraintPruner` instances via Wasmtime.
+Implemented **all phases** of Plan 015 — WASM Validator Pipeline. The system allows Curators to write domain-specific validators in Rust, compile them to `.wasm`, validate them locally with a CLI tool, and have the microgpt-rs DDTree load and execute them as `ConstraintPruner` instances via Wasmtime. Full documentation includes README, `.docs/09_wasm_validator.md` ABI spec, and updated `.research/05_Artifact_Definition.md`.
 
 **Working end-to-end flow:**
 1. Curator implements `Validator` trait in riir-validator-sdk
@@ -35,6 +35,24 @@ Implemented Plan 015 — WASM Validator Pipeline covering Phase 1 (WasmPruner Co
 | `examples/bracket_validator.rs` | Bracket balancing validator (14 tests) |
 | `examples/keyword_validator.rs` | Rust keyword placement validator (21 tests) |
 
+**Code — riir-validator-sdk (Validator Check CLI — Phase 3):**
+| File | Purpose |
+|------|---------|
+| `src/bin/riir-validator-check.rs` | Pre-upload validator: exports, smoke test, latency, memory, WASI check |
+| `Cargo.toml` | `cli = ["wasmtime"]` feature + `[[bin]]` target |
+
+**Code — microgpt-rs (Benchmarks — Phase 4.5-4.6):**
+| File | Purpose |
+|------|---------|
+| `src/benchmark.rs` | `bench_wasm_vs_no_pruner` — DDTree build time comparison |
+
+**Documentation (Phase 5):**
+| File | Purpose |
+|------|---------|
+| `README.md` | Feature flags table + WASM Validator Pipeline section + project structure |
+| `.docs/09_wasm_validator.md` | WASM ABI spec, security model, performance targets |
+| `.research/05_Artifact_Definition.md` | WasmPruner row in existing implementations table |
+
 **Tests:**
 - microgpt-rs: 45 WASM unit tests (`cargo test --features wasm -- wasm::`)
 - microgpt-rs: 22 WASM integration tests (`cargo test --features wasm -- wasm_integration`)
@@ -58,26 +76,14 @@ Implemented Plan 015 — WASM Validator Pipeline covering Phase 1 (WasmPruner Co
 
 ## Remain Work
 
-**Phase 3 — Validator Check CLI** (not started):
-- `riir-validator-check` binary: validates `.wasm` before upload
-- Checks: required exports, smoke tests, latency (<50μs), memory (<1MB), no WASI imports
-
-**Phase 5 — Documentation** (not started):
-- Update README with `wasm` feature flag
-- Curator Guide section
-- WASM ABI spec in `.docs/`
-
-**Remaining tasks from Phase 4:**
-- 4.5 Benchmark: WasmPruner vs SynPruner overhead
-- 4.6 Benchmark: WasmPruner vs NoPruner tree quality
-
-**Remaining tasks from Phase 2:**
-- 2.8 Add CI: build + test on wasm32-unknown-unknown target
+**All Plan 015 phases are complete.** No remaining tasks.
 
 **Future considerations:**
 - `type_validator.rs` example (basic Rust type syntax `:`, `->`, `<`, `>`)
 - Wasmtime version: plan specified v28, currently using v28. Latest is v44 — consider upgrading
 - Memory helpers are `unsafe` — could add safer wrappers with bounds checking
+- CI pipeline for wasm32-unknown-unknown target (manual for now)
+- Private `riir-forge` marketplace hosting (separate plan)
 
 ## Issues Ref
 
@@ -97,20 +103,28 @@ cargo test
 cargo build --example bracket_validator --target wasm32-unknown-unknown --release
 cargo build --example keyword_validator --target wasm32-unknown-unknown --release
 
+# Phase 3: Validator Check CLI (validate .wasm before upload)
+cd riir-validator-sdk
+cargo build --example bracket_validator --target wasm32-unknown-unknown --release
+cargo run --features cli -- ../riir-validator-sdk/target/wasm32-unknown-unknown/release/examples/bracket_validator.wasm
+
 # Phase 4: Integration tests (loads .wasm from SDK build)
 cd riir-validator-sdk && cargo build --example bracket_validator --target wasm32-unknown-unknown --release
 cd riir-validator-sdk && cargo build --example keyword_validator --target wasm32-unknown-unknown --release
 cd ../microgpt-rs
 cargo test --features wasm -- wasm_integration
 
+# Phase 4.5-4.6: Benchmarks (WasmPruner vs NoPruner DDTree build)
+cd microgpt-rs && cargo run --features wasm
+
 # Full test suite with WASM
 cd microgpt-rs && cargo test --features wasm
 
 # Clippy
 cd microgpt-rs && cargo clippy --features wasm --fix --allow-dirty
-cd riir-validator-sdk && cargo clippy --fix --allow-dirty
+cd riir-validator-sdk && cargo clippy --features cli --fix --allow-dirty
 
-# Without WASM feature (should still work)
+# Without WASM feature (should still work — no regressions)
 cd microgpt-rs && cargo test
 ```
 

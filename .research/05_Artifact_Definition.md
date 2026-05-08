@@ -38,6 +38,7 @@ In this neuro-symbolic architecture (microgpt-rs + anyrag), there are exactly **
 | `SudokuPruner` | `src/speculative/sudoku_pruner.rs` | Path-aware row/col/box constraint checking |
 | `SynPruner` | `src/validator/syn_pruner.rs` | Two-tier Rust syntax validation (bracket DFA + `syn` parse) |
 | `PartialParser` | `src/validator/partial_parser.rs` | Tier 0: O(n) bracket balancing DFA |
+| `WasmPruner` | `src/wasm/wasm_pruner.rs` | WASM sandboxed validator via Wasmtime (fuel-limited) |
 
 All implement the same `ConstraintPruner` trait:
 
