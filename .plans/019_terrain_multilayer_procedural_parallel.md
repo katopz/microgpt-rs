@@ -12,7 +12,7 @@
 - [x] Phase 4: Parallel Batch Solving
 - [x] Phase 5: Benchmark & Verify
 - [x] Update `.handovers`
-- [ ] Commit and clean up
+- [x] Commit and clean up
 
 ---
 
