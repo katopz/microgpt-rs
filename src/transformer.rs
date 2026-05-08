@@ -813,6 +813,299 @@ impl PagedKVCache {
     }
 }
 
+// ── Raven RSM (Routing Slot Memory) ────────────────────────────
+// Distilled from "Raven: High-Recall Sequence Modeling with Sparse Memory Routing"
+// See .research/06_Raven_Routing_Slot_Memories.md for full derivation.
+//
+// Replaces the growing [block_size, kv_dim] cache with a fixed [num_slots, kv_dim]
+// memory updated via sparse Top-K routing. Unselected slots are completely frozen.
+// Per-token compute: O(num_slots) — constant regardless of sequence length.
+
+/// Raven Routing Slot Memory — O(1) KV replacement for the draft model.
+///
+/// Fixed-size `[num_slots × kv_dim]` memory updated via sparse Top-K routing.
+/// Unselected slots are completely frozen — perfect for preserving struct
+/// definitions and imports while churning through syntax tokens.
+pub struct RavenKVCache {
+    /// Number of memory slots
+    pub num_slots: usize,
+    /// Dimension of each KV entry (= kv_dim = n_kv_head × head_dim)
+    pub kv_dim: usize,
+    /// Top-K slots to update per token
+    pub top_k: usize,
+    /// Forget rate for gated update (negative = slower decay)
+    pub forget_rate: f32,
+    /// Key memory: [num_slots × kv_dim]
+    pub keys: Vec<f32>,
+    /// Value memory: [num_slots × kv_dim]
+    pub values: Vec<f32>,
+}
+
+impl RavenKVCache {
+    pub fn new(config: &Config, num_slots: usize, top_k: usize) -> Self {
+        let kvd = types::kv_dim(config);
+        Self {
+            num_slots,
+            kv_dim: kvd,
+            top_k,
+            forget_rate: -1.0,
+            keys: vec![0.0; num_slots * kvd],
+            values: vec![0.0; num_slots * kvd],
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.keys.fill(0.0);
+        self.values.fill(0.0);
+    }
+}
+
+/// Sparse router: computes Top-K routing vector from raw logits.
+///
+/// Implements: `r_t = Normalize(TopK(Sigmoid(raw_logits)))`
+/// Unselected slots get 0.0 → completely frozen during update.
+pub fn raven_compute_router(raw_logits: &[f32], top_k: usize) -> Vec<f32> {
+    let num_slots = raw_logits.len();
+    let top_k = top_k.min(num_slots);
+
+    // Sigmoid + enumerate
+    let mut scored: Vec<(usize, f32)> = raw_logits
+        .iter()
+        .enumerate()
+        .map(|(i, &x)| (i, 1.0 / (1.0 + (-x).exp())))
+        .collect();
+
+    // Partial sort: find Top-K by descending score (O(n) average)
+    if top_k < num_slots {
+        scored.select_nth_unstable_by(num_slots - top_k, |a, b| {
+            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+
+    let mut r_t = vec![0.0f32; num_slots];
+    let mut sum = 0.0f32;
+
+    // Keep only Top-K (the last top_k elements after partial sort are the largest)
+    for (idx, score) in scored.iter().rev().take(top_k) {
+        r_t[*idx] = *score;
+        sum += *score;
+    }
+
+    // Normalize so selected slots sum to 1.0
+    if sum > 0.0 {
+        for v in r_t.iter_mut() {
+            *v /= sum;
+        }
+    }
+
+    r_t
+}
+
+/// Gated memory update: Raven Equation 18.
+///
+/// For each slot:
+///   `decay = exp(forget_rate × r_t[slot])`
+///   `H_new = decay × H_old + (1 - decay) × new_content`
+///
+/// When `r_t[slot] == 0`: `decay = exp(0) = 1.0` → `H_new = H_old` (FROZEN)
+/// When `r_t[slot] > 0`: `decay < 1.0` → old content decays, new writes in
+#[allow(clippy::too_many_arguments)]
+pub fn raven_update(
+    keys: &mut [f32],
+    values: &mut [f32],
+    new_key: &[f32],
+    new_value: &[f32],
+    r_t: &[f32],
+    forget_rate: f32,
+    num_slots: usize,
+    kv_dim: usize,
+) {
+    for (slot, &route) in r_t.iter().enumerate().take(num_slots) {
+        let decay = (forget_rate * route).exp();
+        let write = 1.0 - decay;
+        let offset = slot * kv_dim;
+
+        for d in 0..kv_dim {
+            keys[offset + d] = decay * keys[offset + d] + write * new_key[d];
+            values[offset + d] = decay * values[offset + d] + write * new_value[d];
+        }
+    }
+}
+
+/// Readout: attention over fixed slot memory.
+/// `O(num_slots × kv_dim)` — constant regardless of sequence length.
+pub fn raven_readout(
+    query: &[f32],
+    keys: &[f32],
+    values: &[f32],
+    num_slots: usize,
+    kv_dim: usize,
+) -> Vec<f32> {
+    // Q · K^T
+    let scores: Vec<f32> = keys
+        .chunks(kv_dim)
+        .take(num_slots)
+        .map(|k_chunk| query.iter().zip(k_chunk).map(|(q, k)| q * k).sum())
+        .collect();
+
+    let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+    // Softmax + weighted value sum
+    let sum_exp: f32 = scores.iter().map(|s| (*s - max_score).exp()).sum();
+    let mut output = vec![0.0f32; kv_dim];
+    for (weight, v_chunk) in scores
+        .iter()
+        .map(|s| (s - max_score).exp() / sum_exp)
+        .zip(values.chunks(kv_dim).take(num_slots))
+    {
+        for (out, v) in output.iter_mut().zip(v_chunk) {
+            *out += weight * v;
+        }
+    }
+
+    output
+}
+
+/// Forward pass using `RavenKVCache` instead of `MultiLayerKVCache`.
+///
+/// Identical computation to `forward()` except attention:
+/// - Generates router logits from K projection (dummy: use K directly)
+/// - Calls `raven_update()` instead of writing to flat KV array
+/// - Calls `raven_readout()` instead of scanning all past positions
+/// - Everything else (RMSNorm, MLP, residual, LM head) stays identical
+pub fn forward_raven<'a>(
+    ctx: &'a mut ForwardContext,
+    weights: &TransformerWeights,
+    cache: &mut RavenKVCache,
+    token: usize,
+    pos: usize,
+    config: &Config,
+) -> &'a mut [f32] {
+    let n = config.n_embd;
+    let hd = config.head_dim;
+    let kvd = types::kv_dim(config);
+    let n_kv = config.n_kv_head;
+
+    // 1. Embedding: x = wte[token] + wpe[pos]
+    let tok_off = token * n;
+    let pos_off_emb = pos * n;
+    for i in 0..n {
+        unsafe {
+            *ctx.x.get_unchecked_mut(i) = *weights.wte.get_unchecked(tok_off + i)
+                + *weights.wpe.get_unchecked(pos_off_emb + i);
+        }
+    }
+
+    // 2. Layer loop
+    for layer_weights in &weights.layers {
+        // Pre-attention: RMSNorm → save residual → RMSNorm
+        rmsnorm(&mut ctx.x);
+        ctx.xr[..n].copy_from_slice(&ctx.x[..n]);
+        rmsnorm(&mut ctx.x);
+
+        // QKV projections
+        matmul(&mut ctx.q, &layer_weights.attn_wq, &ctx.x, n, n);
+        matmul(&mut ctx.k, &layer_weights.attn_wk, &ctx.x, kvd, n);
+        matmul(&mut ctx.v, &layer_weights.attn_wv, &ctx.x, kvd, n);
+
+        // Raven: generate router logits from K (dummy projection)
+        // For PoC: use first num_slots elements of K repeated as logits.
+        // In production, this would be a learned linear projection: W_route × x_t
+        let router_logits: Vec<f32> = (0..cache.num_slots).map(|i| ctx.k[i % kvd]).collect();
+
+        // Raven: compute sparse routing vector
+        let r_t = raven_compute_router(&router_logits, cache.top_k);
+
+        // Raven: gated update (only selected slots are modified)
+        raven_update(
+            &mut cache.keys,
+            &mut cache.values,
+            &ctx.k,
+            &ctx.v,
+            &r_t,
+            cache.forget_rate,
+            cache.num_slots,
+            kvd,
+        );
+
+        // Raven: readout via attention over fixed slots (O(num_slots) not O(pos))
+        let scale = 1.0 / (hd as f32).sqrt();
+        ctx.attn_out[..n].fill(0.0);
+
+        for h in 0..config.n_head {
+            let q_off = h * hd;
+            // Each head reads from the slot memory using its query slice
+            let head_query = &ctx.q[q_off..q_off + hd];
+            // Pad/reshape query to kv_dim for slot attention
+            let mut full_query = vec![0.0f32; kvd];
+            let kv_group = h * n_kv / config.n_head;
+            for d in 0..hd {
+                full_query[kv_group * hd + d] = head_query[d] * scale;
+            }
+
+            let slot_values = raven_readout(
+                &full_query,
+                &cache.keys,
+                &cache.values,
+                cache.num_slots,
+                kvd,
+            );
+
+            // Extract this head's attention output
+            for d in 0..hd {
+                unsafe {
+                    *ctx.attn_out.get_unchecked_mut(q_off + d) = slot_values[kv_group * hd + d];
+                }
+            }
+        }
+
+        // Output projection + residual
+        matmul(&mut ctx.x, &layer_weights.attn_wo, &ctx.attn_out, n, n);
+        for i in 0..n {
+            unsafe {
+                *ctx.x.get_unchecked_mut(i) += *ctx.xr.get_unchecked(i);
+            }
+        }
+
+        // MLP: save residual → RMSNorm → MLP → residual
+        ctx.xr2[..n].copy_from_slice(&ctx.x[..n]);
+        rmsnorm(&mut ctx.x);
+        types::matmul_relu(
+            &mut ctx.hidden,
+            &layer_weights.mlp_w1,
+            &ctx.x,
+            config.mlp_hidden,
+            n,
+        );
+        matmul(
+            &mut ctx.x,
+            &layer_weights.mlp_w2,
+            &ctx.hidden,
+            n,
+            config.mlp_hidden,
+        );
+        for i in 0..n {
+            unsafe {
+                *ctx.x.get_unchecked_mut(i) += *ctx.xr2.get_unchecked(i);
+            }
+        }
+    }
+
+    // Snapshot hidden state
+    ctx.hidden_state[..n].copy_from_slice(&ctx.x[..n]);
+
+    // LM Head
+    matmul(
+        &mut ctx.logits,
+        &weights.lm_head,
+        &ctx.x,
+        config.vocab_size,
+        n,
+    );
+
+    &mut ctx.logits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -78,5 +78,8 @@ name = "tactical_parallel"
 name = "blue_bear_tui"
 
 [[example]]
+name = "raven_recall"
+
+[[example]]
 name = "validator_demo"
 required-features = ["validator"]

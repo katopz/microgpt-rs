@@ -4,8 +4,8 @@ use crate::speculative::{
     speculative_step_verifier,
 };
 use crate::transformer::{
-    ForwardContext, MultiLayerKVCache, PagedKVCache, TransformerWeights, forward, forward_paged,
-    generate_into, tokens_to_string,
+    ForwardContext, MultiLayerKVCache, PagedKVCache, RavenKVCache, TransformerWeights, forward,
+    forward_paged, forward_raven, generate_into, raven_readout, raven_update, tokens_to_string,
 };
 use crate::types::{Config, Rng, softmax};
 use rayon::prelude::*;
@@ -149,6 +149,14 @@ pub fn run_all(config: &Config) -> Vec<BenchResult> {
     let (flat_br, paged_br) = bench_paged_vs_flat_cache(config);
     results.push(flat_br);
     results.push(paged_br);
+
+    // Raven RSM cache (draft model) — flat already measured above
+    let (_, raven_br) = bench_raven_vs_flat_cache(config);
+    results.push(raven_br);
+
+    // Raven recall accuracy after noise
+    let recall_br = bench_raven_recall(config);
+    results.push(recall_br);
 
     // WasmPruner vs NoPruner DDTree build comparison
     #[cfg(feature = "wasm")]
@@ -1027,6 +1035,179 @@ pub fn bench_paged_vs_flat_cache(config: &Config) -> (BenchResult, BenchResult) 
     };
 
     (flat_result, paged_result)
+}
+
+/// Benchmark: Raven RSM vs flat KV cache for draft model.
+///
+/// Compares per-token throughput of `forward_raven()` (O(1) slot memory)
+/// against standard `forward()` (O(N) growing cache).
+pub fn bench_raven_vs_flat_cache(_config: &Config) -> (BenchResult, BenchResult) {
+    let draft_config = Config::draft();
+    let mut rng = Rng::new(42);
+    let draft_weights = TransformerWeights::new(&draft_config, &mut rng);
+    let iters = 200;
+
+    // Raven config: 16 slots, top-4 routing (4x kv_dim for draft)
+    let num_slots = 16;
+    let top_k = 4;
+
+    // Warm up both paths
+    {
+        let mut ctx = ForwardContext::new(&draft_config);
+        let mut cache = MultiLayerKVCache::new(&draft_config);
+        let _ = forward(&mut ctx, &draft_weights, &mut cache, 0, 0, &draft_config);
+    }
+    {
+        let mut ctx = ForwardContext::new(&draft_config);
+        let mut cache = RavenKVCache::new(&draft_config, num_slots, top_k);
+        let _ = forward_raven(&mut ctx, &draft_weights, &mut cache, 0, 0, &draft_config);
+    }
+
+    // Benchmark flat cache (growing O(N) attention)
+    let mut ctx_flat = ForwardContext::new(&draft_config);
+    let mut cache_flat = MultiLayerKVCache::new(&draft_config);
+    let start_flat = Instant::now();
+    for _ in 0..iters {
+        cache_flat.reset();
+        let max_pos = draft_config.block_size.min(8);
+        for pos in 0..max_pos {
+            let _ = forward(
+                &mut ctx_flat,
+                &draft_weights,
+                &mut cache_flat,
+                0,
+                pos,
+                &draft_config,
+            );
+        }
+    }
+    let elapsed_flat = start_flat.elapsed();
+
+    // Benchmark Raven cache (fixed O(slots) attention)
+    let mut ctx_raven = ForwardContext::new(&draft_config);
+    let mut cache_raven = RavenKVCache::new(&draft_config, num_slots, top_k);
+    let start_raven = Instant::now();
+    for _ in 0..iters {
+        cache_raven.reset();
+        let max_pos = draft_config.block_size.min(8);
+        for pos in 0..max_pos {
+            let _ = forward_raven(
+                &mut ctx_raven,
+                &draft_weights,
+                &mut cache_raven,
+                0,
+                pos,
+                &draft_config,
+            );
+        }
+    }
+    let elapsed_raven = start_raven.elapsed();
+
+    let steps_per_iter = draft_config.block_size.min(8) as f64;
+
+    let flat_br = BenchResult {
+        label: "forward (flat)".into(),
+        throughput: iters as f64 * steps_per_iter / elapsed_flat.as_secs_f64(),
+        time_per_step_us: elapsed_flat.as_micros() as f64 / (iters as f64 * steps_per_iter),
+        avg_acceptance_len: 0.0,
+        color: (100, 149, 237),
+    };
+
+    let raven_br = BenchResult {
+        label: format!("forward_raven ({} slots)", num_slots),
+        throughput: iters as f64 * steps_per_iter / elapsed_raven.as_secs_f64(),
+        time_per_step_us: elapsed_raven.as_micros() as f64 / (iters as f64 * steps_per_iter),
+        avg_acceptance_len: 0.0,
+        color: (180, 100, 220),
+    };
+
+    (flat_br, raven_br)
+}
+
+/// Benchmark: Raven recall accuracy after noise updates.
+///
+/// THE critical test from the paper:
+/// 1. Write "passkey" to a specific slot (value = 9.9)
+/// 2. Run 1000 noise updates targeting OTHER slots
+/// 3. Readout and verify original value preserved (> 9.0)
+pub fn bench_raven_recall(_config: &Config) -> BenchResult {
+    let draft_config = Config::draft();
+    let num_slots = 16;
+    let top_k = 4;
+    let kvd = crate::types::kv_dim(&draft_config);
+    let noise_steps = 1000;
+
+    let mut cache = RavenKVCache::new(&draft_config, num_slots, top_k);
+
+    // 1. Write critical passkey to slot 42... wait, we only have 16 slots.
+    //    Write to slot 12 instead.
+    let passkey_slot = 12;
+    let passkey_k = vec![1.0; kvd];
+    let passkey_v = vec![9.9; kvd];
+
+    let mut r_t_passkey = vec![0.0f32; num_slots];
+    r_t_passkey[passkey_slot] = 1.0;
+    raven_update(
+        &mut cache.keys,
+        &mut cache.values,
+        &passkey_k,
+        &passkey_v,
+        &r_t_passkey,
+        cache.forget_rate,
+        num_slots,
+        kvd,
+    );
+
+    // 2. Run 1000 noise updates targeting slots 0-3 (NOT slot 12)
+    let start = Instant::now();
+    let noise_k = vec![0.5; kvd];
+    let noise_v = vec![0.1; kvd];
+    let mut r_t_noise = vec![0.0f32; num_slots];
+    r_t_noise[0] = 0.25;
+    r_t_noise[1] = 0.25;
+    r_t_noise[2] = 0.25;
+    r_t_noise[3] = 0.25;
+
+    for _ in 0..noise_steps {
+        raven_update(
+            &mut cache.keys,
+            &mut cache.values,
+            &noise_k,
+            &noise_v,
+            &r_t_noise,
+            cache.forget_rate,
+            num_slots,
+            kvd,
+        );
+    }
+
+    // 3. Readout with passkey query
+    let query = vec![1.0; kvd];
+    let _retrieved = raven_readout(&query, &cache.keys, &cache.values, num_slots, kvd);
+    let elapsed = start.elapsed();
+
+    // Check recall: the passkey value should be preserved in slot 12
+    let slot_12_off = passkey_slot * kvd;
+    let slot_12_first = cache.values[slot_12_off];
+
+    // Recall accuracy: how close is the stored value to the original 9.9?
+    let slot_12_first_f64 = slot_12_first as f64;
+    let recall_accuracy: f64 = if slot_12_first_f64 > 9.0 {
+        100.0
+    } else {
+        (slot_12_first_f64 / 9.9) * 100.0
+    };
+
+    BenchResult {
+        label: format!(
+            "raven_recall ({noise_steps} noise, slot {passkey_slot}={:.1}→{:.1} acc={recall_accuracy:.0}%)",
+            passkey_v[0] as f64, slot_12_first as f64
+        ),
+        throughput: noise_steps as f64 / elapsed.as_secs_f64(),
+        time_per_step_us: elapsed.as_micros() as f64 / noise_steps as f64,
+        avg_acceptance_len: recall_accuracy,
+        color: (50, 205, 50),
+    }
 }
 
 /// Run all core benchmarks in parallel using rayon's `par_iter`.

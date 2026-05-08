@@ -1811,3 +1811,319 @@ mod wasm_integration {
         assert!(keyword.is_valid(0, b'a' as usize, &[]));
     }
 }
+
+// ── Raven RSM (Routing Slot Memory) Tests ──────────────────────
+
+#[test]
+fn test_raven_router_top_k_sparsity() {
+    // 16 slots, top_k=4 → exactly 4 non-zero entries in routing vector
+    let logits = vec![
+        1.0, -0.5, 2.0, 0.3, -1.0, 0.5, 1.5, -0.2, 0.8, 0.1, -0.8, 2.5, 0.0, -1.5, 1.2, 0.4,
+    ];
+    let r_t = transformer::raven_compute_router(&logits, 4);
+
+    let non_zero_count = r_t.iter().filter(|&&v| v > 0.0).count();
+    assert_eq!(non_zero_count, 4, "should have exactly 4 non-zero entries");
+
+    // All entries in [0, 1]
+    for &v in &r_t {
+        assert!(
+            v >= 0.0 && v <= 1.0,
+            "routing values must be in [0, 1], got {v}"
+        );
+    }
+
+    // Non-zero entries should sum to ~1.0
+    let sum: f32 = r_t.iter().sum();
+    assert!(
+        (sum - 1.0).abs() < 1e-5,
+        "selected slots should sum to 1.0, got {sum}"
+    );
+}
+
+#[test]
+fn test_raven_router_deterministic() {
+    let logits = vec![0.5, -0.3, 1.2, 0.0, -1.0, 0.8, 2.0, -0.5];
+    let r1 = transformer::raven_compute_router(&logits, 3);
+    let r2 = transformer::raven_compute_router(&logits, 3);
+
+    for (a, b) in r1.iter().zip(r2.iter()) {
+        assert!(
+            (a - b).abs() < 1e-7,
+            "same logits should produce same routing"
+        );
+    }
+}
+
+#[test]
+fn test_raven_update_frozen_slots() {
+    let num_slots = 4;
+    let kv_dim = 2;
+    let mut keys = vec![0.0f32; num_slots * kv_dim];
+    let mut values = vec![0.0f32; num_slots * kv_dim];
+
+    // Write to slot 0 only (r_t = [1, 0, 0, 0])
+    let new_k = vec![1.0, 2.0];
+    let new_v = vec![3.0, 4.0];
+    let r_t = vec![1.0, 0.0, 0.0, 0.0];
+
+    transformer::raven_update(
+        &mut keys,
+        &mut values,
+        &new_k,
+        &new_v,
+        &r_t,
+        -1.0,
+        num_slots,
+        kv_dim,
+    );
+
+    // Slot 0 should have new content
+    assert!(keys[0] != 0.0 || keys[1] != 0.0, "slot 0 should be updated");
+
+    // Slots 1, 2, 3 should remain zero (frozen)
+    for slot in 1..4 {
+        let off = slot * kv_dim;
+        assert_eq!(keys[off], 0.0, "slot {slot} key should be frozen at 0.0");
+        assert_eq!(
+            keys[off + 1],
+            0.0,
+            "slot {slot} key should be frozen at 0.0"
+        );
+        assert_eq!(
+            values[off], 0.0,
+            "slot {slot} value should be frozen at 0.0"
+        );
+        assert_eq!(
+            values[off + 1],
+            0.0,
+            "slot {slot} value should be frozen at 0.0"
+        );
+    }
+}
+
+#[test]
+fn test_raven_update_decay() {
+    let num_slots = 2;
+    let kv_dim = 2;
+    let mut keys = vec![0.0f32; num_slots * kv_dim];
+    let mut values = vec![0.0f32; num_slots * kv_dim];
+
+    // Write initial value A to slot 0
+    let k_a = vec![10.0, 10.0];
+    let v_a = vec![10.0, 10.0];
+    let r_t_full = vec![1.0, 0.0];
+    transformer::raven_update(
+        &mut keys,
+        &mut values,
+        &k_a,
+        &v_a,
+        &r_t_full,
+        -1.0,
+        num_slots,
+        kv_dim,
+    );
+
+    // Write value B to slot 0 (same slot, decay should blend)
+    let k_b = vec![0.0, 0.0];
+    let v_b = vec![0.0, 0.0];
+    transformer::raven_update(
+        &mut keys,
+        &mut values,
+        &k_b,
+        &v_b,
+        &r_t_full,
+        -1.0,
+        num_slots,
+        kv_dim,
+    );
+
+    // First update: slot starts at 0.0, gated blend produces:
+    //   decay = exp(-1.0) ≈ 0.368, write ≈ 0.632
+    //   after_A = 0.368 * 0.0 + 0.632 * 10.0 ≈ 6.321
+    // Second update: decay blends again with B=0.0:
+    //   after_B = 0.368 * 6.321 + 0.632 * 0.0 ≈ 2.325
+    let decay = (-1.0f32).exp();
+    let after_a = decay * 0.0 + (1.0 - decay) * 10.0;
+    let expected_blend = decay * after_a + (1.0 - decay) * 0.0;
+    assert!(
+        (values[0] - expected_blend).abs() < 0.1,
+        "slot 0 should be blended, got {:.4} expected ~{expected_blend:.2}",
+        values[0]
+    );
+    assert!(values[0] > 0.0, "slot 0 should not be pure B (0.0)");
+    assert!(values[0] < 10.0, "slot 0 should not be pure A (10.0)");
+}
+
+#[test]
+fn test_raven_readout_attention_weights() {
+    let num_slots = 3;
+    let kv_dim = 2;
+
+    // Write orthogonal-ish keys to 3 slots
+    let mut keys = vec![0.0f32; num_slots * kv_dim];
+    let mut values = vec![0.0f32; num_slots * kv_dim];
+
+    // Slot 0: key pointing right, value = 1.0
+    keys[0] = 1.0;
+    keys[1] = 0.0;
+    values[0] = 1.0;
+    values[1] = 1.0;
+
+    // Slot 1: key pointing up, value = 2.0
+    keys[2] = 0.0;
+    keys[3] = 1.0;
+    values[2] = 2.0;
+    values[3] = 2.0;
+
+    // Slot 2: key pointing left, value = 3.0
+    keys[4] = -1.0;
+    keys[5] = 0.0;
+    values[4] = 3.0;
+    values[5] = 3.0;
+
+    // Query matching slot 1's key (pointing up)
+    let query = vec![0.0, 1.0];
+    let output = transformer::raven_readout(&query, &keys, &values, num_slots, kv_dim);
+
+    // Output should be dominated by slot 1's value (2.0)
+    assert!(
+        output[0] > 1.5 && output[0] < 2.5,
+        "readout should be close to slot 1's value (2.0), got {}",
+        output[0]
+    );
+}
+
+#[test]
+fn test_raven_recall_after_noise() {
+    // THE critical test from the paper:
+    // 1. Write "passkey" to a specific slot (value = 9.9)
+    // 2. Run 1000 noise updates targeting OTHER slots
+    // 3. Readout and verify original value preserved
+    let num_slots = 16;
+    let kv_dim = 4;
+    let mut keys = vec![0.0f32; num_slots * kv_dim];
+    let mut values = vec![0.0f32; num_slots * kv_dim];
+
+    // 1. Write passkey to slot 12
+    let passkey_slot = 12;
+    let passkey_k = vec![1.0; kv_dim];
+    let passkey_v = vec![9.9; kv_dim];
+    let mut r_t_passkey = vec![0.0f32; num_slots];
+    r_t_passkey[passkey_slot] = 1.0;
+
+    transformer::raven_update(
+        &mut keys,
+        &mut values,
+        &passkey_k,
+        &passkey_v,
+        &r_t_passkey,
+        -1.0,
+        num_slots,
+        kv_dim,
+    );
+
+    // 2. Run 1000 noise updates targeting slots 0-3 (NOT slot 12)
+    let noise_k = vec![0.5; kv_dim];
+    let noise_v = vec![0.1; kv_dim];
+    let mut r_t_noise = vec![0.0f32; num_slots];
+    r_t_noise[0] = 0.25;
+    r_t_noise[1] = 0.25;
+    r_t_noise[2] = 0.25;
+    r_t_noise[3] = 0.25;
+
+    for _ in 0..1000 {
+        transformer::raven_update(
+            &mut keys,
+            &mut values,
+            &noise_k,
+            &noise_v,
+            &r_t_noise,
+            -1.0,
+            num_slots,
+            kv_dim,
+        );
+    }
+
+    // 3. Verify slot 12 is preserved
+    // Note: the initial gated write blends with zero-initialized state:
+    //   decay = exp(-1.0) ≈ 0.368, write ≈ 0.632
+    //   stored ≈ 0.368 * 0.0 + 0.632 * 9.9 ≈ 6.258
+    // After 1000 noise updates where r_t[12] = 0.0, decay = exp(0) = 1.0
+    // → slot 12 is perfectly preserved at ~6.258 (NOT overwritten by noise)
+    let slot_12_off = passkey_slot * kv_dim;
+    let stored_value = values[slot_12_off];
+    let expected_initial = (-1.0f32).exp() * 0.0 + (1.0 - (-1.0f32).exp()) * 9.9;
+
+    assert!(
+        stored_value > 5.5,
+        "passkey slot should be preserved after 1000 noise updates, got {stored_value:.4} (expected ~{expected_initial:.2})"
+    );
+    assert!(
+        (stored_value - expected_initial).abs() < 0.1,
+        "passkey slot should match gated write value exactly, got {stored_value:.4} expected ~{expected_initial:.4}"
+    );
+
+    // Also verify via readout
+    let retrieved = transformer::raven_readout(&passkey_k, &keys, &values, num_slots, kv_dim);
+    // Readout is attention-weighted sum over ALL slots (including noise slots),
+    // so the value is diluted. We just verify it's positive (not destroyed).
+    assert!(
+        retrieved[0] > 0.5,
+        "readout should still retrieve passkey-influenced values, got {:.4}",
+        retrieved[0]
+    );
+}
+
+#[test]
+fn test_raven_forward_produces_valid_logits() {
+    let config = types::Config::draft();
+    let mut rng = types::Rng::new(42);
+    let weights = transformer::TransformerWeights::new(&config, &mut rng);
+    let mut ctx = transformer::ForwardContext::new(&config);
+    let mut cache = transformer::RavenKVCache::new(&config, 16, 4);
+
+    // Run forward_raven for 8 steps
+    for pos in 0..8 {
+        let logits = transformer::forward_raven(&mut ctx, &weights, &mut cache, 0, pos, &config);
+
+        // Logits shape = [vocab_size]
+        assert_eq!(
+            logits.len(),
+            config.vocab_size,
+            "logits should be vocab_size"
+        );
+
+        // No NaN or Inf
+        for (i, &v) in logits.iter().enumerate() {
+            assert!(v.is_finite(), "logit[{i}] should be finite, got {v}");
+        }
+    }
+}
+
+#[test]
+fn test_raven_forward_deterministic() {
+    let config = types::Config::draft();
+    let mut rng = types::Rng::new(42);
+    let weights = transformer::TransformerWeights::new(&config, &mut rng);
+
+    // Run 1
+    let mut ctx1 = transformer::ForwardContext::new(&config);
+    let mut cache1 = transformer::RavenKVCache::new(&config, 16, 4);
+    let logits1 =
+        transformer::forward_raven(&mut ctx1, &weights, &mut cache1, 0, 0, &config).to_vec();
+
+    // Run 2 (same weights, same token)
+    let mut ctx2 = transformer::ForwardContext::new(&config);
+    let mut cache2 = transformer::RavenKVCache::new(&config, 16, 4);
+    let logits2 =
+        transformer::forward_raven(&mut ctx2, &weights, &mut cache2, 0, 0, &config).to_vec();
+
+    // Should be identical
+    for (a, b) in logits1.iter().zip(logits2.iter()) {
+        assert!(
+            (a - b).abs() < 1e-6,
+            "same input should produce same logits"
+        );
+    }
+}

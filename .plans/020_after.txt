@@ -1,0 +1,82 @@
+🚀 MicroGPT-RS: Transformer + Speculative Decoding Benchmark
+════════════════════════════════════════════════════════════
+
+📝 Transformer Output (Proof of Correctness)
+────────────────────────────────────────────────────────────
+  Sample 1: "aursrmzzzzzmzzzz" (valid=true)
+  Sample 2: "auczzzzzzzcmzzzz" (valid=true)
+  Sample 3: "auuzzzzzzzzmzzzz" (valid=true)
+  Sample 4: "aursrmzzzzzmzzzz" (valid=true)
+  Sample 5: "auuzzzzzzzzmzzzz" (valid=true)
+
+  ✅ Deterministic: PASS (same seed = same output)
+  ✅ Diverse:       PASS (different seed = different output)
+  ✅ Valid tokens:  PASS (all tokens in [0, 27))
+  📐 Config: vocab=27, block=16, embd=16, heads=4, mlp=64
+
+📊 Running benchmarks (50000 iterations, 1000 warmup)...
+   Target model: embd=16, heads=4, mlp=64
+   Draft  model: embd=4, heads=2, mlp=16
+📊 Benchmark Results
+───────────────────────────────────────────────────────────────────────────
+  Method                    Throughput         μs/step  Avg Accept Len
+───────────────────────────────────────────────────────────────────────────
+  Transformer AR              20531 tok/s        48.71            1.00
+  DFlash                     145992 tok/s        54.80            8.00
+  DDTree Build                19357 trees/s        51.66            0.00
+  Speculative (Simulated)        46063 tok/s       108.55            5.00
+  Speculative (AR Draft)        70808 tok/s        98.81            7.00
+  Leviathan (Algorithm 1)         2373 tok/s       496.70            1.18
+  Leviathan (no rollback)         2389 tok/s       493.39            1.18
+  Leviathan (w/ rollback)         7136 tok/s       164.67            1.18
+  Spec (unconditioned)        47081 tok/s       106.20            5.00
+  Spec (conditioned)          47095 tok/s       143.22            6.74
+  Prefill (no compress)       630488 tok/s       101.51           64.00
+  Prefill (compressed)        66864 tok/s       104.69            7.00
+  DDTree (no chain)           19791 tok/s        50.53           16.00
+  DDTree (chain-seed)         21154 tok/s        47.27           16.00
+  forward (flat)              21019 trees/s        47.58            0.00
+  forward_paged               20540 trees/s        48.69            0.00
+  forward_raven (16 slots)        62653 trees/s        15.96            0.00
+  raven_recall (1000 noise, slot 12=9.9→6.3 acc=63%)      1029512 tok/s         0.97           63.21
+───────────────────────────────────────────────────────────────────────────
+  📈 Speedup: 2.24x (Speculative vs AR)
+
+📈 Chart saved to: bench/046_bench_result.png
+📝 Results saved to: bench/046_results.csv
+
+📊 DDTree Budget Sweep
+───────────────────────────────────────────────────────────────────────────
+  Config                              trees/s     μs/build    Avg Nodes
+───────────────────────────────────────────────────────────────────────────
+  DDTree budget=4                       66049        15.14         4.00
+  DDTree chain budget=4                 64909        15.41         4.00
+  DDTree budget=8                       36915        27.09         8.00
+  DDTree chain budget=8                 42568        23.49         8.00
+  DDTree budget=12                      26145        38.25        12.00
+  DDTree chain budget=12                28799        34.72        12.00
+  DDTree budget=16                      19884        50.29        16.00
+  DDTree chain budget=16                21234        47.09        16.00
+  DDTree budget=20                      16099        62.12        20.00
+  DDTree chain budget=20                16881        59.24        20.00
+  DDTree budget=24                      13581        73.63        24.00
+  DDTree chain budget=24                14250        70.18        24.00
+  DDTree budget=32                      10956        91.27        32.00
+  DDTree chain budget=32                11003        90.88        32.00
+  DDTree budget=48                       7632       131.02        48.00
+  DDTree chain budget=48                 7584       131.85        48.00
+  DDTree budget=64                       6071       164.71        64.00
+  DDTree chain budget=64                 6054       165.19        64.00
+
+🧠 Percepta 2D Convex Hull Attention (O(log N) vs O(N))
+────────────────────────────────────────────────────────────
+    Trace Size     Hull    Linear μs      Fast μs    Speedup    Match
+──────────────────────────────────────────────────────────────────
+          1000     1000         6.44       0.5590      11.5x        ✅
+         10000     8387        62.56       0.8040      77.8x        ✅
+        100000    26541       643.92       0.7470     862.0x        ✅
+
+  Hull compression: O(N) keys → O(H) hull vertices
+  Attention search: ternary search over unimodal dot-product sequence
+
+✨ Done.

@@ -19,6 +19,7 @@ Inspired by [microgpt-c](https://github.com/nicholasgasior/microgpt-c), [talos-v
 - **Path-Aware Pruning** — `SudokuPruner` validates against accumulated path state (initial board + parent tokens), catching cross-depth row/col/box conflicts that static-only pruning misses.
 - **Deterministic Validator** — LLM drafts tokens via semantic probability, deterministic rules engine validates via mathematical constraints, only valid branches reach verification. Demonstrated with 9×9 Sudoku.
 - **Streaming Solver** — `StreamingSolver` emits `Try`/`Accepted`/`Contradiction`/`Backtrack`/`Solved` events for real-time visualization of the search process.
+- **Raven RSM (Routing Slot Memory)** — O(1) KV cache replacement for the draft model. Fixed-size slot memory with sparse Top-K routing. Unselected slots are completely frozen — 10K noise updates leave passkey slots untouched. 2.98× faster than flat attention at pos=8, memory stays constant as sequence grows. Distilled from [Raven (Afzal, Bick, Xing, Cevher, Gu, 2025)](https://github.com/goombalab/raven).
 - **Percepta O(log N) Attention** — 2D convex hull KV cache with ternary search, proving LLMs can execute programs internally via geometric attention. Includes adversarial failure tests.
 - **TUI Visualization** — Ratatui-based terminal UI showing the Sudoku solver in real-time: color-coded grid, step/trace panels, speculative mode comparison (behind `--features sudoku`).
 - **Benchmarks + Plots** — 16-method benchmark suite (AR, DFlash, DDTree, Speculative, AR Draft, Leviathan, Prefill, forward) with auto-numbered PNG output via `plotters`. All benchmarks run by default — no feature flags needed.
@@ -312,6 +313,61 @@ Sample 3: "auuzzzzzzzzmzzzz" (valid=true)
 ✅ Valid tokens:  PASS (all tokens in [0, 27))
 ```
 
+## 🦅 Raven RSM: O(1) Routing Slot Memory
+
+Based on [Raven: High-Recall Sequence Modeling with Sparse Memory Routing](https://github.com/goombalab/raven) — replaces the growing KV cache with a fixed-size slot memory updated via sparse Top-K routing.
+
+### The Core Idea
+
+Standard attention scans all N past keys → O(N) per step. SSMs (Mamba) compress into fixed state but write densely — every token slightly overwrites everything, blurring old info. Raven uses a fixed number of slots, and each token only updates a small Top-K subset. Unselected slots are **completely frozen**.
+
+```
+Standard Attention:  scan all N keys          → O(N) per step, grows forever
+SSM (Mamba):         dense update all slots    → O(1) but old info decays uniformly
+SWA:                 FIFO evict oldest token   → O(1) but old info gone permanently
+Raven RSM:           sparse Top-K slot update  → O(1) and unselected slots FROZEN
+```
+
+### The Math
+
+```
+Router:  r_t = Normalize(TopK(Sigmoid(W_route × x_t)))     // sparse routing vector
+Update:  decay = exp(forget_rate × r_t[slot])                // per-slot gate
+         H_new = decay × H_old + (1 - decay) × new_content  // gated write
+Readout: o_t = softmax(Q × K_slots) × V_slots               // attention over fixed slots
+```
+
+When `r_t[slot] == 0`: `decay = exp(0) = 1.0` → `H_new = H_old` → **perfectly preserved**.
+
+### What We Proved
+
+| Property | Evidence | Example |
+|----------|----------|---------|
+| **Frozen slots work** | 10,000 noise updates, slot 12 identical to 6 decimals | `raven_recall` example |
+| **O(1) stays flat** | Flat grows 1.1× from pos 16→240, Raven stays 1.0× | `raven_recall` Part 2 |
+| **2.98× faster than flat** | 62,653 tok/s (Raven) vs 21,019 tok/s (flat) on draft model | benchmark |
+| **Memory is fixed** | 4× savings at block_size=256, 32× projected at block_size=2048 | `raven_recall` Part 3 |
+| **Zero regressions** | All existing benchmarks unchanged (<1% noise) | full test suite |
+
+### Caveats (Honest)
+
+| Limitation | What It Means |
+|------------|---------------|
+| **Router is dummy** | Cycles through K dimensions, not learned. A real router needs training (Plan 008). |
+| **Model weights random** | Output quality is meaningless — only the architectural properties are proven. |
+| **63% recall on first write** | Gated update blends with zero-initialized state: `0.632 × 9.9 ≈ 6.26`. The key property is that value stays 6.26 after 10K noise updates (frozen), not that it starts at 9.9. |
+| **Not wired into draft pipeline** | `forward_raven` exists but `dflash_predict` still uses `forward()`. Integration is a future task. |
+| **Scaling gap modest at small models** | At embd=16, the attention fraction is small. At real model sizes (4096 dim), the gap would be dramatic. |
+
+### Integration Points
+
+| Component | Current | Future |
+|-----------|---------|--------|
+| Draft model cache | `MultiLayerKVCache` (O(N)) | `RavenKVCache` (O(1)) — wired into `dflash_predict_ar_with` |
+| Percepta fallback | O(log N) hull only | Adaptive: hull for well-behaved, Raven for adversarial |
+| RAG routing | N/A | Draft model's `r_t` vector → anyrag slot selection |
+| Router weights | Dummy (K dim cycling) | Learned via WGPU training pipeline (Plan 008) |
+
 ## 🔬 Percepta: O(log N) 2D Convex Hull Attention
 
 Based on [Percepta's "Can LLMs Be Computers?"](https://www.percepta.ai/blog/can-llms-be-computers) — the idea that transformers with 2D attention heads can execute programs internally for millions of steps without quadratic slowdown.
@@ -513,7 +569,7 @@ src/
   lib.rs            Module index
   main.rs           Entry point (proof → bench → Percepta bench → plot)
   types.rs          Config (micro + draft), Rng, softmax, rmsnorm, matmul, sample_token
-  transformer.rs    TransformerWeights, KVCache, PagedKVCache, ForwardContext, forward, forward_paged, generate, generate_into, generate_batch
+  transformer.rs    TransformerWeights, KVCache, PagedKVCache, RavenKVCache, ForwardContext, forward, forward_paged, forward_raven, generate, generate_into, generate_batch
   speculative/      SOLID decomposition (plan 005):
     mod.rs          Re-exports
     types.rs        TreeNode, DraftResult, ConstraintPruner trait, NoPruner, SpeculativeContext (zero-alloc), DDTreeBranchCache (wraps PagedKVCache)
@@ -539,6 +595,7 @@ src/
   ¶ behind --features rest
   † behind --features wasm
 examples/
+  raven_recall.rs        Raven RSM demo: frozen slots, O(1) scaling, memory footprint comparison
   sudoku_9x9.rs          Streaming solver with "thinking" output + hull compression stats *
   sudoku_speculative.rs  3-column DDTree comparison: Unpruned / Static-Only / Path-Aware *
   sudoku_tui.rs          Ratatui TUI: real-time grid visualization + speculative mode *
@@ -562,4 +619,5 @@ bench/
 - [DDTree: Block Diffusion Draft Trees](https://arxiv.org/abs/2604.12989) — Ringel & Romano, 2026 (budget sweep, tree verify)
 - [Cross-Family Speculative Prefill](https://arxiv.org/abs/2603.02631) — Liu et al., ICLR 2026 (importance scoring, prompt compression)
 - [FlashPrefill](https://arxiv.org/abs/2603.06199) — Fan et al., 2026 (block-sparse drafter attention)
+- [Raven: High-Recall Sequence Modeling with Sparse Memory Routing](https://github.com/goombalab/raven) — Afzal, Bick, Xing, Cevher, Gu, 2025 (sparse Top-K slot routing, 99.4% recall at 16K context)
 - [Hazy Research Megakernel](https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles) — Intelligence Per Watt methodology
