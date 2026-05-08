@@ -15,6 +15,11 @@ pub struct Config {
     pub draft_lookahead: usize,
     pub tree_budget: usize,
     pub parallel_threshold: usize,
+    // LoRA fields (Plan 008)
+    pub lora_rank: usize,
+    pub lora_alpha: f32,
+    pub lora_dropout: f32,
+    pub lora_targets: Vec<String>,
 }
 
 impl Config {
@@ -36,7 +41,28 @@ impl Config {
             draft_lookahead: 8,
             tree_budget: 16,
             parallel_threshold: 128,
+            lora_rank: 4,
+            lora_alpha: 8.0,
+            lora_dropout: 0.0,
+            lora_targets: Vec::new(),
         }
+    }
+
+    /// Micro config with LoRA defaults (Plan 008).
+    pub fn micro_lora() -> Self {
+        let mut c = Self::micro();
+        c.lora_rank = 4;
+        c.lora_alpha = 8.0;
+        c.lora_dropout = 0.0;
+        c.lora_targets = vec![
+            "q".into(),
+            "k".into(),
+            "v".into(),
+            "o".into(),
+            "mlp1".into(),
+            "mlp2".into(),
+        ];
+        c
     }
 
     /// Lightweight draft model for speculative decoding (~4× smaller than target).
@@ -56,6 +82,10 @@ impl Config {
             draft_lookahead: 8,
             tree_budget: 16,
             parallel_threshold: 128,
+            lora_rank: 4,
+            lora_alpha: 8.0,
+            lora_dropout: 0.0,
+            lora_targets: Vec::new(),
         }
     }
 
@@ -77,6 +107,10 @@ impl Config {
             draft_lookahead: 5,
             tree_budget: 32,
             parallel_threshold: 128,
+            lora_rank: 4,
+            lora_alpha: 8.0,
+            lora_dropout: 0.0,
+            lora_targets: Vec::new(),
         }
     }
 
@@ -96,6 +130,10 @@ impl Config {
             draft_lookahead: 5,
             tree_budget: 32,
             parallel_threshold: 128,
+            lora_rank: 4,
+            lora_alpha: 8.0,
+            lora_dropout: 0.0,
+            lora_targets: Vec::new(),
         }
     }
 
@@ -117,6 +155,10 @@ impl Config {
             draft_lookahead: 8,
             tree_budget: 32,
             parallel_threshold: 128,
+            lora_rank: 4,
+            lora_alpha: 8.0,
+            lora_dropout: 0.0,
+            lora_targets: Vec::new(),
         }
     }
 
@@ -137,6 +179,10 @@ impl Config {
             draft_lookahead: 8,
             tree_budget: 32,
             parallel_threshold: 128,
+            lora_rank: 4,
+            lora_alpha: 8.0,
+            lora_dropout: 0.0,
+            lora_targets: Vec::new(),
         }
     }
 

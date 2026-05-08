@@ -38,12 +38,16 @@ impl GpuContext {
 
         let adapter_info = adapter.get_info();
 
+        // Use the adapter's actual limits (not downlevel defaults) to support
+        // shaders with many storage bindings (e.g., qkv_projection has 7+).
+        let adapter_limits = adapter.limits();
+
         let (device, queue) = adapter
             .request_device(
                 &DeviceDescriptor {
                     label: Some("microgpt-rs gpu device"),
                     required_features: Features::empty(),
-                    required_limits: Limits::downlevel_defaults(),
+                    required_limits: adapter_limits,
                     ..Default::default()
                 },
                 None,
