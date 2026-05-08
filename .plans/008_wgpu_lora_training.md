@@ -81,7 +81,7 @@ This plan targets **WebGPU via wgpu** as the sole GPU backend. Rationale:
 4. **Micro-scale appropriate**: At `n_embd ≤ 256`, WebGPU compute shaders are sufficient. No need for CUDA-specific optimizations.
 5. **safetensors may not compile on WASM** — for browser, use a simpler binary format (raw f32 slices with blake3 checksum). safetensors stays for native.
 
-## Current Codebase State (as of Plan 013)
+## Current Codebase State (as of Plan 019)
 
 | What | Status | Impact on Plan 008 |
 |------|--------|--------------------|
@@ -91,12 +91,18 @@ This plan targets **WebGPU via wgpu** as the sole GPU backend. Rationale:
 | `PagedKVCache` | ✅ Done (Plan 011) | GPU KV cache can use paged design |
 | `ForwardContext` zero-alloc | ✅ Done (Plan 013) | GPU activation buffers follow same pattern |
 | `hidden_state` extraction | ✅ Done (Plan 009) | GPU forward must also expose hidden state |
-| BPE tokenizer | ❌ Blocked on Plan 007 | Plan 008 can develop with `Config::micro()` |
+| BPE tokenizer | ✅ Done (Plan 007) | `Config::bpe()` / `Config::bpe_draft()` available |
+| SynPruner / validator module | ✅ Done (Plan 007) | SynPruner validates training samples |
+| `src/gpu/context.rs` + `buffer.rs` | ✅ Done (Phase 1) | GpuContext, upload/download/create_buffer with tests |
+| 9× WGSL compute kernels | ✅ Done (Phase 2 partial) | matmul, elementwise, softmax, layernorm, embedding, attention, lora, loss, optimizer |
+| `src/gpu/kernels/mod.rs` (pipeline helpers) | ❌ Missing | Needed before Phase 3 — shader loading & pipeline creation |
+| GPU shader tests / benchmarks | ❌ Not started | 2.11, 2.12 still pending |
 
 ### Prerequisites Update
-- Plan 007 Phase 1 (BPE Tokenizer) must be complete for validator-scale configs (previously cLoRA-scale)
+- ~~Plan 007 Phase 1 (BPE Tokenizer) must be complete~~ ✅ Plan 007 is fully complete
 - Development and testing uses `Config::micro()` which already exists
-- `Config::bpe()` from Plan 007 defines the production config dimensions
+- `Config::bpe()` / `Config::bpe_draft()` from Plan 007 define the production config dimensions
+- Phase 1 (wgpu context + buffers) is done — Phase 2 kernels exist but need `kernels/mod.rs` + tests
 
 ## LoRA Architecture
 
@@ -1067,15 +1073,15 @@ impl Config {
 
 ### Phase 2: WGSL Compute Shaders
 - [ ] 2.1 Create `src/gpu/kernels/mod.rs` — shader loading, pipeline creation helpers
-- [ ] 2.2 Write `matmul.wgsl` — tiled matrix multiply with shared memory
-- [ ] 2.3 Write `elementwise.wgsl` — add, multiply, ReLU, scale, copy
-- [ ] 2.4 Write `softmax.wgsl` — stable online softmax
-- [ ] 2.5 Write `layernorm.wgsl` — RMSNorm
-- [ ] 2.6 Write `embedding.wgsl` — token + position embedding lookup
-- [ ] 2.7 Write `attention.wgsl` — scaled dot-product attention
-- [ ] 2.8 Write `lora.wgsl` — LoRA merge: Y = Wx + alpha * BAx
-- [ ] 2.9 Write `loss.wgsl` — cross-entropy with softmax
-- [ ] 2.10 Write `optimizer.wgsl` — AdamW parameter update
+- [x] 2.2 Write `matmul.wgsl` — tiled matrix multiply with shared memory
+- [x] 2.3 Write `elementwise.wgsl` — add, multiply, ReLU, scale, copy
+- [x] 2.4 Write `softmax.wgsl` — stable online softmax
+- [x] 2.5 Write `layernorm.wgsl` — RMSNorm
+- [x] 2.6 Write `embedding.wgsl` — token + position embedding lookup
+- [x] 2.7 Write `attention.wgsl` — scaled dot-product attention
+- [x] 2.8 Write `lora.wgsl` — LoRA merge: Y = Wx + alpha * BAx
+- [x] 2.9 Write `loss.wgsl` — cross-entropy with softmax
+- [x] 2.10 Write `optimizer.wgsl` — AdamW parameter update
 - [ ] 2.11 Add tests: each shader against CPU reference (matmul correctness, softmax sum=1, etc.)
 - [ ] 2.12 Benchmark: `bench_gpu_matmul` vs CPU matmul at various sizes
 
@@ -1164,10 +1170,11 @@ full = ["leviathan", "sudoku", "validator", "training", "gpu"]    # previously c
 
 ## Prerequisites
 
-- **Plan 007 (Deterministic Validator, previously cLoRA)**: Must be partially or fully completed. At minimum:
-  - Phase 1 (BPE Tokenizer) must define the vocabulary and `Config` dimensions
-  - Phase 3 (Training Data Pipeline) must produce `training.jsonl` for integration testing
+- **Plan 007 (Deterministic Validator)**: ✅ **Complete.** BPE Tokenizer, SynPruner, and all phases are done.
+  - `Config::bpe()` / `Config::bpe_draft()` define vocabulary and dimensions
+  - Phase 3 (Training Data Pipeline) was deferred to Plan 009 — `training.jsonl` not yet available
 - The toy model (`Config::micro()`) can be used for development and testing without the validator feature
+- **Next step**: Complete 2.1 (`kernels/mod.rs` pipeline helpers), then 2.11–2.12 (shader tests/benchmarks), then proceed to Phase 3
 
 ## Files to Create/Modify
 

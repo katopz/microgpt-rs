@@ -85,8 +85,14 @@ The following changes have landed since this plan was written:
 
 ### Remaining Blockers
 
-Only **Blocker 1** (path encoding overflow) and **Blocker 3** (syn partial parse) remain.
-Blockers 2 and 4 are resolved.
+~~All blockers resolved.~~ ✅ **Plan 007 is COMPLETE.**
+
+| Blocker | Resolution |
+|---------|------------|
+| Blocker 1: `parent_path` overflow | ✅ Phase 0 — `u128` with 16-bit encoding |
+| Blocker 2: `TransformerWeights` scaling | ✅ Phase 1 — `Config::bpe()` / `Config::bpe_draft()` |
+| Blocker 3: `syn` partial parse | ✅ Phase 2 — Bracket balancer DFA (scoped) |
+| Blocker 4: Too many modules at once | ✅ Resolved — Incremental phases confirmed |
 
 ## The Grand Vision (from Research)
 
