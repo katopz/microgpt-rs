@@ -17,6 +17,8 @@ wgpu = { version = "23", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 pollster = { version = "0.4", optional = true }
 safetensors = { version = "0.4", optional = true }
+wasmtime = { version = "28", optional = true }
+wat = { version = "1", optional = true }
 
 [dev-dependencies]
 ratatui = "0.29"
@@ -28,7 +30,8 @@ sudoku = []
 validator = ["syn", "proc-macro2"]
 rest = ["reqwest", "tokio"]
 gpu = ["wgpu", "bytemuck", "pollster", "safetensors"]
-full = ["sudoku", "validator", "rest", "gpu"]
+wasm = ["wasmtime", "wat"]
+full = ["sudoku", "validator", "rest", "gpu", "wasm"]
 
 [[example]]
 name = "sudoku_speculative"

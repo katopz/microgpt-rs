@@ -347,23 +347,23 @@ WASM Linear Memory:
 ## Tasks
 
 ### Phase 1: WasmPruner Core
-- [ ] 1.1 Add `wasm` feature to `Cargo.toml` with `wasmtime` + `wat` deps
-- [ ] 1.2 Create `src/wasm/mod.rs` with re-exports (behind `#[cfg(feature = "wasm")]`)
-- [ ] 1.3 Create `src/wasm/abi.rs` with ABI constants and memory layout
-- [ ] 1.4 Create `src/wasm/state.rs` with `ValidatorState` struct
-- [ ] 1.5 Create `src/wasm/wasm_pruner.rs` with `WasmPruner` implementing `ConstraintPruner`
-- [ ] 1.6 Add `pub mod wasm;` to `src/lib.rs` (behind `#[cfg(feature = "wasm")]`)
-- [ ] 1.7 Add fuel-based execution limit (100μs per call budget)
-- [ ] 1.8 Add tests: load, is_valid, invalid_wasm, missing_exports
+- [x] 1.1 Add `wasm` feature to `Cargo.toml` with `wasmtime` + `wat` deps
+- [x] 1.2 Create `src/wasm/mod.rs` with re-exports (behind `#[cfg(feature = "wasm")]`)
+- [x] 1.3 Create `src/wasm/abi.rs` with ABI constants and memory layout
+- [x] 1.4 Create `src/wasm/state.rs` with `ValidatorState` struct
+- [x] 1.5 Create `src/wasm/wasm_pruner.rs` with `WasmPruner` implementing `ConstraintPruner`
+- [x] 1.6 Add `pub mod wasm;` to `src/lib.rs` (behind `#[cfg(feature = "wasm")]`)
+- [x] 1.7 Add fuel-based execution limit (100μs per call budget)
+- [x] 1.8 Add tests: load, is_valid, invalid_wasm, missing_exports
 
 ### Phase 2: SDK Crate (`riir-validator-sdk`)
-- [ ] 2.1 Create new repo `riir-validator-sdk` (MIT license)
-- [ ] 2.2 Define `Validator` trait in `src/validator.rs`
-- [ ] 2.3 Implement `export_validator!` macro in `src/macros.rs`
-- [ ] 2.4 Implement WASM memory helpers in `src/memory.rs`
-- [ ] 2.5 Create `bracket_validator.rs` example
-- [ ] 2.6 Create `keyword_validator.rs` example
-- [ ] 2.7 Verify `cargo build --target wasm32-unknown-unknown` works for examples
+- [x] 2.1 Create new repo `riir-validator-sdk` (MIT license)
+- [x] 2.2 Define `Validator` trait in `src/validator.rs`
+- [x] 2.3 Implement `export_validator!` macro in `src/exports.rs`
+- [x] 2.4 Implement WASM memory helpers in `src/memory.rs`
+- [x] 2.5 Create `bracket_validator.rs` example
+- [x] 2.6 Create `keyword_validator.rs` example
+- [x] 2.7 Verify `cargo build --target wasm32-unknown-unknown` works for examples
 - [ ] 2.8 Add CI: build + test on wasm32-unknown-unknown target
 
 ### Phase 3: Validator Check CLI
@@ -377,10 +377,10 @@ WASM Linear Memory:
 - [ ] 3.8 Output: pass/fail report with details
 
 ### Phase 4: Integration
-- [ ] 4.1 Build example validators from SDK as `.wasm` files
-- [ ] 4.2 Add `tests/wasm_validator.rs` in microgpt-rs (behind `wasm` feature)
-- [ ] 4.3 Test: WasmPruner loads example `.wasm` files
-- [ ] 4.4 Test: DDTree build with WasmPruner produces correct results
+- [x] 4.1 Build example validators from SDK as `.wasm` files
+- [x] 4.2 Add WASM integration tests in `tests/integration.rs` (behind `wasm` feature)
+- [x] 4.3 Test: WasmPruner loads example `.wasm` files
+- [x] 4.4 Test: DDTree build with WasmPruner produces correct results
 - [ ] 4.5 Benchmark: WasmPruner vs SynPruner overhead
 - [ ] 4.6 Benchmark: WasmPruner vs NoPruner tree quality
 

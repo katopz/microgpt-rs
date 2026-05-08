@@ -1572,3 +1572,242 @@ fn test_sudoku9x9_next_empty() {
     let (r, c) = empty.unwrap();
     assert_eq!(puzzle.grid[r][c], 0, "returned cell should be empty");
 }
+
+// ── WASM Validator Integration Tests (Phase 4) ──────────────────
+
+#[cfg(feature = "wasm")]
+mod wasm_integration {
+    use microgpt_rs::speculative::types::ConstraintPruner;
+    use microgpt_rs::wasm::WasmPruner;
+    use std::path::PathBuf;
+
+    /// Path to the riir-validator-sdk examples built for WASM.
+    fn sdk_examples_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../riir-validator-sdk/target/wasm32-unknown-unknown/release/examples")
+    }
+
+    /// Load bracket_validator.wasm from the SDK build output.
+    ///
+    /// Requires running first:
+    /// ```sh
+    /// cd riir-validator-sdk && cargo build --example bracket_validator --target wasm32-unknown-unknown --release
+    /// ```
+    fn load_bracket_validator() -> WasmPruner {
+        let path = sdk_examples_dir().join("bracket_validator.wasm");
+        WasmPruner::load_from_file(path.to_str().expect("valid path"))
+            .expect("should load bracket_validator.wasm — run: cd riir-validator-sdk && cargo build --example bracket_validator --target wasm32-unknown-unknown --release")
+    }
+
+    /// Load keyword_validator.wasm from the SDK build output.
+    fn load_keyword_validator() -> WasmPruner {
+        let path = sdk_examples_dir().join("keyword_validator.wasm");
+        WasmPruner::load_from_file(path.to_str().expect("valid path"))
+            .expect("should load keyword_validator.wasm — run: cd riir-validator-sdk && cargo build --example keyword_validator --target wasm32-unknown-unknown --release")
+    }
+
+    // ── Bracket Validator Tests ────────────────────────────────
+
+    #[test]
+    fn test_wasm_bracket_load() {
+        let pruner = load_bracket_validator();
+        assert_eq!(pruner.name(), "bracket_validator");
+        assert_eq!(pruner.version(), (1, 0, 0));
+    }
+
+    #[test]
+    fn test_wasm_bracket_accepts_open_paren() {
+        let pruner = load_bracket_validator();
+        assert!(pruner.is_valid(0, b'(' as usize, &[]));
+    }
+
+    #[test]
+    fn test_wasm_bracket_rejects_close_paren_at_root() {
+        let pruner = load_bracket_validator();
+        assert!(!pruner.is_valid(0, b')' as usize, &[]));
+    }
+
+    #[test]
+    fn test_wasm_bracket_accepts_close_after_open() {
+        let pruner = load_bracket_validator();
+        assert!(pruner.is_valid(1, b')' as usize, &[b'(' as usize]));
+    }
+
+    #[test]
+    fn test_wasm_bracket_rejects_double_close() {
+        let pruner = load_bracket_validator();
+        assert!(!pruner.is_valid(2, b')' as usize, &[b'(' as usize, b')' as usize]));
+    }
+
+    #[test]
+    fn test_wasm_bracket_accepts_nested() {
+        let pruner = load_bracket_validator();
+        assert!(pruner.is_valid(2, b')' as usize, &[b'(' as usize, b'(' as usize]));
+    }
+
+    #[test]
+    fn test_wasm_bracket_accepts_non_bracket() {
+        let pruner = load_bracket_validator();
+        assert!(pruner.is_valid(0, b'a' as usize, &[]));
+        assert!(pruner.is_valid(0, 999, &[]));
+    }
+
+    #[test]
+    fn test_wasm_bracket_validate_string_balanced() {
+        let pruner = load_bracket_validator();
+        assert!(pruner.validate_string("()"));
+        assert!(pruner.validate_string("({[]})"));
+        assert!(pruner.validate_string("fn main() { let x = vec![1]; }"));
+        assert!(pruner.validate_string(""));
+    }
+
+    #[test]
+    fn test_wasm_bracket_validate_string_unbalanced() {
+        let pruner = load_bracket_validator();
+        assert!(!pruner.validate_string(")"));
+        assert!(!pruner.validate_string("())"));
+        assert!(!pruner.validate_string("{}}"));
+    }
+
+    #[test]
+    fn test_wasm_bracket_validate_string_partial_open() {
+        let pruner = load_bracket_validator();
+        assert!(pruner.validate_string("fn main() {"));
+        assert!(pruner.validate_string("({["));
+    }
+
+    // ── Keyword Validator Tests ──────────────────────────────────
+
+    #[test]
+    fn test_wasm_keyword_load() {
+        let pruner = load_keyword_validator();
+        assert_eq!(pruner.name(), "keyword_validator");
+        assert_eq!(pruner.version(), (1, 0, 0));
+    }
+
+    #[test]
+    fn test_wasm_keyword_rejects_token_zero() {
+        let pruner = load_keyword_validator();
+        assert!(!pruner.is_valid(0, 0, &[]));
+    }
+
+    #[test]
+    fn test_wasm_keyword_accepts_identifiers() {
+        let pruner = load_keyword_validator();
+        assert!(pruner.is_valid(0, b'a' as usize, &[]));
+        assert!(pruner.is_valid(0, b'x' as usize, &[]));
+        assert!(pruner.is_valid(0, b'_' as usize, &[]));
+    }
+
+    #[test]
+    fn test_wasm_keyword_rejects_equals_at_depth_0() {
+        let pruner = load_keyword_validator();
+        assert!(!pruner.is_valid(0, b'=' as usize, &[]));
+    }
+
+    #[test]
+    fn test_wasm_keyword_accepts_equals_after_identifier() {
+        let pruner = load_keyword_validator();
+        assert!(pruner.is_valid(1, b'=' as usize, &[b'x' as usize]));
+    }
+
+    #[test]
+    fn test_wasm_keyword_rejects_double_semicolon() {
+        let pruner = load_keyword_validator();
+        assert!(!pruner.is_valid(2, b';' as usize, &[b'x' as usize, b';' as usize]));
+    }
+
+    #[test]
+    fn test_wasm_keyword_rejects_close_brace_at_root() {
+        let pruner = load_keyword_validator();
+        assert!(!pruner.is_valid(0, b'}' as usize, &[]));
+    }
+
+    #[test]
+    fn test_wasm_keyword_validate_string_double_semicolon() {
+        let pruner = load_keyword_validator();
+        assert!(!pruner.validate_string("let x = 1;;"));
+    }
+
+    #[test]
+    fn test_wasm_keyword_validate_string_valid() {
+        let pruner = load_keyword_validator();
+        assert!(pruner.validate_string("let x = 1;"));
+        assert!(pruner.validate_string("fn foo() { let x = 1; }"));
+    }
+
+    // ── DDTree Integration Tests ─────────────────────────────────
+
+    #[test]
+    fn test_wasm_bruner_as_trait_object() {
+        let pruner = load_bracket_validator();
+        let _pruner: &dyn ConstraintPruner = &pruner;
+    }
+
+    #[test]
+    fn test_wasm_ddtree_with_bracket_pruner() {
+        use microgpt_rs::speculative::build_dd_tree_pruned;
+        use microgpt_rs::types::Config;
+
+        let pruner = load_bracket_validator();
+        // Use small_target config (vocab=4096) so ASCII codes fit as token indices.
+        let config = Config::small_target();
+
+        // Create marginals where ')' (41) has high probability at depth 0.
+        // The bracket pruner should reject ')' at depth 0 (no open paren).
+        let vocab_size = config.vocab_size;
+        let mut marginals = vec![vec![0.0f32; vocab_size]; 4];
+
+        // Depth 0: give ')' (ASCII 41) high prob — pruner should reject
+        marginals[0][b'(' as usize] = 0.5;
+        marginals[0][b')' as usize] = 0.4; // should be pruned at root
+        marginals[0][b'a' as usize] = 0.1;
+
+        // Depth 1: all tokens moderately likely
+        for v in &mut marginals[1] {
+            *v = 0.01;
+        }
+        marginals[1][b'a' as usize] = 0.5;
+
+        // Depth 2-3: uniform-ish
+        for depth in 2..4 {
+            for v in &mut marginals[depth] {
+                *v = 0.01;
+            }
+        }
+
+        let tree = build_dd_tree_pruned(
+            &marginals.iter().map(|m| m.as_slice()).collect::<Vec<_>>(),
+            &config,
+            &pruner,
+            false,
+        );
+
+        // Tree should exist and be non-empty
+        assert!(!tree.is_empty(), "tree should have nodes");
+
+        // No node at depth 0 should have token_idx == ')' (41)
+        for node in &tree {
+            if node.depth == 0 {
+                assert_ne!(
+                    node.token_idx, b')' as usize,
+                    "bracket pruner should reject ')' at root depth"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_wasm_multiple_pruners_independent() {
+        let bracket = load_bracket_validator();
+        let keyword = load_keyword_validator();
+
+        // Same input, different results
+        assert!(!bracket.is_valid(0, b')' as usize, &[])); // bracket rejects ')' at root (no open paren)
+        assert!(!keyword.is_valid(0, 0, &[])); // keyword rejects token 0
+
+        // Both agree on identifiers
+        assert!(bracket.is_valid(0, b'a' as usize, &[]));
+        assert!(keyword.is_valid(0, b'a' as usize, &[]));
+    }
+}

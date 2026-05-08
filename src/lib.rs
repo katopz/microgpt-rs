@@ -22,3 +22,6 @@ pub mod validator;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
+
+#[cfg(feature = "wasm")]
+pub mod wasm;
