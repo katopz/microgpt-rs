@@ -60,6 +60,19 @@ pub fn is_passable(grid: &[Vec<char>], r: usize, c: usize) -> bool {
     r < grid.len() && c < grid[r].len() && grid[r][c] != '#'
 }
 
+/// Returns the terrain cost of stepping onto tile `(r, c)`.
+///
+/// Terrain costs: `.` = 1 (grass), `~` = 2 (sand), `w` = 3 (water).
+/// Walls should never reach here (filtered by `is_passable`).
+#[inline]
+pub fn terrain_cost(grid: &[Vec<char>], r: usize, c: usize) -> u32 {
+    match grid[r][c] {
+        '~' => 2,
+        'w' => 3,
+        _ => 1,
+    }
+}
+
 /// Manhattan distance heuristic for A*.
 #[inline]
 pub fn manhattan(a: (usize, usize), b: (usize, usize)) -> u32 {
@@ -133,7 +146,7 @@ pub fn find_path(
             }
 
             visited.insert(next);
-            let g = current.g + 1;
+            let g = current.g + terrain_cost(grid, nr, nc);
             let f = g + manhattan(next, to);
             came_from.insert(next, (action, current.pos));
             open.push(Node { pos: next, g, f });
@@ -193,7 +206,7 @@ pub fn find_distance(
             }
 
             visited.insert(next);
-            let g = current.g + 1;
+            let g = current.g + terrain_cost(grid, nr, nc);
             let f = g + manhattan(next, to);
             open.push(Node { pos: next, g, f });
         }
@@ -362,7 +375,36 @@ mod tests {
         let blocked = HashSet::new();
         let path = find_path(&grid, (0, 0), (2, 2), &blocked).unwrap();
         let dist = find_distance(&grid, (0, 0), (2, 2), &blocked).unwrap();
+        // Uniform terrain (all grass=1): path length == distance
         assert_eq!(path.len() as u32, dist);
+    }
+
+    #[test]
+    fn test_terrain_cost_affects_path() {
+        // Grid with a sand shortcut vs grass detour
+        let s = "\
+            . ~ .\n\
+            . . .\n\
+            . . .";
+        let grid: Vec<Vec<char>> = s
+            .lines()
+            .map(|line| {
+                line.split_whitespace()
+                    .map(|c| c.chars().next().unwrap())
+                    .collect()
+            })
+            .collect();
+        let blocked = HashSet::new();
+
+        // Direct path through sand: cost = 1 (start) + 2 (sand) = 3, length = 2
+        // Detour via grass: cost = 1 + 1 + 1 = 3, length = 3
+        // Both have same cost, but A* should find the shorter direct path
+        let path = find_path(&grid, (0, 0), (0, 2), &blocked).unwrap();
+        assert_eq!(path.len(), 2); // Right, Right (through sand)
+
+        // Distance should be 3 (1 grass + 2 sand)
+        let dist = find_distance(&grid, (0, 0), (0, 2), &blocked).unwrap();
+        assert_eq!(dist, 3);
     }
 
     #[test]

@@ -22,16 +22,18 @@ pub struct GameState {
     pub killed_monsters: u32,     // Bitmask of killed monsters
     pub collected_treasures: u32, // Bitmask of collected treasures
     pub dropped_items: u32,       // Bitmask of items currently on the floor
+    pub total_cost: u32,          // Accumulated movement cost
 }
 
 impl GameState {
     /// Returns a compact summary string of the state for display.
     pub fn summary(&self) -> String {
         format!(
-            "pos=({}, {}) inv={} killed={:02b} treasures={:02b} dropped={:02b}",
+            "pos=({}, {}) inv={} cost={} killed={:02b} treasures={:02b} dropped={:02b}",
             self.r,
             self.c,
             self.inventory,
+            self.total_cost,
             self.killed_monsters,
             self.collected_treasures,
             self.dropped_items
@@ -124,6 +126,22 @@ impl TacticalPruner {
             killed_monsters: 0,
             collected_treasures: 0,
             dropped_items: 0,
+            total_cost: 0,
+        }
+    }
+
+    /// Returns the terrain cost of stepping onto tile `(r, c)`.
+    ///
+    /// Terrain costs:
+    /// - `.` = Grass (cost 1)
+    /// - `~` = Sand (cost 2)
+    /// - `w` = Water (cost 3)
+    /// - `#` = Wall (impassable — cost is irrelevant, blocked before reaching here)
+    pub fn terrain_cost(&self, r: usize, c: usize) -> u32 {
+        match self.grid[r][c] {
+            '~' => 2,
+            'w' => 3,
+            _ => 1, // grass, floor, or any other passable tile
         }
     }
 
@@ -205,7 +223,10 @@ impl TacticalPruner {
                 next.r = nr;
                 next.c = nc;
 
-                // 5. Auto-pickup dropped items at new tile
+                // 5. Accumulate movement cost (terrain-dependent)
+                next.total_cost += self.terrain_cost(nr, nc);
+
+                // 6. Auto-pickup dropped items at new tile
                 for (i, &m_pos) in self.monsters.iter().enumerate() {
                     if m_pos == (nr, nc)
                         && (next.dropped_items & (1 << i)) != 0
