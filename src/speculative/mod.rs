@@ -6,9 +6,6 @@ pub mod step;
 pub mod types;
 pub mod verifier;
 
-#[cfg(feature = "sudoku")]
-pub mod sudoku_pruner;
-
 // Re-exports — preserves existing import paths like `speculative::build_dd_tree`
 pub use dd_tree::{
     TreeBuilder, build_dd_tree, build_dd_tree_pruned, extract_best_path, extract_best_path_into,
@@ -39,7 +36,7 @@ pub use step::{
 };
 
 #[cfg(feature = "sudoku")]
-pub use sudoku_pruner::SudokuPruner;
+pub use crate::pruners::SudokuPruner;
 
 #[cfg(feature = "rest")]
 pub use step::speculative_step_rest;

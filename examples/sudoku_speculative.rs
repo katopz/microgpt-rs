@@ -11,9 +11,9 @@
 //! Run: cargo run --example sudoku_speculative
 
 use microgpt_rs::percepta::Sudoku9x9;
+use microgpt_rs::pruners::SudokuPruner;
 use microgpt_rs::speculative::{
-    ConstraintPruner, SudokuPruner, TreeNode, build_dd_tree, build_dd_tree_pruned,
-    extract_parent_tokens,
+    ConstraintPruner, TreeNode, build_dd_tree, build_dd_tree_pruned, extract_parent_tokens,
 };
 use microgpt_rs::types::Config;
 

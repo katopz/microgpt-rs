@@ -46,5 +46,14 @@ name = "sudoku_tui"
 required-features = ["sudoku"]
 
 [[example]]
+name = "blue_bear"
+
+[[example]]
+name = "tactical_ai"
+
+[[example]]
+name = "blue_bear_tui"
+
+[[example]]
 name = "validator_demo"
 required-features = ["validator"]

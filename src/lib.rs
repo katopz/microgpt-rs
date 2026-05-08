@@ -1,6 +1,7 @@
 pub mod benchmark;
 pub mod percepta;
 pub mod plot;
+pub mod pruners;
 pub mod speculative;
 pub mod tokenizer;
 pub mod transformer;
