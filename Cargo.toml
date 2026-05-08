@@ -52,6 +52,9 @@ name = "blue_bear"
 name = "tactical_ai"
 
 [[example]]
+name = "tactical_ai_tui"
+
+[[example]]
 name = "blue_bear_tui"
 
 [[example]]
