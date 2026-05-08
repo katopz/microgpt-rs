@@ -7,6 +7,7 @@ edition = "2024"
 plotters = "0.3"
 rayon = "1.10"
 blake3 = "1"
+fastrand = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["json"], optional = true }
@@ -56,6 +57,22 @@ name = "tactical_ai_tui"
 
 [[example]]
 name = "tactical_bench"
+
+[[example]]
+name = "tactical_terrain"
+
+[[example]]
+name = "dungeon_multifloor"
+
+[[example]]
+name = "dungeon_tui"
+
+[[example]]
+name = "tactical_procedural"
+
+[[example]]
+name = "tactical_parallel"
+
 
 [[example]]
 name = "blue_bear_tui"

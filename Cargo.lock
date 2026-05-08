@@ -1748,6 +1748,7 @@ dependencies = [
  "blake3",
  "bytemuck",
  "crossterm",
+ "fastrand",
  "plotters",
  "pollster",
  "proc-macro2",
