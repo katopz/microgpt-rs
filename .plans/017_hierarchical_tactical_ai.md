@@ -263,12 +263,12 @@ examples/
 - [x] Controls: ←/→ step, Space auto-play, . skip, Home/End
 - [x] Add `[[example]]` entry to Cargo.toml
 
-### Phase 5: Polish
+### Phase 5: Polish ✅
 - [x] ~~Add cost/stamina model~~ → Done in plan 018 (terrain costs, total_cost, weighted A*)
-- [ ] Benchmark: time strategic solve vs. brute-force BFS
-- [ ] Verify 16×16 map solvability with different layouts
-- [ ] Update `.handovers`
-- [ ] Commit and clean up
+- [x] Benchmark: strategic solve vs brute-force DDTree → `examples/tactical_bench.rs`
+- [x] Verify 16×16 map solvability with different layouts → Arena + Corridor maps verified
+- [x] Update `.handovers` → `.handovers/013_tactical_ai_tui.md`
+- [x] Commit and clean up
 
 ## 17×16 Dungeon Map (Actual)
 
@@ -307,6 +307,20 @@ examples/
 - All 3 monsters killed, all 3 treasures collected, bear at goal
 - All assertions pass ✅
 - 260 tests pass (80 lib + 180 pathfinder)
+
+## Benchmark Results (Phase 5)
+
+| Map | Approach | Nodes | Time | Steps | Solved |
+|-----|----------|-------|------|-------|--------|
+| Small (2×3) | Brute-force | 269 | 2.1ms | 7 | ✅ |
+| Small (2×3) | Strategic | 4 | 160µs | 7 | ✅ |
+| Original (17×16) | Strategic | 63 | 69.7ms | 125 | ✅ |
+| Original (17×16) | Brute-force | — | N/A | — | ❌ infeasible |
+| Arena (16×16) | Strategic | 662 | 670.5ms | 67 | ✅ |
+| Corridor (16×16) | Strategic | 613 | 416.3ms | 59 | ✅ |
+
+**Key insight**: Brute-force DDTree (vocab=5) max lookahead=8 (u128/16). Only works for ≤8 step puzzles.
+Strategic DDTree (vocab=N targets) scales to any map size — A* handles the movement expansion.
 
 ## Design Decisions
 

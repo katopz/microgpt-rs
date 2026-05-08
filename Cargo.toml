@@ -55,6 +55,9 @@ name = "tactical_ai"
 name = "tactical_ai_tui"
 
 [[example]]
+name = "tactical_bench"
+
+[[example]]
 name = "blue_bear_tui"
 
 [[example]]
