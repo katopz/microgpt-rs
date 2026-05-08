@@ -1828,7 +1828,7 @@ fn test_raven_router_top_k_sparsity() {
     // All entries in [0, 1]
     for &v in &r_t {
         assert!(
-            v >= 0.0 && v <= 1.0,
+            (0.0..=1.0).contains(&v),
             "routing values must be in [0, 1], got {v}"
         );
     }
