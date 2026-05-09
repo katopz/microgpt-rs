@@ -18,6 +18,8 @@ use crate::speculative::types::ScreeningPruner;
 use crate::types::Rng;
 
 use super::entropy::identify_high_entropy_positions;
+use super::entropy::identify_high_entropy_positions_with_entropy_into;
+use super::entropy::identify_positions_adaptive_with_entropy_into;
 use super::types::{PpotConfig, TokenRule};
 
 // Plan 027 imports
@@ -386,12 +388,26 @@ pub fn ppot_rescue_adaptive<P: ScreeningPruner>(
         config.entropy_threshold
     };
 
-    // 2. Identify positions (adaptive or entropy-only)
-    let positions = if knowledge.has_insights() {
-        super::entropy::identify_positions_adaptive(marginals, threshold, Some(knowledge))
+    // 2. Identify positions with entropy in single pass (avoids double computation)
+    let mut positions = Vec::new();
+    let mut entropy_cache = Vec::new();
+
+    if knowledge.has_insights() {
+        identify_positions_adaptive_with_entropy_into(
+            marginals,
+            threshold,
+            Some(knowledge),
+            &mut positions,
+            &mut entropy_cache,
+        );
     } else {
-        identify_high_entropy_positions(marginals, threshold)
-    };
+        identify_high_entropy_positions_with_entropy_into(
+            marginals,
+            threshold,
+            &mut positions,
+            &mut entropy_cache,
+        );
+    }
 
     if positions.is_empty() {
         return None;
@@ -424,12 +440,6 @@ pub fn ppot_rescue_adaptive<P: ScreeningPruner>(
     // 5. Validate and collect results
     let mut valid_variants = Vec::new();
     let mut valid_indices = Vec::new();
-
-    // Pre-compute entropy per position (once, not per-sample-per-position)
-    let entropy_cache: Vec<f32> = positions
-        .iter()
-        .map(|&pos| super::entropy::token_entropy(marginals.get(pos).copied().unwrap_or(&[])))
-        .collect();
 
     for (idx, variant) in variants.iter().enumerate() {
         let accepted = is_path_valid(variant, pruner);
