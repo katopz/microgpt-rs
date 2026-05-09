@@ -15,7 +15,7 @@
 //!
 //! - `count_agreements`: chunked 4-at-a-time comparison for auto-vectorization
 //! - `rank_by_consistency`: serial O(m²×L) — rayon overhead dominates for m≤16
-//! - `select_best_variant`: clones only the winning variant once
+//! - `select_best_variant`: returns index of best variant (zero-allocation)
 
 use crate::speculative::types::ScreeningPruner;
 
@@ -225,11 +225,11 @@ pub fn rank_by_consistency_weighted(
 /// candidates pass validation, the one most consistent with others is
 /// preferred (mutual exclusivity principle from Wang et al. 2022).
 ///
-/// Only clones the winning variant once at the end.
-pub fn select_best_variant(
+/// Returns the index of the best variant (zero-allocation).
+pub fn select_best_variant<P: ScreeningPruner>(
     variants: &[Vec<usize>],
-    pruner: &dyn ScreeningPruner,
-) -> Option<Vec<usize>> {
+    pruner: &P,
+) -> Option<usize> {
     if variants.is_empty() {
         return None;
     }
@@ -244,7 +244,7 @@ pub fn select_best_variant(
 
     match valid_indices.len() {
         0 => None,
-        1 => Some(variants[valid_indices[0]].clone()),
+        1 => Some(valid_indices[0]),
         _ => {
             // Multiple valid: rank by consistency within the valid subset
             let valid_variants: Vec<&Vec<usize>> =
@@ -252,11 +252,11 @@ pub fn select_best_variant(
 
             let ranked = rank_by_consistency_subset(&valid_variants);
 
-            // Clone only the winner — map subset index back to original index
+            // Return index of winner — map subset index back to original index
             ranked
                 .into_iter()
                 .next()
-                .map(|(sub_idx, _)| variants[valid_indices[sub_idx]].clone())
+                .map(|(sub_idx, _)| valid_indices[sub_idx])
         }
     }
 }
@@ -266,12 +266,12 @@ pub fn select_best_variant(
 /// Like [`select_best_variant`] but uses [`rank_by_consistency_weighted`]
 /// to focus ranking on resampled positions.
 ///
-/// Only clones the winning variant once at the end.
-pub fn select_best_variant_weighted(
+/// Returns the index of the best variant (zero-allocation).
+pub fn select_best_variant_weighted<P: ScreeningPruner>(
     variants: &[Vec<usize>],
     base_path: &[usize],
-    pruner: &dyn ScreeningPruner,
-) -> Option<Vec<usize>> {
+    pruner: &P,
+) -> Option<usize> {
     if variants.is_empty() {
         return None;
     }
@@ -285,18 +285,18 @@ pub fn select_best_variant_weighted(
 
     match valid_indices.len() {
         0 => None,
-        1 => Some(variants[valid_indices[0]].clone()),
+        1 => Some(valid_indices[0]),
         _ => {
             let valid_variants: Vec<&Vec<usize>> =
                 valid_indices.iter().map(|&i| &variants[i]).collect();
 
             let ranked = rank_by_consistency_weighted_subset(&valid_variants, base_path);
 
-            // Clone only the winner — map subset index back to original index
+            // Return index of winner — map subset index back to original index
             ranked
                 .into_iter()
                 .next()
-                .map(|(sub_idx, _)| variants[valid_indices[sub_idx]].clone())
+                .map(|(sub_idx, _)| valid_indices[sub_idx])
         }
     }
 }
@@ -306,7 +306,7 @@ pub fn select_best_variant_weighted(
 /// Check if a token path passes the screening pruner.
 /// Returns `true` if every token has positive relevance (no hard rejection).
 #[inline]
-fn is_path_valid(path: &[usize], pruner: &dyn ScreeningPruner) -> bool {
+fn is_path_valid<P: ScreeningPruner>(path: &[usize], pruner: &P) -> bool {
     for (depth, &token) in path.iter().enumerate() {
         let relevance = pruner.relevance(depth, token, &path[..depth]);
         if relevance <= 0.0 {
@@ -526,7 +526,7 @@ mod tests {
         ];
 
         let result = select_best_variant(&variants, &RejectZeroPruner);
-        assert_eq!(result, Some(vec![1, 2, 3]));
+        assert_eq!(result, Some(1));
     }
 
     #[test]
@@ -540,8 +540,9 @@ mod tests {
         let result = select_best_variant(&variants, &NoScreeningPruner);
         assert!(result.is_some());
         // Should prefer the most consistent variant (0 or 1, tied)
-        let path = result.unwrap();
-        assert!(path == vec![1, 2, 3] || path == vec![1, 2, 3]);
+        let idx = result.unwrap();
+        assert!(idx == 0 || idx == 1);
+        assert_eq!(variants[idx], vec![1, 2, 3]);
     }
 
     #[test]
@@ -583,9 +584,10 @@ mod tests {
 
         let result = select_best_variant_weighted(&variants, &base, &NoScreeningPruner);
         assert!(result.is_some());
-        let path = result.unwrap();
+        let idx = result.unwrap();
         // Should prefer variant 0 or 1 (same, highest agreement at resampled positions)
-        assert!(path == vec![1, 5, 3, 6]);
+        assert!(idx == 0 || idx == 1);
+        assert_eq!(variants[idx], vec![1, 5, 3, 6]);
     }
 
     // ── is_path_valid tests ──

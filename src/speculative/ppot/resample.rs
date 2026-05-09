@@ -50,7 +50,14 @@ fn sample_from_support(
     let mut sum = 0.0f32;
     for (i, slot) in scratch.iter_mut().enumerate().take(len) {
         let tok = support[i];
-        let p = if tok < probs.len() { probs[tok] } else { 0.0 };
+        // SAFETY: support tokens are generated from TokenRule::support(vocab_size)
+        // which guarantees tok < vocab_size == probs.len()
+        debug_assert!(
+            tok < probs.len(),
+            "support token {tok} exceeds vocab size {}",
+            probs.len()
+        );
+        let p = unsafe { *probs.get_unchecked(tok) };
         *slot = p;
         sum += p;
     }
@@ -265,7 +272,7 @@ pub fn ppot_resample_multi_strategy(
 /// Returns `true` if every token in the path has positive relevance
 /// (no hard rejection). Uses `ScreeningPruner::relevance()` at each depth.
 #[inline]
-fn is_path_valid(path: &[usize], pruner: &dyn ScreeningPruner) -> bool {
+fn is_path_valid<P: ScreeningPruner>(path: &[usize], pruner: &P) -> bool {
     for (depth, &token) in path.iter().enumerate() {
         let relevance = pruner.relevance(depth, token, &path[..depth]);
         if relevance <= 0.0 {
@@ -298,10 +305,10 @@ fn is_path_valid(path: &[usize], pruner: &dyn ScreeningPruner) -> bool {
 /// * `config` — PPoT configuration (threshold, num_samples, rule, etc.)
 /// * `scratch` — temporary buffer, must be `>= vocab_size`
 /// * `rng` — deterministic random number generator
-pub fn ppot_rescue(
+pub fn ppot_rescue<P: ScreeningPruner>(
     marginals: &[&[f32]],
     base_path: &[usize],
-    pruner: &dyn ScreeningPruner,
+    pruner: &P,
     config: &PpotConfig,
     scratch: &mut [f32],
     rng: &mut Rng,
@@ -317,9 +324,16 @@ pub fn ppot_rescue(
     }
 
     // 2. Resample m variants
+    // When rule is not All, use cached support for constrained resampling.
+    // Requires `config.with_cached_support(vocab_size)` to have been called.
+    let use_cached_support = config.has_cached_support() && !matches!(config.rule, TokenRule::All);
+
     for _ in 0..config.num_samples {
         let variant = if config.different_constraint {
             ppot_resample_different_value(base_path, marginals, &positions, scratch, rng)
+        } else if use_cached_support {
+            let support = config.support_for(config.rule);
+            ppot_resample_with_support(base_path, marginals, &positions, support, scratch, rng)
         } else {
             ppot_resample(base_path, marginals, &positions, rng)
         };
@@ -352,10 +366,10 @@ pub fn ppot_rescue(
 /// * `knowledge` — session-level rejection memory (persists across rescue attempts)
 ///
 /// Other arguments same as [`ppot_rescue`].
-pub fn ppot_rescue_adaptive(
+pub fn ppot_rescue_adaptive<P: ScreeningPruner>(
     marginals: &[&[f32]],
     base_path: &[usize],
-    pruner: &dyn ScreeningPruner,
+    pruner: &P,
     config: &PpotConfig,
     knowledge: &mut SessionKnowledge,
     scratch: &mut [f32],

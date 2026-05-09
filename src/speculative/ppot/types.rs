@@ -250,6 +250,12 @@ impl PpotConfig {
         self
     }
 
+    /// Returns `true` if cached support sets have been pre-computed via [`with_cached_support`].
+    #[inline]
+    pub fn has_cached_support(&self) -> bool {
+        self.cached_support.is_some()
+    }
+
     /// Return the cached support set for `rule`.
     ///
     /// **Panics** if [`with_cached_support`] was not called before this method.

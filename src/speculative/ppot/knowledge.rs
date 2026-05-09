@@ -424,16 +424,15 @@ impl SessionKnowledge {
 
     /// Get an iterator over current insights (most recent first).
     pub fn insights(&self) -> impl Iterator<Item = &RejectionInsight> {
-        // Read from most recent backwards
         let count = self.count;
-        let max = self.max_insights;
-        let start = if count < max { 0 } else { self.write_pos };
+        let start = if count < self.max_insights {
+            0
+        } else {
+            self.write_pos
+        };
+        let len = self.insights.len();
 
-        self.insights
-            .iter()
-            .cycle()
-            .skip(start)
-            .take(count.min(self.insights.len()))
+        (0..count).filter_map(move |i| self.insights.get((start + i) % len))
     }
 
     /// Approximate memory usage in bytes.

@@ -97,3 +97,7 @@ required-features = ["router"]
 [[example]]
 name = "embedding_router_demo"
 required-features = ["embedding_router"]
+
+[[example]]
+name = "ppot_bench"
+required-features = ["ppot"]
