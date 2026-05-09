@@ -275,7 +275,7 @@ impl Rng {
 }
 
 /// In-place softmax. Handles empty slices gracefully.
-/// Two-pass: find max (for numerical stability), then exp+sum+normalize fused.
+/// Three-pass: find max → exp+sum → normalize.
 #[inline(always)]
 pub fn softmax(x: &mut [f32]) {
     if x.is_empty() {
@@ -295,13 +295,53 @@ pub fn softmax(x: &mut [f32]) {
         max
     };
 
-    // Pass 2: exp, sum, and normalize in one loop
+    // Pass 2: exp(x - max) + accumulate sum
     let mut sum = 0.0f32;
     for val in x.iter_mut() {
         *val = (*val - max_val).exp();
         sum += *val;
     }
 
+    // Pass 3: normalize
+    let inv_sum = 1.0 / sum;
+    for val in x.iter_mut() {
+        *val *= inv_sum;
+    }
+}
+
+/// In-place softmax with temperature scaling: `softmax(x / temperature)`.
+///
+/// Fuses the temperature division into the exp computation, saving one full pass
+/// vs separate `for p /= temp; softmax(x)`.
+///
+/// `inv_temp` should be `1.0 / temperature` — compute once, pass to every call.
+#[inline(always)]
+pub fn softmax_scaled(x: &mut [f32], inv_temp: f32) {
+    if x.is_empty() {
+        return;
+    }
+
+    // Pass 1: find max for numerical stability (on raw values, before temp scaling)
+    let max_val = {
+        let mut max = x[0];
+        let len = x.len();
+        for i in 1..len {
+            let v = unsafe { *x.get_unchecked(i) };
+            if v > max {
+                max = v;
+            }
+        }
+        max
+    };
+
+    // Pass 2: exp((x - max) * inv_temp) + accumulate sum
+    let mut sum = 0.0f32;
+    for val in x.iter_mut() {
+        *val = ((*val - max_val) * inv_temp).exp();
+        sum += *val;
+    }
+
+    // Pass 3: normalize
     let inv_sum = 1.0 / sum;
     for val in x.iter_mut() {
         *val *= inv_sum;

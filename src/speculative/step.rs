@@ -13,7 +13,7 @@ use crate::speculative::dflash::dflash_predict;
 use crate::speculative::dflash::dflash_predict_conditioned;
 use crate::speculative::sampling::{sample_from_distribution, sample_residual_distribution};
 use crate::transformer::{ForwardContext, MultiLayerKVCache, forward};
-use crate::types::softmax;
+use crate::types::softmax_scaled;
 
 // Zero-alloc _with imports
 use crate::speculative::dd_tree::TreeBuilder;
@@ -193,10 +193,7 @@ pub fn speculative_step_rollback(
             target_config,
         );
         let mut p_dist = logits.to_vec();
-        for p in p_dist.iter_mut() {
-            *p /= target_config.temperature;
-        }
-        softmax(&mut p_dist);
+        softmax_scaled(&mut p_dist, 1.0 / target_config.temperature);
 
         for (i, &draft_tok) in path.iter().enumerate() {
             let q_dist = marginals.get(i).map(|m| m.as_slice()).unwrap_or(&[]);
@@ -217,10 +214,7 @@ pub fn speculative_step_rollback(
                         target_config,
                     );
                     p_dist = logits.to_vec();
-                    for p in p_dist.iter_mut() {
-                        *p /= target_config.temperature;
-                    }
-                    softmax(&mut p_dist);
+                    softmax_scaled(&mut p_dist, 1.0 / target_config.temperature);
                 }
             } else {
                 let replacement = sample_residual_distribution(&p_dist, q_dist, rng);
@@ -252,10 +246,7 @@ pub fn speculative_step_rollback(
         target_config,
     );
     let mut p_dist = logits.to_vec();
-    for p in p_dist.iter_mut() {
-        *p /= target_config.temperature;
-    }
-    softmax(&mut p_dist);
+    softmax_scaled(&mut p_dist, 1.0 / target_config.temperature);
     let fallback = sample_from_distribution(&p_dist, rng);
     (vec![fallback], 1)
 }
@@ -307,10 +298,7 @@ pub fn speculative_step_conditioned(
 
     if path.is_empty() {
         let mut p_dist = logits.to_vec();
-        for p in p_dist.iter_mut() {
-            *p /= target_config.temperature;
-        }
-        softmax(&mut p_dist);
+        softmax_scaled(&mut p_dist, 1.0 / target_config.temperature);
         let fallback = sample_from_distribution(&p_dist, rng);
         return (vec![fallback], 1);
     }
@@ -394,10 +382,7 @@ pub fn speculative_step_rollback_with(
             target_config,
         );
         probs_buf.copy_from_slice(logits);
-        for p in probs_buf.iter_mut() {
-            *p /= target_config.temperature;
-        }
-        softmax(probs_buf);
+        softmax_scaled(probs_buf, 1.0 / target_config.temperature);
 
         for (i, &draft_tok) in path.iter().enumerate() {
             let q_dist = marginals.get(i).copied().unwrap_or(&[]);
@@ -418,10 +403,7 @@ pub fn speculative_step_rollback_with(
                         target_config,
                     );
                     probs_buf.copy_from_slice(logits);
-                    for p in probs_buf.iter_mut() {
-                        *p /= target_config.temperature;
-                    }
-                    softmax(probs_buf);
+                    softmax_scaled(probs_buf, 1.0 / target_config.temperature);
                 }
             } else {
                 let replacement =
@@ -454,10 +436,7 @@ pub fn speculative_step_rollback_with(
         target_config,
     );
     probs_buf.copy_from_slice(logits);
-    for p in probs_buf.iter_mut() {
-        *p /= target_config.temperature;
-    }
-    softmax(probs_buf);
+    softmax_scaled(probs_buf, 1.0 / target_config.temperature);
     let fallback = sample_from_distribution(probs_buf, rng);
     (vec![fallback], 1)
 }
@@ -562,10 +541,7 @@ pub fn speculative_step_rollback_paged(
             target_config,
         );
         let mut p_dist = logits.to_vec();
-        for p in p_dist.iter_mut() {
-            *p /= target_config.temperature;
-        }
-        softmax(&mut p_dist);
+        softmax_scaled(&mut p_dist, 1.0 / target_config.temperature);
 
         for (i, &draft_tok) in path.iter().enumerate() {
             let q_dist = marginals.get(i).map(|m| m.as_slice()).unwrap_or(&[]);
@@ -586,10 +562,7 @@ pub fn speculative_step_rollback_paged(
                         target_config,
                     );
                     p_dist = logits.to_vec();
-                    for p in p_dist.iter_mut() {
-                        *p /= target_config.temperature;
-                    }
-                    softmax(&mut p_dist);
+                    softmax_scaled(&mut p_dist, 1.0 / target_config.temperature);
                 }
             } else {
                 let replacement = sample_residual_distribution(&p_dist, q_dist, rng);
@@ -636,10 +609,7 @@ pub fn speculative_step_rollback_paged(
         target_config,
     );
     let mut p_dist = logits.to_vec();
-    for p in p_dist.iter_mut() {
-        *p /= target_config.temperature;
-    }
-    softmax(&mut p_dist);
+    softmax_scaled(&mut p_dist, 1.0 / target_config.temperature);
     let fallback = sample_from_distribution(&p_dist, rng);
     (vec![fallback], 1)
 }
@@ -673,10 +643,7 @@ pub fn speculative_step_conditioned_with(
         target_config,
     );
     probs_buf.copy_from_slice(logits);
-    for p in probs_buf.iter_mut() {
-        *p /= target_config.temperature;
-    }
-    softmax(probs_buf);
+    softmax_scaled(probs_buf, 1.0 / target_config.temperature);
 
     // 2. Conditioned draft using target hidden state (no clone — borrow directly)
     let hidden = &target_ctx.hidden_state;

@@ -8,7 +8,7 @@ use crate::types::{Config, Rng};
 use crate::speculative::dflash::dflash_predict_ar_with;
 use crate::speculative::sampling::sample_residual_distribution_into;
 use crate::transformer::{ForwardContext, MultiLayerKVCache, forward};
-use crate::types::softmax;
+use crate::types::softmax_scaled;
 
 // ── Speculative Verifier: Strategy Pattern ──────────────────
 
@@ -182,12 +182,9 @@ impl SpeculativeVerifier for LeviathanVerifier<'_> {
                 pos,
                 self.target_config,
             );
-            let mut temp_buf = logits.to_vec();
-            for p in temp_buf.iter_mut() {
-                *p /= target_temp;
-            }
-            softmax(&mut temp_buf);
-            return vec![sample_from_distribution(&temp_buf, rng)];
+            self.draft_sctx.probs_buf.copy_from_slice(logits);
+            softmax_scaled(&mut self.draft_sctx.probs_buf, 1.0 / target_temp);
+            return vec![sample_from_distribution(&self.draft_sctx.probs_buf, rng)];
         }
 
         // Phase 2: Target scoring — write p_dist directly to flat buffer
@@ -203,12 +200,10 @@ impl SpeculativeVerifier for LeviathanVerifier<'_> {
                 pos,
                 self.target_config,
             );
-            let mut temp_buf = logits.to_vec();
-            for p in temp_buf.iter_mut() {
-                *p /= target_temp;
-            }
-            softmax(&mut temp_buf);
-            self.draft_sctx.p_distributions_flat[..vocab_size].copy_from_slice(&temp_buf);
+            self.draft_sctx.probs_buf.copy_from_slice(logits);
+            softmax_scaled(&mut self.draft_sctx.probs_buf, 1.0 / target_temp);
+            self.draft_sctx.p_distributions_flat[..vocab_size]
+                .copy_from_slice(&self.draft_sctx.probs_buf);
         }
 
         // Copy sampled tokens before iterating (avoids borrow conflicts with flat buffers)
@@ -224,14 +219,11 @@ impl SpeculativeVerifier for LeviathanVerifier<'_> {
                 pos + 1 + i,
                 self.target_config,
             );
-            let mut temp_buf = logits.to_vec();
-            for p in temp_buf.iter_mut() {
-                *p /= target_temp;
-            }
-            softmax(&mut temp_buf);
+            self.draft_sctx.probs_buf.copy_from_slice(logits);
+            softmax_scaled(&mut self.draft_sctx.probs_buf, 1.0 / target_temp);
             let start = (i + 1) * vocab_size;
             self.draft_sctx.p_distributions_flat[start..start + vocab_size]
-                .copy_from_slice(&temp_buf);
+                .copy_from_slice(&self.draft_sctx.probs_buf);
         }
 
         // Phase 3: Rejection sampling

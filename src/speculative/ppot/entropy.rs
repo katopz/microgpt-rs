@@ -76,6 +76,32 @@ pub fn identify_high_entropy_positions_into(
     }
 }
 
+/// Zero-alloc variant that also returns pre-computed entropy values.
+///
+/// Clears `positions_buf` and `entropy_buf`, then writes high-entropy position
+/// indices and their Shannon entropy values into the respective buffers.
+/// Reuses pre-allocated buffer capacity across calls.
+///
+/// Use this when you need both the positions AND their entropy values to avoid
+/// redundant computation (e.g., for rejection insight recording in rescue).
+#[inline]
+pub fn identify_high_entropy_positions_with_entropy_into(
+    marginals: &[&[f32]],
+    threshold: f32,
+    positions_buf: &mut Vec<usize>,
+    entropy_buf: &mut Vec<f32>,
+) {
+    positions_buf.clear();
+    entropy_buf.clear();
+    for (i, &probs) in marginals.iter().enumerate() {
+        let h = token_entropy(probs);
+        if h > threshold {
+            positions_buf.push(i);
+            entropy_buf.push(h);
+        }
+    }
+}
+
 /// Identify positions filtered by both entropy and token rule support.
 ///
 /// Only positions where:
@@ -179,6 +205,69 @@ pub fn identify_positions_adaptive_into(
                     .partial_cmp(&affinity_a)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
+        }
+        _ => {
+            // Cold start: no knowledge, use entropy-only ordering
+        }
+    }
+}
+
+/// Zero-alloc variant of [`identify_positions_adaptive`] that also returns
+/// pre-computed entropy values.
+///
+/// Clears `positions_buf` and `entropy_buf`, then writes filtered/ordered
+/// position indices and their Shannon entropy values into the respective buffers.
+///
+/// Use this when you need both the positions AND their entropy values to avoid
+/// redundant computation (e.g., for rejection insight recording in rescue).
+#[cfg(feature = "ppot")]
+#[inline]
+pub fn identify_positions_adaptive_with_entropy_into(
+    marginals: &[&[f32]],
+    threshold: f32,
+    knowledge: Option<&SessionKnowledge>,
+    positions_buf: &mut Vec<usize>,
+    entropy_buf: &mut Vec<f32>,
+) {
+    // Step 1: Compute entropy and filter by threshold (single pass)
+    identify_high_entropy_positions_with_entropy_into(
+        marginals,
+        threshold,
+        positions_buf,
+        entropy_buf,
+    );
+
+    // Step 2: Apply knowledge-based filtering and reordering
+    match knowledge {
+        Some(k) if k.has_insights() => {
+            // Parallel retain: filter out known-dead positions and their entropy
+            let mut write = 0;
+            for read in 0..positions_buf.len() {
+                if !k.should_skip_position(positions_buf[read]) {
+                    positions_buf[write] = positions_buf[read];
+                    entropy_buf[write] = entropy_buf[read];
+                    write += 1;
+                }
+            }
+            positions_buf.truncate(write);
+            entropy_buf.truncate(write);
+
+            // Sort by position affinity (highest success rate first)
+            // Build index permutation, sort it, then reorder both buffers
+            let mut indices: Vec<usize> = (0..positions_buf.len()).collect();
+            indices.sort_by(|&a, &b| {
+                let affinity_a = k.position_affinity(positions_buf[a]);
+                let affinity_b = k.position_affinity(positions_buf[b]);
+                affinity_b
+                    .partial_cmp(&affinity_a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            // Apply permutation to both buffers via temp storage
+            let sorted_positions: Vec<usize> = indices.iter().map(|&i| positions_buf[i]).collect();
+            let sorted_entropy: Vec<f32> = indices.iter().map(|&i| entropy_buf[i]).collect();
+            *positions_buf = sorted_positions;
+            *entropy_buf = sorted_entropy;
         }
         _ => {
             // Cold start: no knowledge, use entropy-only ordering

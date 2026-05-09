@@ -186,11 +186,17 @@ pub struct ForwardContext {
     active_indices: Vec<usize>, // [mlp_hidden] pre-allocated index buffer
     #[cfg(feature = "sparse_mlp")]
     active_values: Vec<f32>, // [mlp_hidden] pre-allocated value buffer
+    // Paged KV cache: pre-allocated flat buffers for attention computation
+    paged_flat_key: Vec<f32>,   // [block_size * kv_dim]
+    paged_flat_value: Vec<f32>, // [block_size * kv_dim]
+    // Raven: pre-allocated query buffer for per-head slot attention
+    raven_query_buf: Vec<f32>, // [kv_dim]
 }
 
 impl ForwardContext {
     pub fn new(config: &Config) -> Self {
         let kvd = types::kv_dim(config);
+        let block_kv = config.block_size * kvd;
         Self {
             x: vec![0.0; config.n_embd],
             xr: vec![0.0; config.n_embd],
@@ -208,6 +214,9 @@ impl ForwardContext {
             active_indices: vec![0; config.mlp_hidden],
             #[cfg(feature = "sparse_mlp")]
             active_values: vec![0.0; config.mlp_hidden],
+            paged_flat_key: vec![0.0; block_kv],
+            paged_flat_value: vec![0.0; block_kv],
+            raven_query_buf: vec![0.0; kvd],
         }
     }
 }
@@ -821,10 +830,13 @@ pub fn forward_paged<'a>(
     // Ensure pages allocated for this sequence up to pos
     paged_cache.ensure_pages(seq_idx, pos);
 
-    // Temporary flat KV cache for attention computation (avoids page-by-page in kernel)
+    // Flat KV cache for attention computation (pre-allocated, reused from ForwardContext)
     let t_n = pos + 1;
-    let mut flat_key = vec![0.0f32; t_n * kvd];
-    let mut flat_value = vec![0.0f32; t_n * kvd];
+    let flat_kv_len = t_n * kvd;
+    let flat_key = &mut ctx.paged_flat_key[..flat_kv_len];
+    let flat_value = &mut ctx.paged_flat_value[..flat_kv_len];
+    flat_key.fill(0.0);
+    flat_value.fill(0.0);
 
     // 1. Embedding: x = wte[token] + wpe[pos]
     let tok_off = token * n;
@@ -867,8 +879,8 @@ pub fn forward_paged<'a>(
             unsafe {
                 attention_head(
                     &ctx.q,
-                    &flat_key,
-                    &flat_value,
+                    flat_key,
+                    flat_value,
                     &mut ctx.attn_out,
                     &mut ctx.scores,
                     h * hd,
@@ -977,10 +989,7 @@ pub fn generate_into(
 
         let logits = forward(ctx, weights, cache, token, pos, config);
 
-        for logit in logits.iter_mut() {
-            *logit /= config.temperature;
-        }
-        softmax(logits);
+        softmax_scaled(logits, 1.0 / config.temperature);
 
         let next_token = sample_token(logits, rng);
         tokens.push(next_token);
@@ -1265,6 +1274,9 @@ pub struct RavenKVCache {
     pub keys: Vec<f32>,
     /// Value memory: [num_slots × kv_dim]
     pub values: Vec<f32>,
+    // Pre-allocated buffers for zero-alloc router computation
+    router_scored: Vec<(usize, f32)>, // [num_slots]
+    router_r_t: Vec<f32>,             // [num_slots]
 }
 
 impl RavenKVCache {
@@ -1277,29 +1289,39 @@ impl RavenKVCache {
             forget_rate: -1.0,
             keys: vec![0.0; num_slots * kvd],
             values: vec![0.0; num_slots * kvd],
+            router_scored: Vec::with_capacity(num_slots),
+            router_r_t: Vec::with_capacity(num_slots),
         }
     }
 
     pub fn reset(&mut self) {
         self.keys.fill(0.0);
         self.values.fill(0.0);
+        self.router_scored.clear();
+        self.router_r_t.clear();
     }
 }
 
-/// Sparse router: computes Top-K routing vector from raw logits.
+/// Sparse router: computes Top-K routing vector from raw logits (zero-alloc variant).
 ///
 /// Implements: `r_t = Normalize(TopK(Sigmoid(raw_logits)))`
 /// Unselected slots get 0.0 → completely frozen during update.
-pub fn raven_compute_router(raw_logits: &[f32], top_k: usize) -> Vec<f32> {
+///
+/// Uses pre-allocated buffers to avoid heap allocations on the hot path.
+pub fn raven_compute_router_into(
+    raw_logits: &[f32],
+    top_k: usize,
+    scored: &mut Vec<(usize, f32)>,
+    r_t: &mut Vec<f32>,
+) {
     let num_slots = raw_logits.len();
     let top_k = top_k.min(num_slots);
 
-    // Sigmoid + enumerate
-    let mut scored: Vec<(usize, f32)> = raw_logits
-        .iter()
-        .enumerate()
-        .map(|(i, &x)| (i, 1.0 / (1.0 + (-x).exp())))
-        .collect();
+    // Reuse pre-allocated buffers: clear + fill
+    scored.clear();
+    for (i, &x) in raw_logits.iter().enumerate() {
+        scored.push((i, 1.0 / (1.0 + (-x).exp())));
+    }
 
     // Partial sort: find Top-K by descending score (O(n) average)
     if top_k < num_slots {
@@ -1308,7 +1330,8 @@ pub fn raven_compute_router(raw_logits: &[f32], top_k: usize) -> Vec<f32> {
         });
     }
 
-    let mut r_t = vec![0.0f32; num_slots];
+    r_t.clear();
+    r_t.resize(num_slots, 0.0);
     let mut sum = 0.0f32;
 
     // Keep only Top-K (the last top_k elements after partial sort are the largest)
@@ -1323,7 +1346,13 @@ pub fn raven_compute_router(raw_logits: &[f32], top_k: usize) -> Vec<f32> {
             *v /= sum;
         }
     }
+}
 
+/// Backward-compatible wrapper that allocates fresh buffers.
+pub fn raven_compute_router(raw_logits: &[f32], top_k: usize) -> Vec<f32> {
+    let mut scored = Vec::new();
+    let mut r_t = Vec::new();
+    raven_compute_router_into(raw_logits, top_k, &mut scored, &mut r_t);
     r_t
 }
 
@@ -1437,10 +1466,23 @@ pub fn forward_raven<'a>(
         // Raven: generate router logits from K (dummy projection)
         // For PoC: use first num_slots elements of K repeated as logits.
         // In production, this would be a learned linear projection: W_route × x_t
-        let router_logits: Vec<f32> = (0..cache.num_slots).map(|i| ctx.k[i % kvd]).collect();
+        // Reuse pre-allocated query buffer for router logits (zero-alloc)
+        ctx.raven_query_buf.resize(cache.num_slots, 0.0);
+        for (i, slot) in ctx.raven_query_buf.iter_mut().enumerate() {
+            *slot = ctx.k[i % kvd];
+        }
 
-        // Raven: compute sparse routing vector
-        let r_t = raven_compute_router(&router_logits, cache.top_k);
+        // Raven: compute sparse routing vector (zero-alloc via pre-allocated buffers)
+        raven_compute_router_into(
+            &ctx.raven_query_buf,
+            cache.top_k,
+            &mut cache.router_scored,
+            &mut cache.router_r_t,
+        );
+
+        // Clone router_r_t to avoid self-borrow (cache.keys vs cache.router_r_t)
+        // num_slots is typically 16-64 floats, so this is a tiny stack-like allocation
+        let r_t = cache.router_r_t.clone();
 
         // Raven: gated update (only selected slots are modified)
         raven_update(
@@ -1462,15 +1504,16 @@ pub fn forward_raven<'a>(
             let q_off = h * hd;
             // Each head reads from the slot memory using its query slice
             let head_query = &ctx.q[q_off..q_off + hd];
-            // Pad/reshape query to kv_dim for slot attention
-            let mut full_query = vec![0.0f32; kvd];
+            // Pad/reshape query to kv_dim for slot attention (reuse pre-allocated buffer)
+            ctx.raven_query_buf.resize(kvd, 0.0);
+            ctx.raven_query_buf.fill(0.0);
             let kv_group = h * n_kv / config.n_head;
-            for d in 0..hd {
-                full_query[kv_group * hd + d] = head_query[d] * scale;
+            for (d, &hq) in head_query.iter().enumerate() {
+                ctx.raven_query_buf[kv_group * hd + d] = hq * scale;
             }
 
             let slot_values = raven_readout(
-                &full_query,
+                &ctx.raven_query_buf,
                 &cache.keys,
                 &cache.values,
                 cache.num_slots,

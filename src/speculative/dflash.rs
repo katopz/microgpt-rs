@@ -1,7 +1,7 @@
 use crate::speculative::sampling::sample_from_distribution;
 use crate::speculative::types::{DraftResult, SpeculativeContext};
 use crate::transformer::{ForwardContext, MultiLayerKVCache, TransformerWeights, forward};
-use crate::types::{Config, Rng, softmax};
+use crate::types::{Config, Rng, softmax_scaled};
 use rayon::prelude::*;
 
 // ── Zero-alloc _with variants ──────────────────────────────────
@@ -35,10 +35,7 @@ pub fn dflash_predict_with(
             draft_config,
         );
         sctx.probs_buf.copy_from_slice(logits);
-        for p in sctx.probs_buf.iter_mut() {
-            *p /= temperature;
-        }
-        softmax(&mut sctx.probs_buf);
+        softmax_scaled(&mut sctx.probs_buf, 1.0 / temperature);
         let start = step * vocab_size;
         sctx.marginals_flat[start..start + vocab_size].copy_from_slice(&sctx.probs_buf);
     }
@@ -78,10 +75,7 @@ pub fn dflash_predict_ar_with(
             draft_config,
         );
         sctx.probs_buf.copy_from_slice(logits);
-        for p in sctx.probs_buf.iter_mut() {
-            *p /= temperature;
-        }
-        softmax(&mut sctx.probs_buf);
+        softmax_scaled(&mut sctx.probs_buf, 1.0 / temperature);
 
         let next_token = sample_from_distribution(&sctx.probs_buf, rng);
         let start = step * vocab_size;
@@ -142,10 +136,7 @@ pub fn dflash_predict_conditioned_with(
             draft_config,
         );
         sctx.probs_buf.copy_from_slice(logits);
-        for p in sctx.probs_buf.iter_mut() {
-            *p /= temperature;
-        }
-        softmax(&mut sctx.probs_buf);
+        softmax_scaled(&mut sctx.probs_buf, 1.0 / temperature);
 
         let next_token = sample_from_distribution(&sctx.probs_buf, rng);
         let start = step * vocab_size;
@@ -211,10 +202,7 @@ pub fn dflash_predict_parallel(
                 let draft_pos = pos + step;
                 let logits = forward(ctx, draft_weights, cache, token, draft_pos, draft_config);
                 probs_buf.copy_from_slice(logits);
-                for p in probs_buf.iter_mut() {
-                    *p /= draft_config.temperature;
-                }
-                softmax(probs_buf);
+                softmax_scaled(probs_buf, 1.0 / draft_config.temperature);
                 probs_buf.clone()
             },
         )
