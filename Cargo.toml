@@ -21,6 +21,7 @@ safetensors = { version = "0.4", optional = true }
 toml = "0.8"
 wasmtime = { version = "28", optional = true }
 wat = { version = "1", optional = true }
+papaya = { version = "0.2", optional = true }
 
 [dev-dependencies]
 ratatui = "0.29"
@@ -34,7 +35,7 @@ rest = ["reqwest", "tokio"]
 gpu = ["wgpu", "bytemuck", "pollster", "safetensors"]
 wasm = ["wasmtime", "wat"]
 sparse_mlp = []  # TwELL-inspired sparse MLP matmul (Plan 022)
-router = ["wasm"]
+router = ["wasm", "papaya"]
 embedding_router = ["router", "reqwest", "tokio"]
 full = ["sudoku", "validator", "rest", "gpu", "wasm", "router", "embedding_router"]
 

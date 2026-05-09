@@ -6,14 +6,13 @@
 //!
 //! # Thread Safety
 //!
-//! Uses an internal [`Mutex`] to guard the cache. The lock is held only during
-//! map reads/writes — WASM compilation happens outside the lock. A benign
-//! TOCTOU race exists (two threads may compile simultaneously on first access),
-//! but the result is always correct.
+//! Uses a lock-free [`papaya::HashMap`] for concurrent access. WASM
+//! compilation happens outside any critical section. Atomic operations
+//! ensure correct behaviour even when multiple threads compile the same
+//! file simultaneously.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::wasm::WasmPruner;
 
@@ -35,7 +34,7 @@ use crate::wasm::WasmPruner;
 /// let pruner = cache.get_or_load(Path::new("syn_validator.wasm"));
 /// ```
 pub struct WasmPrunerCache {
-    cache: Mutex<HashMap<PathBuf, Arc<WasmPruner>>>,
+    cache: papaya::HashMap<PathBuf, Arc<WasmPruner>>,
     pruner_dir: PathBuf,
 }
 
@@ -45,7 +44,7 @@ impl WasmPrunerCache {
     /// Relative `.wasm` paths are resolved against this directory.
     pub fn new(pruner_dir: PathBuf) -> Self {
         Self {
-            cache: Mutex::new(HashMap::new()),
+            cache: papaya::HashMap::new(),
             pruner_dir,
         }
     }
@@ -60,26 +59,26 @@ impl WasmPrunerCache {
 
         // Fast path: already cached.
         {
-            let cache = self.cache.lock().expect("wasm cache lock poisoned");
+            let cache = self.cache.pin();
             if let Some(cached) = cache.get(&full_path) {
                 return Some(Arc::clone(cached));
             }
         }
 
-        // Slow path: compile outside the lock, then insert.
+        // Slow path: compile, then insert.
         let path_str = full_path.to_str()?;
         let pruner = WasmPruner::load_from_file(path_str).ok()?;
         let arc = Arc::new(pruner);
 
-        let mut cache = self.cache.lock().expect("wasm cache lock poisoned");
+        let cache = self.cache.pin();
         // Another thread may have inserted while we compiled — prefer existing.
-        cache.entry(full_path).or_insert(arc).clone().into()
+        Some(cache.get_or_insert(full_path, arc).clone())
     }
 
     /// Returns the number of cached pruners.
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.cache.lock().expect("wasm cache lock poisoned").len()
+        self.cache.pin().len()
     }
 }
 
