@@ -117,24 +117,61 @@ Replacing microgpt-rs with a DiT + VAE architecture would destroy our current pe
 
 ## 5. Actionable System Upgrades (Honest Status)
 
-### 5.1 Continuous Latent RAG Seeding — 🔴 ASPIRATIONAL
+### 5.1 Continuous Latent RAG Seeding (KV Cache Priming) — 🟡 PLANNED (Plan 024)
 
 **Claim:** Store embedding vectors in anyrag alongside documents. Inject them into draft model KV cache via `dflash_predict_conditioned_with`.
 
-**Reality:** `dflash_predict_conditioned_with` accepts `target_hidden_state: &[f32]` and copies it into all KV cache layers. This is a blunt instrument — same vector copied to every layer. Cola DLM's VAE latents are position-specific and layer-specific. We would need:
-- A protocol for storing embeddings per document chunk
-- A way to map embeddings to the draft model's hidden dimension
-- Per-layer, per-position conditioning (not just broadcasting one vector)
+**Reality:** `dflash_predict_conditioned_with` accepts `target_hidden_state: &[f32]` and copies it into all KV cache layers. This is a blunt instrument — same vector copied to every layer. Cola DLM's VAE latents are position-specific and layer-specific. We do NOT replicate that. Instead, we use it as a **KV cache primer** for short completions.
 
-**Status:** Mechanism exists (`dflash_predict_conditioned_with`), but the data pipeline (anyrag → embedding → hidden state) does not. Defer until we have a concrete use case.
+**Concrete Use Case — Hot Function Continuation:**
+1. User opens `auth.rs` in IDE → file already ingested in anyrag
+2. User types `fn validate_token(` → partial function signature
+3. Instead of generic speculative decoding:
+   - anyrag retrieves embedding of the matching document chunk (existing `validate_token` from a prior version or similar function)
+   - Embedding vector injected as `target_hidden_state` into the draft model
+   - Draft model "sees" semantic context about what `validate_token` usually does
+   - Speculative tokens generated with semantic bias → higher acceptance rate
 
-### 5.2 The Multimodal Bridge — 🔴 ASPIRATIONAL
+**What exists:** `dflash_predict_conditioned_with` mechanism, anyrag embedding API (`generate_embeddings_batch` → `Vec<Vec<f32>>`), hybrid search with vector results, `/classify/domain` endpoint.
+
+**What's missing (the data pipeline):**
+1. anyrag endpoint returning embedding vectors alongside text (search currently returns `SearchResult` with text, not raw vectors)
+2. Dimension mapping: embedding dim (model-dependent, e.g. 768) → draft model `n_embd` (e.g. 16) — requires a simple linear projection or truncation/padding
+3. `EmbeddingRouter` in microgpt-rs: `PromptRouter` impl that calls anyrag `/classify/domain` + retrieves top embedding for KV cache priming, with `KeywordRouter` fallback when anyrag is unavailable
+4. "Hot context" protocol: IDE tells microgpt-rs "editing `auth.rs`" → microgpt-rs primes draft model
+
+**What this is NOT:** Cola DLM's per-position latent diffusion. This is **KV cache priming with retrieved semantic context** — one vector, all layers, position 0. Useful for short completions (function body), not whole-file generation.
+
+**Status:** Plan 024 created. The pipeline is well-scoped: extend anyrag search to optionally return embeddings, add dimension projection, wire `EmbeddingRouter` in microgpt-rs. Depends on LM Studio API (local, already supported by anyrag).
+
+### 5.2 The Multimodal Bridge — 🔴 OUT OF SCOPE
 
 **Claim:** Image embeddings (SigLIP or similar) projected into the same latent space as code for architecture-to-Rust generation.
 
 **Reality:** No vision encoder exists anywhere in our stack. The paper itself describes this as "preliminary qualitative evidence" trained on limited data. Our core use case is text-to-text (Python → Rust), not image understanding.
 
-**Status:** Interesting for future SaaS product, but not a priority. The text-only architecture is already complex enough.
+**Where images appear in our pipeline today:**
+- `anyrag-github` extractor handles READMEs containing `![](screenshot.png)` image references — currently **silently ignored**
+- Architecture diagrams in docs convey semantic information lost during text-only extraction
+- Logo files, UML diagrams, flowcharts embedded in markdown are not indexed
+
+**If ever pursued, two layers (keep separate):**
+
+*Layer 1 — Ingestion-only (anyrag-github, no microgpt-rs changes):*
+- Detect image references in markdown during extraction
+- Send images to LM Studio vision API (local, already supported by anyrag providers)
+- Store descriptions as text alongside code examples in turso
+- No changes to microgpt-rs inference path
+- Scope: extension to `anyrag/crates/github/src/ingest/extractor.rs`
+
+*Layer 2 — Inference-time (microgpt-rs, Cola DLM-style MMDiT):*
+- Vision encoder running alongside draft model
+- Shared latent space for image + text tokens
+- Would destroy our CPU/sub-millisecond performance profile
+- The paper's Image VAE encoder (64 channels, 16x downsampling) is GPU-only
+- **DO NOT pursue until we have GPU inference with real models**
+
+**Status:** Out of scope. Text-only architecture is already complex enough. Layer 1 (ingestion) is a quality-of-life improvement for anyrag that doesn't touch microgpt-rs. Layer 2 (inference) contradicts our performance goals. Neither is planned.
 
 ### 5.3 Embedding-Based Domain Classification — 🟡 IN PROGRESS
 
