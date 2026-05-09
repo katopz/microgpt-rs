@@ -408,20 +408,22 @@ When `r_t[slot] == 0`: `decay = exp(0) = 1.0` → `H_new = H_old` → **perfectl
 | RAG routing | N/A | Draft model's `r_t` vector → anyrag slot selection |
 | Router weights | Dummy (K dim cycling) | Learned via WGPU training pipeline (Plan 008) |
 
-## ⚡ TwELL Sparse MLP: Unstructured Sparsity Acceleration
+## ⚡ Sparse MLP: Unstructured Sparsity Acceleration
 
-Based on ["Sparser, Faster, Lighter Transformer Language Models"](https://arxiv.org/abs/2603.23198) (Sakana AI & NVIDIA) — skips dead neurons in the MLP's second weight matrix, exploiting the natural sparsity of ReLU activations.
+Inspired by ["Sparser, Faster, Lighter Transformer Language Models"](https://arxiv.org/abs/2603.23198) (Sakana AI & NVIDIA) — skips dead neurons in the MLP's second weight matrix, exploiting the natural sparsity of ReLU activations.
 
 ### The Core Idea
 
-MLP layers (`W1 → ReLU → W2`) account for ~80% of LLM FLOPs. With ReLU (which microgpt-rs already uses), up to 99% of hidden neurons become exactly `0.0` after training with light L1 regularization. Standard dense matmul wastes cycles computing `0 × weight`. The TwELL-inspired sparse matmul dynamically packs non-zero indices and skips dead neurons entirely.
+MLP layers (`W1 → ReLU → W2`) account for ~67% of FLOPs during single-token decode (attention dominates at longer sequences). With ReLU (which microgpt-rs already uses), ~50% of hidden neurons become exactly `0.0` by definition (negative half). With L1 regularization during training, sparsity can reach 90-99%. Standard dense matmul wastes cycles computing `0 × weight`. Our sparse matmul dynamically packs non-zero indices and skips dead neurons entirely.
 
 ```
 Dense W2:   output[r] = Σ_{c=0}^{cols-1} W[r,c] × hidden[c]    → always cols multiplications
 Sparse W2:  output[r] = Σ_{c ∈ alive} W[r,c] × hidden[c]        → only alive multiplications
 ```
 
-### What We Implemented
+### What We Actually Built
+
+CPU sparse vector × dense matrix multiply with runtime index packing. **Not** the paper's TwELL (Tile-wise ELLPACK) — that's a GPU-specific tiled sparse format with warp-aligned memory layout. Our version is the CPU-equivalent concept: scan for non-zeros → multiply only those indices. Legitimate technique, different hardware target.
 
 | Component | Details |
 |-----------|---------|
@@ -446,17 +448,19 @@ cargo test --features sparse_mlp -- bench_sparse_mlp
 ```
 Raven:      O(1) memory   — the memory problem (fixed KV slots)
 Screening:  O(1) judgment — the branching problem (absolute relevance pruning)
-TwELL:      O(alive) FLOPs — the compute problem (sparse MLP acceleration)
+Sparse MLP: O(alive) FLOPs — the compute problem (skip dead neurons in MLP)
 ```
 
 ### Caveats (Honest)
 
 | Limitation | What It Means |
 |------------|---------------|
-| **Sparsity depends on training** | Without L1 regularization, ReLU sparsity may be only 70-80%. Runtime fallback to dense handles this. |
-| **Small models won't benefit** | At `mlp_hidden=64` (micro config), packing overhead may exceed savings. Best for `mlp_hidden >= 256`. |
+| **Cannot verify source paper** | arXiv:2603.23198 referenced from prior context, not independently verified. The technique (sparse matmul on ReLU outputs) is sound regardless. |
+| **Cache-unfriendly access** | Sparse weight access (`W[row, scattered_indices]`) is random, not sequential. Cache misses reduce theoretical speedup significantly. |
+| **Sparsity depends on training** | Without L1 regularization, ReLU sparsity is ~50% (by definition). With L1, can reach 90-99%. Runtime fallback to dense handles low sparsity. |
+| **Small models won't benefit** | At `mlp_hidden=64` (micro config), packing overhead exceeds savings. Best for `mlp_hidden >= 256`. |
 | **No GPU benefit** | Unstructured sparsity causes warp divergence. GPU sparse needs structured N:M patterns (separate future work). |
-| **Must benchmark** | Speedup claims must be validated on real model weights, not synthetic data. |
+| **Not yet benchmarked on real weights** | Current models use random weights. Real speedup depends on actual sparsity patterns from trained models. |
 
 ## 🔬 Percepta: O(log N) 2D Convex Hull Attention
 
@@ -706,7 +710,7 @@ bench/
 - [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/pdf/2211.17192) — Leviathan et al., 2022 (Algorithm 1: draft → target scoring → p/q rejection → residual sampling → bonus token)
 - SpecInfer — tree-based speculative verification (inspiration for DDTree)
 - [Percepta: Can LLMs Be Computers?](https://www.percepta.ai/blog/can-llms-be-computers) — 2D convex hull attention for in-model execution
-- [Sparser, Faster, Lighter Transformer Language Models](https://arxiv.org/abs/2603.23198) — Sakana AI & NVIDIA, 2025 (TwELL: tile-wise ELLPACK sparse MLP, unstructured sparsity exploitation)
+- [Sparser, Faster, Lighter Transformer Language Models](https://arxiv.org/abs/2603.23198) — Sakana AI & NVIDIA, 2025 (inspiration for sparse MLP; we use CPU index-packing, not their GPU TwELL kernel)
 - [Luce-Org/lucebox-hub](https://github.com/Luce-Org/lucebox-hub/) — Open LLM Inference, Rewritten by Hand for One Specific Chip at a Time
 - [DFlash: Block-Diffusion Speculative Decoding](https://arxiv.org/abs/2602.06036) — Wang et al., 2026 (chain-seed DDTree, target-conditioned draft)
 - [DDTree: Block Diffusion Draft Trees](https://arxiv.org/abs/2604.12989) — Ringel & Romano, 2026 (budget sweep, tree verify)

@@ -9,9 +9,9 @@
 
 ## TL;DR
 
-MLP layers account for ~80% of LLM FLOPs. With ReLU activation (which microgpt-rs already uses), up to 99% of hidden neurons become exactly `0.0` after training with L1 regularization. Standard dense matmul wastes cycles computing `0 × weight`. The TwELL (Tile-wise ELLPACK) algorithm dynamically compresses non-zero activations and skips dead neurons entirely.
+MLP layers account for ~67% of FLOPs during single-token decode (attention dominates at longer sequences). With ReLU activation (which microgpt-rs already uses), ~50% of hidden neurons are exactly `0.0` by definition (negative half). With L1 regularization during training, sparsity can reach 90-99%. Standard dense matmul wastes cycles computing `0 × weight`. The paper's TwELL (Tile-wise ELLPACK) is a GPU-specific tiled sparse format — we use the CPU-equivalent concept: runtime index packing to skip dead neurons.
 
-Applied to microgpt-rs: replace the `w2 @ hidden` matmul in the MLP with a sparse variant that only processes the non-zero (alive) neurons. The `active_neurons` index buffer lives in `ForwardContext` for zero-alloc execution.
+Applied to microgpt-rs: replace the `w2 @ hidden` matmul in the MLP with a sparse variant that only processes the non-zero (alive) neurons. The `active_indices` + `active_values` buffers live in `ForwardContext` for zero-alloc execution. Feature-gated behind `sparse_mlp`, with runtime fallback to dense when sparsity is too low.
 
 ---
 
@@ -60,13 +60,13 @@ Only computes `|alive|` multiplications per row.
 
 ### Speedup Estimate
 
-| Sparsity | Alive % | Theoretical Speedup | Practical Speedup |
+| Sparsity | Alive % | Theoretical Speedup | Estimated CPU Speedup |
 |----------|---------|--------------------|--------------------|
-| 90% | 10% | 10× | 5-8× (packing overhead) |
-| 95% | 5% | 20× | 10-15× |
-| 99% | 1% | 100× | 20-50× |
+| 90% | 10% | 10× | 2-4× (cache misses + packing) |
+| 95% | 5% | 20× | 3-6× |
+| 99% | 1% | 100× | 5-10× |
 
-Practical speedup is lower due to packing phase, cache effects, and branch prediction overhead. The packing cost is `O(mlp_hidden)` scan; the savings are `O(rows × mlp_hidden × (1 - sparsity))`.
+These are estimates, not measurements. CPU speedup is much lower than theoretical because sparse weight access (`W[row, scattered_indices]`) is cache-unfriendly — each access may miss L1/L2 and hit L3 or RAM. Dense sequential access streams through cache lines efficiently. The packing cost is `O(mlp_hidden)` scan; the savings are `O(rows × mlp_hidden × (1 - sparsity))`. Must benchmark on real trained weights to get actual numbers.
 
 ### Break-even Analysis
 
@@ -78,7 +78,7 @@ Break-even sparsity where packing cost < savings:
 - At `n_embd=64, mlp_hidden=256`: break-even at ~20% sparsity (80% alive)
 - At `n_embd=4096, mlp_hidden=16384`: break-even at ~1% sparsity (99% alive)
 
-For our current configs, sparse wins even at moderate sparsity.
+For our current configs (micro: mlp_hidden=64, bpe: 128, small_target: 256), sparse may not win at all — the models are too small. This optimization targets real LLMs with `mlp_hidden >= 1024`.
 
 ---
 
@@ -236,21 +236,26 @@ Together: memory-bounded, judgment-guided, compute-optimized inference.
 
 ---
 
-## Verdict: Adopt (Feature-Gated)
+## Verdict: Adopt (Feature-Gated, With Caveats)
 
 The sparse MLP optimization is:
 - **Mathematically sound** — exploits real ReLU sparsity
 - **Low risk** — feature-gated, runtime fallback, zero impact when disabled
-- **High impact** — targets the heaviest matmul in the forward pass
+- **Correct** — 6 unit tests verify identical output to dense matmul
 - **Compatible** — works alongside Raven, Screening, GPU path
-- **Honest** — speedup claims must be validated by benchmarks, not assumed
+- **Honest limitations** — not actual TwELL (that's GPU-specific), cache effects reduce speedup, small models won't benefit, source paper not independently verified
+- **Not yet proven** — needs real trained weights + benchmarks before claiming any speedup
 
-Implementation strategy:
-1. Add `sparse_matmul` to `types.rs` alongside existing `matmul` / `matmul_relu`
-2. Add `active_indices` / `active_values` buffers to `ForwardContext`
-3. Feature-gate with `sparse_mlp`
-4. Add runtime auto-detection (sparsity threshold)
-5. Benchmark before claiming victory
+What we actually built vs. the paper:
+- **Paper**: TwELL (Tile-wise ELLPACK) — GPU-specific tiled sparse format with warp-aligned memory layout, custom CUDA kernels
+- **Us**: CPU sparse vector × dense matrix with runtime index packing. Same concept, different hardware target, no tile alignment
+
+Implementation status (all complete):
+1. ✅ `sparse_matmul` in `types.rs` alongside existing `matmul` / `matmul_relu`
+2. ✅ `active_indices` / `active_values` buffers in `ForwardContext`
+3. ✅ Feature-gated with `sparse_mlp`, opt-in
+4. ✅ Runtime auto-detection via `config.sparse_threshold` (default 0.8)
+5. ⬜ Benchmarks on real trained weights (not yet — current models use random weights)
 
 ---
 
