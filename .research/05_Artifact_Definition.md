@@ -67,14 +67,14 @@ Curators upload specialized `domain_validator.wasm` files that encode domain-spe
 | Component | Repo | License |
 |-----------|------|---------|
 | `WasmPruner` runtime | `microgpt-rs` (`--features wasm`) | MIT |
-| `riir-validator-sdk` | New repo `riir-validator-sdk` | MIT |
-| Marketplace hosting | Private repo `riir-forge` | Proprietary |
-| Semantic validator | Private repo `aegis-validator` | Proprietary |
+| `riir-validator-sdk` | `crates/riir-validator-sdk/` in `riir-ai` | Private (internal) |
+| Semantic validator | `crates/riir-semantic/` in `riir-ai` | Private (SaaS) |
+| Orchestrator + hosting | `crates/riir-orchestrator/` in `riir-ai` | Private (SaaS) |
 
 **Curator Workflow:**
 
 ```
-cargo add riir-validator-sdk
+# Internal crate — not published to crates.io
        ↓
 Implement Validator trait
        ↓
@@ -226,7 +226,7 @@ Validator prunes → Valid code saved → Train Adapter → LLM gets smarter
 - [x] Design `.wasm` interface for Curator-uploaded Deterministic Validators (Plan 015)
 - [ ] Implement actual LoRA weight loading (rank-decomposed matrices A, B) — Plan 008
 - [ ] Implement `WasmPruner` runtime in microgpt-rs (`--features wasm`) — Plan 015 Phase 1
-- [ ] Create `riir-validator-sdk` repo (MIT) — Plan 015 Phase 2
+- [ ] Create riir-ai monorepo (MIT) — Plan 015 Phase 2
 - [ ] Design `.safetensors` schema for Neural Adapter files — Plan 008
 - [ ] Implement anyrag `SelfImprovingCycle` (32-day loop) — anyrag Plan 003
 - [ ] Implement anyrag `KnowledgeExporter::export_for_lora()` — anyrag Plan 003

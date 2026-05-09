@@ -161,7 +161,43 @@ let expert = registry.get_expert(&decision.domain);
 // expert.pruner is locked for the entire DDTree generation
 ```
 
-Domains are defined in `domains.toml` — curators add new experts without recompiling. WASM pruners are loaded and cached via `WasmPrunerCache`.
+Domains are defined in `domains.toml` — platform manages expert bundles via Web UI or MCP agent. WASM pruners are loaded and cached via `WasmPrunerCache`.
+
+### Embedding Router: KV Cache Priming (Plan 024)
+
+Extends keyword routing with **semantic embedding retrieval** from anyrag. When a user edits a known file, the system retrieves the most relevant document embedding, projects it to the draft model's hidden dimension, and injects it as KV cache priming context via `dflash_predict_conditioned_with`. The draft model produces higher-quality speculative tokens because it "sees" semantic context from related code.
+
+**Three-tier fallback** (graceful degradation when anyrag is unavailable):
+
+```
+1. Embedding search (POST /search/embedding)  ~200ms
+   ↓ on failure
+2. Domain classify (POST /classify/domain)     ~100ms
+   ↓ on failure
+3. KeywordRouter (local, no network)            <1ms
+```
+
+```rust
+let router = EmbeddingRouter::new(
+    embedding_config, domains, Box::new(TruncatePadProjector),
+);
+
+// Sync: delegates to KeywordRouter (no network)
+let decision = router.route("fn validate_token(");
+
+// Async: tries anyrag embedding search, falls back to keyword
+let decision = router.route_async("fn validate_token(").await;
+
+if let Some(embedding) = &decision.embedding {
+    let projected = router.project_embedding(embedding, draft_config.n_embd);
+    // Inject into speculative step for context-aware drafting
+    speculative_step_embedding_conditioned(&weights, &config, token, pos, &projected, &mut rng);
+}
+```
+
+**Separation from target model conditioning:** `speculative_step_conditioned_with` uses the target model's hidden state (syntactic alignment). `speculative_step_embedding_conditioned` uses a retrieved embedding (semantic alignment). These are complementary signals — future work combines both.
+
+Feature-gated behind `embedding_router` (requires running anyrag server). Offline use stays on `KeywordRouter`.
 
 ## 🧠 Deterministic Validator: Neuro-Symbolic Intercept
 
@@ -631,51 +667,10 @@ cargo clippy --all-targets --all-features --quiet
 | `wasm` | `wasmtime`, `wat` | WASM validator runtime (WasmPruner) |
 | `sparse_mlp` | — | TwELL-inspired sparse MLP matmul (Plan 022) |
 | `router` | `wasm` | Prompt router + expert registry (Plan 023) |
+| `embedding_router` | `router`, `reqwest`, `tokio` | Embedding router + KV cache priming via anyrag (Plan 024) |
 | `full` | all above (except leviathan, always on) | Enable all features |
 
 Build with `--features <flag>` or `--all-features`.
-
-## 🔌 WASM Validator Pipeline
-
-Curators can write domain-specific constraint validators in Rust, compile them to `.wasm`, and have the DDTree load them at runtime.
-
-### Quick Start
-
-```sh
-# 1. Write a validator using the SDK
-cargo add riir-validator-sdk
-
-# 2. Implement the Validator trait
-# See: https://github.com/katopz/riir-validator-sdk/examples/
-
-# 3. Build for WASM
-cargo build --target wasm32-unknown-unknown --release
-
-# 4. Check the validator locally
-riir-validator-check target/wasm32-unknown-unknown/release/examples/your_validator.wasm
-
-# 5. Use with microgpt-rs
-cargo run --features wasm
-```
-
-### WASM ABI
-
-| Export | Signature | Description |
-|--------|-----------|-------------|
-| `is_valid` | `(u32, u32, u32, u32) -> u32` | Token-level validation |
-| `validate_string` | `(u32, u32) -> u32` | String-level validation |
-| `name` | `() -> u32` | Pointer to null-terminated name |
-| `version` | `() -> u32` | Packed `(major << 16) \| (minor << 8) \| patch` |
-
-### Constraints
-- **No WASI imports** — fully sandboxed
-- **No floating-point** — deterministic across platforms
-- **Max memory: 64 pages (4MB)**
-- **Max execution: ~100μs per call** — fuel-based enforcement
-
-### Example Validators
-- `bracket_validator` — bracket balancing (like PartialParser)
-- `keyword_validator` — Rust keyword placement rules
 
 ## 📁 Project Structure
 
@@ -700,6 +695,7 @@ src/
   gpu/              wgpu context & buffers §
   rest/             REST module ¶
   router/           Prompt router + expert registry (Plan 023): KeywordRouter, ExpertRegistry, WasmPrunerCache, PromptRouter trait ◊
+                    Embedding router + projector (Plan 024): EmbeddingRouter, TruncatePadProjector, EmbeddingProjector ⬡
   wasm/             WasmPruner (ConstraintPruner + ScreeningPruner), WASM runtime (abi, state, wasmtime loader, EXPORT_RELEVANCE) †
   percepta.rs       Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
                     Sudoku9x9, SymbolicValidator, StreamingSolver, SolveEvent
@@ -711,6 +707,7 @@ src/
   § behind --features gpu
   ¶ behind --features rest
   ◊ behind --features router
+  ⬡ behind --features embedding_router
   † behind --features wasm
 examples/
   raven_recall.rs        Raven RSM demo: frozen slots, O(1) scaling, memory footprint comparison
@@ -718,6 +715,7 @@ examples/
   sudoku_speculative.rs  3-column DDTree comparison: Unpruned / Static-Only / Path-Aware *
   sudoku_tui.rs          Ratatui TUI: real-time grid visualization + speculative mode *
   router_demo.rs         Prompt router demo: classify prompts, select expert bundles ◊
+  embedding_router_demo.rs  Embedding router demo: KV cache priming with three-tier fallback ⬡
 tests/
   integration.rs  80 integration tests (adversarial + DFA + arithmetic + backtracking + geometry
                   + Sudoku9x9 + SymbolicValidator + StreamingSolver)

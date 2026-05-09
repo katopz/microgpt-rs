@@ -5,7 +5,7 @@
 Build the production pipeline for `validator.wasm` — the Deterministic Validator artifact that Curators write, compile, and upload to the marketplace. This plan covers three pieces:
 
 1. **`WasmPruner`** — a `ConstraintPruner` impl in microgpt-rs that loads and executes `.wasm` files via Wasmtime
-2. **`riir-validator-sdk`** — a separate MIT-licensed crate that Curators use to write domain validators
+2. **`riir-validator-sdk`** — internal crate in private riir-ai monorepo — platform generates validators, Curators use Web UI/MCP
 3. **Curator workflow** — the build→validate→upload pipeline (marketplace hosting in private `riir-forge` repo)
 
 ## The Problem
@@ -51,17 +51,18 @@ Per `.research/03_Commercial_Open_Source_Strategy_Verdict.md`:
 | Component | Repo | License | Rationale |
 |-----------|------|---------|-----------|
 | `WasmPruner` runtime | `microgpt-rs` | MIT | Plumbing — loads .wasm into DDTree. Useless without validators. |
-| `riir-validator-sdk` | New repo `riir-validator-sdk` | MIT | Curator-facing SDK. Must be OSS for adoption. Thin wrapper, no secrets. |
-| Marketplace hosting | Private repo `riir-forge` | Proprietary | Curator upload, quality gate, validation, hosting. Protects Curator IP. |
-| Semantic validator | Private repo `aegis-validator` | Proprietary | Secret C — sandboxed cargo check loop. Not part of this plan. |
+| `riir-validator-sdk` | `crates/riir-validator-sdk/` in riir-ai | Private | Internal SDK. Platform generates validators from translation results. |
+| Curator API | `crates/riir-curator-api/` in riir-ai | Private | Web UI + MCP agent. Curators pick repos, never touch SDK. |
+| Marketplace hosting | `crates/riir-orchestrator/` in riir-ai | Private | Quality gate, hosting, billing. Protects Curator IP. |
+| Semantic validator | `crates/riir-semantic/` in riir-ai | Private | Secret C — sandboxed cargo check loop. Not part of this plan. |
 
-**Key insight:** The SDK and runtime are "plumbing" — technically impressive but useless without Curator domain knowledge. Making them MIT maximizes Curator adoption (top-of-funnel). The moat is the hosted marketplace and the Curator IP, not the loading mechanism.
+**Key insight:** The SDK is internal machinery. Curators interact via Web UI or MCP agent — they pick repos, the platform generates validators. The moat is the hosted marketplace, the Curator IP, and the lora.bin fuel — not the SDK itself.
 
 ## Architecture
 
 ### The WASM ABI (Contract Between SDK and Runtime)
 
-Curators implement a simple C-compatible interface:
+Platform generates a simple C-compatible interface:
 
 ```
 Exports:
@@ -124,7 +125,7 @@ impl ConstraintPruner for WasmPruner {
    cd my-django-validator
 
 2. Add SDK dependency:
-   cargo add riir-validator-sdk
+   # Internal crate — not published to crates.io
 
 3. Implement Validator trait:
    use riir_validator_sdk::Validator;
@@ -211,7 +212,7 @@ WasmPruner::is_valid(depth, token_idx, parent_tokens)
 
 Performance target: ≤5% overhead vs native `SynPruner` in DDTree build.
 
-### Phase 2: SDK Crate (new repo `riir-validator-sdk`)
+### Phase 2: SDK Crate (`crates/riir-validator-sdk/` in riir-ai monorepo)
 
 A thin MIT-licensed crate that Curators depend on.
 
@@ -268,7 +269,7 @@ A CLI tool that validates a `.wasm` file before upload:
 
 This lives in `riir-validator-sdk` as a binary target:
 ```
-cargo install riir-validator-sdk --features cli
+cargo run -p riir-validator-sdk --features cli
 riir-validator-check path/to/validator.wasm
 ```
 
@@ -357,7 +358,7 @@ WASM Linear Memory:
 - [x] 1.8 Add tests: load, is_valid, invalid_wasm, missing_exports
 
 ### Phase 2: SDK Crate (`riir-validator-sdk`)
-- [x] 2.1 Create new repo `riir-validator-sdk` (MIT license)
+- [x] 2.1 Create `crates/riir-validator-sdk/` in riir-ai monorepo (MIT license)
 - [x] 2.2 Define `Validator` trait in `src/validator.rs`
 - [x] 2.3 Implement `export_validator!` macro in `src/exports.rs`
 - [x] 2.4 Implement WASM memory helpers in `src/memory.rs`

@@ -5,7 +5,7 @@
 Implemented **all phases** of Plan 015 — WASM Validator Pipeline. The system allows Curators to write domain-specific validators in Rust, compile them to `.wasm`, validate them locally with a CLI tool, and have the microgpt-rs DDTree load and execute them as `ConstraintPruner` instances via Wasmtime. Full documentation includes README, `.docs/09_wasm_validator.md` ABI spec, and updated `.research/05_Artifact_Definition.md`.
 
 **Working end-to-end flow:**
-1. Curator implements `Validator` trait in riir-validator-sdk
+1. Platform generates `Validator` trait in riir-validator-sdk
 2. `cargo build --example bracket_validator --target wasm32-unknown-unknown --release`
 3. microgpt-rs `WasmPruner::load_from_file("bracket_validator.wasm")` loads it
 4. `build_dd_tree_pruned(marginals, config, &wasm_pruner, false)` prunes invalid branches
@@ -98,19 +98,19 @@ cd microgpt-rs
 cargo test --features wasm -- wasm::
 
 # Phase 2: SDK build + test (riir-validator-sdk)
-cd riir-validator-sdk
+cd riir-ai
 cargo test
 cargo build --example bracket_validator --target wasm32-unknown-unknown --release
 cargo build --example keyword_validator --target wasm32-unknown-unknown --release
 
 # Phase 3: Validator Check CLI (validate .wasm before upload)
-cd riir-validator-sdk
+cd riir-ai
 cargo build --example bracket_validator --target wasm32-unknown-unknown --release
-cargo run --features cli -- ../riir-validator-sdk/target/wasm32-unknown-unknown/release/examples/bracket_validator.wasm
+cargo run --features cli -- ../riir-ai/target/wasm32-unknown-unknown/release/examples/bracket_validator.wasm
 
 # Phase 4: Integration tests (loads .wasm from SDK build)
-cd riir-validator-sdk && cargo build --example bracket_validator --target wasm32-unknown-unknown --release
-cd riir-validator-sdk && cargo build --example keyword_validator --target wasm32-unknown-unknown --release
+cd riir-ai && cargo build --example bracket_validator --target wasm32-unknown-unknown --release
+cd riir-ai && cargo build --example keyword_validator --target wasm32-unknown-unknown --release
 cd ../microgpt-rs
 cargo test --features wasm -- wasm_integration
 
@@ -122,7 +122,7 @@ cd microgpt-rs && cargo test --features wasm
 
 # Clippy
 cd microgpt-rs && cargo clippy --features wasm --fix --allow-dirty
-cd riir-validator-sdk && cargo clippy --features cli --fix --allow-dirty
+cd riir-ai && cargo clippy --features cli --fix --allow-dirty
 
 # Without WASM feature (should still work — no regressions)
 cd microgpt-rs && cargo test

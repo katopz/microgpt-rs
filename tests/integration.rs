@@ -1581,29 +1581,29 @@ mod wasm_integration {
     use microgpt_rs::wasm::WasmPruner;
     use std::path::PathBuf;
 
-    /// Path to the riir-validator-sdk examples built for WASM.
+    /// Path to the riir-ai validator SDK examples built for WASM.
     fn sdk_examples_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../riir-validator-sdk/target/wasm32-unknown-unknown/release/examples")
+            .join("../riir-ai/target/wasm32-unknown-unknown/release/examples")
     }
 
     /// Load bracket_validator.wasm from the SDK build output.
     ///
     /// Requires running first:
     /// ```sh
-    /// cd riir-validator-sdk && cargo build --example bracket_validator --target wasm32-unknown-unknown --release
+    /// cd riir-ai && cargo build -p riir-validator-sdk --example bracket_validator --target wasm32-unknown-unknown --release
     /// ```
     fn load_bracket_validator() -> WasmPruner {
         let path = sdk_examples_dir().join("bracket_validator.wasm");
         WasmPruner::load_from_file(path.to_str().expect("valid path"))
-            .expect("should load bracket_validator.wasm — run: cd riir-validator-sdk && cargo build --example bracket_validator --target wasm32-unknown-unknown --release")
+            .expect("should load bracket_validator.wasm — run: cd riir-ai && cargo build -p riir-validator-sdk --example bracket_validator --target wasm32-unknown-unknown --release")
     }
 
-    /// Load keyword_validator.wasm from the SDK build output.
+    /// Load keyword_validator.wasm from the riir-ai build output.
     fn load_keyword_validator() -> WasmPruner {
         let path = sdk_examples_dir().join("keyword_validator.wasm");
         WasmPruner::load_from_file(path.to_str().expect("valid path"))
-            .expect("should load keyword_validator.wasm — run: cd riir-validator-sdk && cargo build --example keyword_validator --target wasm32-unknown-unknown --release")
+            .expect("should load keyword_validator.wasm — run: cd riir-ai && cargo build -p riir-validator-sdk --example keyword_validator --target wasm32-unknown-unknown --release")
     }
 
     // ── Bracket Validator Tests ────────────────────────────────

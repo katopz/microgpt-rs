@@ -12,7 +12,7 @@ that execute in a sandboxed WebAssembly runtime during speculative decoding.
 | `WasmPruner` | `src/wasm/wasm_pruner.rs` | Loads .wasm, implements `ConstraintPruner` |
 | `abi.rs` | `src/wasm/abi.rs` | Memory layout constants, read/write helpers |
 | `state.rs` | `src/wasm/state.rs` | `ValidatorState` for wasmtime Store metadata |
-| `riir-validator-sdk` | External repo | SDK for writing validators |
+| `riir-validator-sdk` | `crates/riir-validator-sdk/` in riir-ai | Internal SDK — platform generates validators |
 
 ### WASM ABI Specification
 
@@ -64,7 +64,7 @@ WASM Linear Memory:
 
 ### Writing a Validator
 
-See the [riir-validator-sdk](https://github.com/katopz/riir-validator-sdk) repository for:
+The `riir-validator-sdk` crate (inside private riir-ai monorepo) provides:
 - `Validator` trait definition
 - `export_validator!` macro
 - Memory helpers (`read_parent_tokens`, `read_string`, `write_name`)

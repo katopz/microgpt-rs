@@ -73,9 +73,12 @@ Nobody else has this loop. Competitors wrap GPT-4 and pray. We guarantee compila
 | Engine | microgpt-rs (DDTree, zero-alloc, ConstraintPruner trait) | ✅ Working | MIT (open) |
 | Framework | anyrag (RAG pipeline, episodic memory, ingestion) | ✅ Exists | MIT (open) |
 | Validator | `SynPruner` + `PartialParser` + `CompilerFeedback` | ✅ Working | MIT (open) |
-| CLI/GitHub Action | Client tool that triggers RIIR | ❌ Not built | MIT (open) |
+| Validator SDK | `riir-validator-sdk` (WASM Validator trait + export macro) | ✅ Working | Private (internal) |
+| Curator API | Web UI + MCP agent for repo picking / link submission | ❌ Not built | Private (SaaS) |
 | Orchestration | Repo chunking, GPU pool, cargo check workers | ❌ Not built | Private (SaaS) |
 | lora.bin | Draft model trained on Python→Rust pairs | ❌ Not built | Private (SaaS) |
+
+**Key change:** `riir-validator-sdk` is now private internal tooling. Curators never touch the SDK — they interact via Web UI or MCP agent. The platform generates validators internally from translation results.
 
 The "plumbing" is more than just technically impressive — it's **already proving the concept**. SynPruner is already pruning invalid Rust tokens. The Sudoku solver already proved constraint satisfaction works end-to-end.
 
@@ -90,9 +93,28 @@ The "plumbing" is more than just technically impressive — it's **already provi
 
 **The closed-source layer does NOT need a license — it's SaaS.** You don't ship `lora.bin` or the orchestration backend. You host it. No license needed for code you never distribute.
 
-**Recommendation:** MIT for microgpt-rs and anyrag. Keep `riir-forge` (orchestration) and `aegis-validator` (semantic validator) as private repos. No license complexity.
+**Recommendation:** MIT for microgpt-rs and anyrag. Keep `riir-ai` (monorepo: SDK + orchestrator + semantic validator + curator API) as private repo. No license complexity.
 
-### 4. anyrag: Exists, Production-Ready Architecture
+### 4. riir-ai: Private Monorepo for SaaS Intelligence
+
+`riir-validator-sdk` has been restructured into `riir-ai`, a private monorepo housing all closed-source SaaS intelligence:
+
+```
+riir-ai/
+├── crates/
+│   ├── riir-validator-sdk/     # ✅ Working — WASM Validator trait + export macro
+│   ├── riir-curator-api/       # ❌ Not built — Web UI + MCP agent API
+│   ├── riir-semantic/          # ❌ Not built — Secret C (cargo check loop)
+│   └── riir-orchestrator/      # ❌ Not built — Secret D (repo chunking, GPU pool)
+└── .plans/
+    └── 001_monorepo_migration.md
+```
+
+**Why monorepo:** The SDK, curator API, semantic validator, and orchestrator are tightly coupled. They share the `ConstraintPruner` trait interface, WASM ABI, and validator build pipeline. One repo, one versioning, one CI.
+
+**Why private:** Curators don't write validators by hand. They pick GitHub repos or submit links via Web UI / MCP agent. The platform generates `.wasm` validators internally. The SDK is machinery, not a product.
+
+### 5. anyrag: Exists, Production-Ready Architecture
 
 anyrag is not a gist — it's a full RAG engine with:
 
@@ -108,23 +130,32 @@ anyrag is not a gist — it's a full RAG engine with:
 - **Public episodes** (generic patterns, could be shared with OSS community)
 - **Private episodes** (compiler error fixes, edge cases — this is the moat)
 
-### 5. Curator Model: Refined
+### 6. Curator Model: Refined (Platform-Based)
 
 **Original:** Curators find repos, translate locally, upload .wasm/.bin bundles.
 **Refined:** Curators have two sourcing methods:
 
-#### Method A: GitHub Pick
-- Curator picks a public GitHub repo (or org/repo path)
+#### Method A: GitHub Pick (Web UI or MCP)
+- Curator picks a public GitHub repo (or org/repo path) via Web UI or MCP agent
 - Platform validates the repo exists, is public, and has Python source
 - Platform generates a "Curator Claim" — reserving that repo for the Curator
-- Curator translates using platform tools (or locally with microgpt-rs + anyrag)
-- Curator submits: `domain_lora.bin` + `domain_validator.wasm` + provenance (repo URL, commit hash, date)
+- Platform translates using microgpt-rs + anyrag + internal SDK
+- Platform generates: `domain_lora.bin` + `domain_validator.wasm` + provenance (repo URL, commit hash, date)
 
-#### Method B: Link Resource
+#### Method B: Link Resource (Web UI or MCP)
 - Curator submits external links: documentation, tutorials, API references, specification docs
 - Platform ingests via anyrag's `Ingestor` trait (web scraper plugin)
-- Curator builds translation rules from the spec, not just code
+- Platform builds translation rules from the spec, not just code
 - Useful for: translating Python libraries that have Rust-equivalent specs but no direct code mapping
+
+#### Access Methods
+| Method | Interface | Audience |
+|--------|-----------|----------|
+| **Web UI** | Browser SPA — browse repos, click "Claim", monitor progress | All Curators |
+| **MCP Agent** | Programmatic — claim repos, submit links, check status via MCP tools | Power users |
+| **API** (optional) | REST endpoints — same as Web UI, for custom integrations | Automation |
+
+**No SDK required.** Curators don't write validators. The platform generates everything.
 
 #### Curator Constraints (Anti-Abuse)
 - **One repo, one Curator.** First to claim gets it. Prevents duplicate work.
@@ -136,6 +167,8 @@ anyrag is not a gist — it's a full RAG engine with:
 ---
 
 ## The Secret Moat (Refined)
+
+All secrets live in the private `riir-ai` monorepo.
 
 | Secret | What | Why It's Defensible |
 |--------|------|-------------------|

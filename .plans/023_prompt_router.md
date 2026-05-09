@@ -274,7 +274,7 @@ This implements the "Mixture of Experts" pattern without MoE architecture change
 |---------|------|-------------|
 | `microgpt-rs` | This plan (023) | Core routing infrastructure |
 | `anyrag` | `.plans/005_domain_classifier_api.md` | V2 embedding-based router backend (future) |
-| `riir-validator-sdk` | N/A | Curators build `.wasm` validators that the registry loads |
+| `riir-validator-sdk` | N/A | Platform generates `.wasm` validators from translation results |
 | `microgpt-rs` | Plan 021 (ScreeningPruner) | Registry returns `Box<dyn ScreeningPruner>` |
 | `microgpt-rs` | Plan 015 (WASM Pipeline) | `WasmPruner` is the loadable pruner unit |
 

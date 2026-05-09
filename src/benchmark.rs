@@ -292,7 +292,7 @@ fn bench_wasm_vs_no_pruner(
     use crate::wasm::WasmPruner;
 
     let wasm_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../riir-validator-sdk/target/wasm32-unknown-unknown/release/examples/bracket_validator.wasm");
+        .join("../riir-ai/target/wasm32-unknown-unknown/release/examples/bracket_validator.wasm");
 
     let wasm_pruner = match WasmPruner::load_from_file(wasm_path.to_str().unwrap_or("")) {
         Ok(p) => p,
