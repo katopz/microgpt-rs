@@ -1,4 +1,4 @@
-use microgpt_rs::{benchmark, percepta, plot, transformer, types};
+use microgpt_rs::{benchmark, benchmark::BenchCategory, percepta, plot, transformer, types};
 
 fn main() {
     let config = types::Config::micro();
@@ -69,10 +69,10 @@ fn main() {
     println!("{}", "─".repeat(75));
 
     for r in &results {
-        let unit = if r.avg_acceptance_len > 0.0 {
-            "tok/s"
-        } else {
-            "trees/s"
+        let unit = match r.category {
+            BenchCategory::Speculative => "tok/s",
+            BenchCategory::TreeBuild => "ops/s",
+            BenchCategory::Infrastructure => "ops/s",
         };
         println!(
             "  {:<20} {:>12.0} {:>3} {:>12.2} {:>15.2}",
@@ -91,11 +91,42 @@ fn main() {
     // ── Plot ───────────────────────────────────────────────────────
     std::fs::create_dir_all("bench").ok();
     let index = next_bench_index();
-    let plot_path = format!("bench/{:03}_bench_result.png", index);
 
-    match plot::plot_results(&results, &plot_path) {
-        Ok(()) => println!("\n📈 Chart saved to: {plot_path}"),
-        Err(e) => eprintln!("\n⚠️  Plot failed: {e}"),
+    let categories = [
+        (
+            BenchCategory::Speculative,
+            "speculative",
+            "Speculative Decoding Throughput",
+            "Accepted tok/s",
+        ),
+        (
+            BenchCategory::TreeBuild,
+            "tree_build",
+            "DDTree Build Performance",
+            "Operations/s",
+        ),
+        (
+            BenchCategory::Infrastructure,
+            "infrastructure",
+            "Infrastructure Primitives",
+            "Operations/s",
+        ),
+    ];
+
+    for (cat, suffix, title, x_label) in &categories {
+        let cat_results: Vec<_> = results
+            .iter()
+            .filter(|r| r.category == *cat)
+            .cloned()
+            .collect();
+        if cat_results.is_empty() {
+            continue;
+        }
+        let plot_path = format!("bench/{:03}_{suffix}.png", index);
+        match plot::plot_results(&cat_results, &plot_path, title, x_label) {
+            Ok(()) => println!("📈 {title} chart saved to: {plot_path}"),
+            Err(e) => eprintln!("⚠️  Plot failed for {title}: {e}"),
+        }
     }
 
     // Save results to CSV for regression tracking (same index as PNG)
