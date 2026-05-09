@@ -272,55 +272,67 @@ impl Trainer {
             let num_batches = batches.len();
 
             for (batch_idx, (input_ids, target_ids)) in batches.into_iter().enumerate() {
-                // Convert input_ids to usize for forward pass
-                let token_ids: Vec<usize> = input_ids.iter().map(|&t| t as usize).collect();
-                let targets: Vec<usize> = target_ids.iter().map(|&t| t as usize).collect();
+                let seq_len = self.training_config.seq_len;
+                let num_samples = input_ids.len() / seq_len;
 
-                // 1. Forward pass
-                let logits_buf = forward_pass.forward(&token_ids)?;
-                let seq_len = token_ids.len();
+                // Process each sample in the batch individually to avoid
+                // logits buffer overrun (buffer is sized for seq_len, not batch_size * seq_len)
+                for sample_idx in 0..num_samples {
+                    let offset = sample_idx * seq_len;
+                    let token_ids: Vec<usize> = input_ids[offset..offset + seq_len]
+                        .iter()
+                        .map(|&t| t as usize)
+                        .collect();
+                    let targets: Vec<usize> = target_ids[offset..offset + seq_len]
+                        .iter()
+                        .map(|&t| t as usize)
+                        .collect();
 
-                // 2. Compute loss
-                let log_probs_buf = crate::gpu::buffer::create_buffer(
-                    &self.ctx.device,
-                    seq_len * self.config.vocab_size,
-                    "log_probs",
-                );
-                let loss = gpu_loss.compute_loss(
-                    logits_buf,
-                    &targets,
-                    self.config.vocab_size,
-                    &log_probs_buf,
-                )?;
+                    // 1. Forward pass
+                    let logits_buf = forward_pass.forward(&token_ids)?;
 
-                // Track loss
-                total_loss_since_log += loss;
-                steps_since_log += 1;
-                epoch_losses.push(loss);
-                loss_history.push((step, loss));
-
-                // 3. Backward pass (LoRA gradients)
-                backward_pass.backward_pass(&forward_pass, &token_ids, &targets)?;
-
-                // 4. Optimizer step
-                optimizer.step(&forward_pass.lora)?;
-
-                step += 1;
-
-                // 5. Logging
-                if step.is_multiple_of(self.training_config.log_interval as u32) {
-                    let avg_loss = total_loss_since_log / steps_since_log as f32;
-                    let lr = optimizer.current_lr();
-                    println!(
-                        "[step {step}] epoch={epoch} batch={batch_idx}/{num_batches} loss={avg_loss:.4} lr={lr:.6}"
+                    // 2. Compute loss
+                    let log_probs_buf = crate::gpu::buffer::create_buffer(
+                        &self.ctx.device,
+                        seq_len * self.config.vocab_size,
+                        "log_probs",
                     );
-                    total_loss_since_log = 0.0;
-                    steps_since_log = 0;
-                }
+                    let loss = gpu_loss.compute_loss(
+                        logits_buf,
+                        &targets,
+                        self.config.vocab_size,
+                        &log_probs_buf,
+                    )?;
 
-                // 6. Checkpoint
-                if step.is_multiple_of(self.training_config.checkpoint_interval as u32)
-                    && loss < best_loss {
+                    // Track loss
+                    total_loss_since_log += loss;
+                    steps_since_log += 1;
+                    epoch_losses.push(loss);
+                    loss_history.push((step, loss));
+
+                    // 3. Backward pass (LoRA gradients)
+                    backward_pass.backward_pass(&forward_pass, &token_ids, &targets)?;
+
+                    // 4. Optimizer step
+                    optimizer.step(&forward_pass.lora)?;
+
+                    step += 1;
+
+                    // 5. Logging
+                    if step.is_multiple_of(self.training_config.log_interval as u32) {
+                        let avg_loss = total_loss_since_log / steps_since_log as f32;
+                        let lr = optimizer.current_lr();
+                        println!(
+                            "[step {step}] epoch={epoch} batch={batch_idx}/{num_batches} sample={sample_idx}/{num_samples} loss={avg_loss:.4} lr={lr:.6}"
+                        );
+                        total_loss_since_log = 0.0;
+                        steps_since_log = 0;
+                    }
+
+                    // 6. Checkpoint
+                    if step.is_multiple_of(self.training_config.checkpoint_interval as u32)
+                        && loss < best_loss
+                    {
                         best_loss = loss;
                         let checkpoint_path = checkpoint_dir.join(format!("lora_step_{step}.bin"));
                         match export_lora(
@@ -340,6 +352,7 @@ impl Trainer {
                             }
                         }
                     }
+                }
             }
 
             // End of epoch summary
