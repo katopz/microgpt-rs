@@ -729,6 +729,150 @@ pub fn speculative_step_conditioned_with(
     (accepted, len)
 }
 
+// ---------------------------------------------------------------------------
+// Embedding-conditioned speculative steps (Plan 024)
+// ---------------------------------------------------------------------------
+
+/// Speculative step with embedding-conditioned draft.
+///
+/// Unlike [`speculative_step_conditioned`] which uses the **target model's**
+/// hidden state, this uses a **retrieved embedding vector** projected to the
+/// draft model's dimension. Useful when:
+/// - The target model hasn't run yet (first token)
+/// - Semantic context from RAG is more valuable than syntactic alignment
+/// - No target model is available (embedding-only mode)
+///
+/// When `projected_embedding` is empty, falls back to unconditioned drafting.
+#[cfg(feature = "embedding_router")]
+pub fn speculative_step_embedding_conditioned(
+    draft_weights: &TransformerWeights,
+    draft_config: &Config,
+    token: usize,
+    pos: usize,
+    projected_embedding: &[f32],
+    rng: &mut Rng,
+) -> (Vec<usize>, usize) {
+    // 1. Conditioned draft using retrieved embedding.
+    //    Passing empty slice skips KV seeding (equivalent to unconditioned).
+    let draft_result = dflash_predict_conditioned(
+        draft_weights,
+        draft_config,
+        token,
+        pos,
+        projected_embedding,
+        rng,
+    );
+
+    // 2. Build DDTree from marginals
+    let mv: Vec<&[f32]> = draft_result
+        .marginals
+        .iter()
+        .map(|s| s.as_slice())
+        .collect();
+    let tree = build_dd_tree(&mv, draft_config);
+    let path = extract_best_path(&tree);
+
+    if path.is_empty() {
+        // Fallback: sample from first marginal or uniform
+        let fallback = if draft_result.marginals.is_empty() {
+            fastrand::usize(0..draft_config.vocab_size)
+        } else {
+            sample_from_distribution(draft_result.marginals[0].as_slice(), rng)
+        };
+        return (vec![fallback], 1);
+    }
+
+    // 3. Simulated acceptance (75% cap)
+    let acceptance_rate = 0.75;
+    let max_accept = ((path.len() as f32) * acceptance_rate).ceil() as usize;
+    let accepted: Vec<usize> = path.into_iter().take(max_accept.max(1)).collect();
+
+    // 4. Bonus token if all accepted
+    if accepted.len() == max_accept && !draft_result.marginals.is_empty() {
+        let last_marginal = draft_result.marginals.last().unwrap();
+        let bonus = sample_from_distribution(last_marginal, rng);
+        let mut result = accepted;
+        result.push(bonus);
+        let len = result.len();
+        return (result, len);
+    }
+
+    let len = accepted.len();
+    (accepted, len)
+}
+
+/// Zero-alloc variant of [`speculative_step_embedding_conditioned`].
+///
+/// Reuses pre-allocated buffers from `SpeculativeContext` and `TreeBuilder`
+/// to minimize allocations in the hot path.
+///
+/// When `projected_embedding` is empty, falls back to unconditioned drafting.
+#[cfg(feature = "embedding_router")]
+pub fn speculative_step_embedding_conditioned_with(
+    draft_sctx: &mut SpeculativeContext,
+    tree_builder: &mut TreeBuilder,
+    draft_weights: &TransformerWeights,
+    draft_config: &Config,
+    token: usize,
+    pos: usize,
+    projected_embedding: &[f32],
+    rng: &mut Rng,
+) -> (Vec<usize>, usize) {
+    // 1. Conditioned draft using retrieved embedding (no target model needed).
+    //    Passing empty slice skips KV seeding (equivalent to unconditioned).
+    let num_steps = dflash_predict_conditioned_with(
+        draft_sctx,
+        draft_weights,
+        draft_config,
+        token,
+        pos,
+        projected_embedding,
+        rng,
+    );
+    let vocab_size = draft_config.vocab_size;
+
+    // Convert flat marginals to Vec<&[f32]> for tree builder
+    let marginals: Vec<&[f32]> = (0..num_steps)
+        .map(|step| draft_sctx.marginal_slice(step, vocab_size))
+        .collect();
+
+    // Pre-extract marginals info before releasing immutable borrow on draft_sctx
+    let has_marginals = !marginals.is_empty();
+    let last_marginal = marginals.last().copied().unwrap_or(&[]);
+
+    // 2. Build DDTree (reuses pre-allocated heap/tree buffers)
+    let tree = tree_builder.build(&marginals, draft_config, &NoPruner, false);
+
+    let path = extract_best_path(tree);
+
+    if path.is_empty() {
+        // Fallback: sample from first marginal or uniform
+        let fallback = if has_marginals {
+            sample_from_distribution(draft_sctx.marginal_slice(0, vocab_size), rng)
+        } else {
+            fastrand::usize(0..vocab_size)
+        };
+        return (vec![fallback], 1);
+    }
+
+    // 3. Simulated acceptance (75% cap)
+    let acceptance_rate = 0.75;
+    let max_accept = ((path.len() as f32) * acceptance_rate).ceil() as usize;
+    let accepted: Vec<usize> = path.into_iter().take(max_accept.max(1)).collect();
+
+    // 4. Bonus token if all accepted
+    if accepted.len() == max_accept && has_marginals {
+        let bonus = sample_from_distribution(last_marginal, rng);
+        let mut result = accepted;
+        result.push(bonus);
+        let len = result.len();
+        return (result, len);
+    }
+
+    let len = accepted.len();
+    (accepted, len)
+}
+
 /// Extract candidate verification paths from DDTree (top-3 root branches).
 /// Each branch follows the best child at subsequent depths.
 fn extract_ddtree_paths(tree: &[crate::speculative::types::TreeNode]) -> Vec<Vec<usize>> {
@@ -1237,6 +1381,193 @@ mod tests {
                     "seed {seed}: paged token {t} out of range"
                 );
             }
+        }
+    }
+
+    // ── Embedding-Conditioned Step Tests (Plan 024) ──────────────
+
+    #[cfg(feature = "embedding_router")]
+    #[test]
+    fn test_speculative_step_embedding_conditioned_returns_at_least_one() {
+        use crate::speculative::step::speculative_step_embedding_conditioned;
+
+        let (weights, config) = make_draft();
+        // Simulate a projected embedding matching n_embd
+        let embedding = vec![0.1; config.n_embd];
+        let mut rng = Rng::new(42);
+
+        let (accepted, len) =
+            speculative_step_embedding_conditioned(&weights, &config, 0, 0, &embedding, &mut rng);
+
+        assert!(!accepted.is_empty(), "should return at least 1 token");
+        assert!(len >= 1);
+        for &t in &accepted {
+            assert!(t < config.vocab_size, "token {t} out of range");
+        }
+    }
+
+    #[cfg(feature = "embedding_router")]
+    #[test]
+    fn test_speculative_step_embedding_conditioned_deterministic() {
+        use crate::speculative::step::speculative_step_embedding_conditioned;
+
+        let (weights, config) = make_draft();
+        let embedding = vec![0.1; config.n_embd];
+
+        let (a1, l1) = speculative_step_embedding_conditioned(
+            &weights,
+            &config,
+            0,
+            0,
+            &embedding,
+            &mut Rng::new(42),
+        );
+        let (a2, l2) = speculative_step_embedding_conditioned(
+            &weights,
+            &config,
+            0,
+            0,
+            &embedding,
+            &mut Rng::new(42),
+        );
+
+        assert_eq!(a1, a2, "same seed should produce same accepted tokens");
+        assert_eq!(l1, l2, "same seed should produce same acceptance length");
+    }
+
+    #[cfg(feature = "embedding_router")]
+    #[test]
+    fn test_speculative_step_embedding_conditioned_differs_from_unconditioned() {
+        use crate::speculative::step::speculative_step_embedding_conditioned;
+
+        let (weights, config) = make_draft();
+        let embedding = vec![0.5; config.n_embd];
+
+        let (conditioned, _) = speculative_step_embedding_conditioned(
+            &weights,
+            &config,
+            0,
+            0,
+            &embedding,
+            &mut Rng::new(42),
+        );
+        let (unconditioned, _) =
+            speculative_step_embedding_conditioned(&weights, &config, 0, 0, &[], &mut Rng::new(42));
+
+        // With different KV seeding, results should differ in at least one seed
+        let differs = (0..20u64).any(|seed| {
+            let (c, _) = speculative_step_embedding_conditioned(
+                &weights,
+                &config,
+                0,
+                0,
+                &embedding,
+                &mut Rng::new(seed),
+            );
+            let (u, _) = speculative_step_embedding_conditioned(
+                &weights,
+                &config,
+                0,
+                0,
+                &[],
+                &mut Rng::new(seed),
+            );
+            c != u
+        });
+
+        assert!(
+            differs || conditioned != unconditioned,
+            "conditioned draft should differ from unconditioned"
+        );
+    }
+
+    #[cfg(feature = "embedding_router")]
+    #[test]
+    fn test_speculative_step_embedding_conditioned_with_returns_at_least_one() {
+        use crate::speculative::step::speculative_step_embedding_conditioned_with;
+
+        let (weights, config) = make_draft();
+        let embedding = vec![0.1; config.n_embd];
+        let mut rng = Rng::new(42);
+
+        let mut sctx = SpeculativeContext::new(&config);
+        let mut tree_builder = TreeBuilder::new(&config);
+
+        let (accepted, len) = speculative_step_embedding_conditioned_with(
+            &mut sctx,
+            &mut tree_builder,
+            &weights,
+            &config,
+            0,
+            0,
+            &embedding,
+            &mut rng,
+        );
+
+        assert!(!accepted.is_empty(), "should return at least 1 token");
+        assert!(len >= 1);
+        for &t in &accepted {
+            assert!(t < config.vocab_size, "token {t} out of range");
+        }
+    }
+
+    #[cfg(feature = "embedding_router")]
+    #[test]
+    fn test_speculative_step_embedding_conditioned_with_deterministic() {
+        use crate::speculative::step::speculative_step_embedding_conditioned_with;
+
+        let (weights, config) = make_draft();
+        let embedding = vec![0.1; config.n_embd];
+
+        let (a1, l1) = {
+            let mut sctx = SpeculativeContext::new(&config);
+            let mut tree_builder = TreeBuilder::new(&config);
+            speculative_step_embedding_conditioned_with(
+                &mut sctx,
+                &mut tree_builder,
+                &weights,
+                &config,
+                0,
+                0,
+                &embedding,
+                &mut Rng::new(42),
+            )
+        };
+        let (a2, l2) = {
+            let mut sctx = SpeculativeContext::new(&config);
+            let mut tree_builder = TreeBuilder::new(&config);
+            speculative_step_embedding_conditioned_with(
+                &mut sctx,
+                &mut tree_builder,
+                &weights,
+                &config,
+                0,
+                0,
+                &embedding,
+                &mut Rng::new(42),
+            )
+        };
+
+        assert_eq!(a1, a2, "same seed should produce same accepted tokens");
+        assert_eq!(l1, l2, "same seed should produce same acceptance length");
+    }
+
+    #[cfg(feature = "embedding_router")]
+    #[test]
+    fn test_speculative_step_embedding_conditioned_empty_embedding_valid() {
+        use crate::speculative::step::speculative_step_embedding_conditioned;
+
+        let (weights, config) = make_draft();
+        let mut rng = Rng::new(42);
+
+        // Empty embedding should behave like unconditioned (no KV seeding)
+        let (accepted, len) =
+            speculative_step_embedding_conditioned(&weights, &config, 0, 0, &[], &mut rng);
+
+        assert!(!accepted.is_empty(), "should return at least 1 token");
+        assert!(len >= 1);
+        for &t in &accepted {
+            assert!(t < config.vocab_size, "token {t} out of range");
         }
     }
 }

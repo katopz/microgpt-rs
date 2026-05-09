@@ -47,8 +47,20 @@ pub mod registry;
 pub mod types;
 pub mod wasm_cache;
 
+#[cfg(feature = "embedding_router")]
+pub mod embedding;
+#[cfg(feature = "embedding_router")]
+pub mod projector;
+
 pub use keyword::KeywordRouter;
 pub use prompt_router::PromptRouter;
 pub use registry::ExpertRegistry;
 pub use types::{DomainConfig, ExpertBundle, RouteDecision, RouterConfig};
 pub use wasm_cache::WasmPrunerCache;
+
+#[cfg(feature = "embedding_router")]
+pub use embedding::EmbeddingRouter;
+#[cfg(feature = "embedding_router")]
+pub use projector::{EmbeddingProjector, TruncatePadProjector};
+#[cfg(feature = "embedding_router")]
+pub use types::{EmbeddingExpertBundle, EmbeddingRouteDecision, EmbeddingRouterConfig};

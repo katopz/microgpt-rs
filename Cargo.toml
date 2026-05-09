@@ -11,7 +11,7 @@ fastrand = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["json"], optional = true }
-tokio = { version = "1", features = ["rt"], optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"], optional = true }
 syn = { version = "2", features = ["full", "parsing"], optional = true }
 proc-macro2 = { version = "1", optional = true }
 wgpu = { version = "23", optional = true }
@@ -35,7 +35,8 @@ gpu = ["wgpu", "bytemuck", "pollster", "safetensors"]
 wasm = ["wasmtime", "wat"]
 sparse_mlp = []  # TwELL-inspired sparse MLP matmul (Plan 022)
 router = ["wasm"]
-full = ["sudoku", "validator", "rest", "gpu", "wasm", "router"]
+embedding_router = ["router", "reqwest", "tokio"]
+full = ["sudoku", "validator", "rest", "gpu", "wasm", "router", "embedding_router"]
 
 [[example]]
 name = "sudoku_speculative"
@@ -90,3 +91,7 @@ required-features = ["validator"]
 [[example]]
 name = "router_demo"
 required-features = ["router"]
+
+[[example]]
+name = "embedding_router_demo"
+required-features = ["embedding_router"]

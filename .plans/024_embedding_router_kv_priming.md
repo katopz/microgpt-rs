@@ -114,7 +114,7 @@ Draft tokens with semantic bias toward retrieved code patterns
 
 ## Tasks
 
-- [ ] **Task 1: Add `EmbeddingRouteDecision` to `src/router/types.rs`**
+- [x] **Task 1: Add `EmbeddingRouteDecision` to `src/router/types.rs`**
   - New type extending `RouteDecision` with optional embedding:
     ```rust
     /// Result of routing with optional retrieved embedding for KV cache priming.
@@ -151,7 +151,7 @@ Draft tokens with semantic bias toward retrieved code patterns
   - `EmbeddingRouteDecision` wraps it, adding embedding data
   - `EmbeddingRouterConfig` loaded from `domains.toml` `[embedding_router]` section
 
-- [ ] **Task 2: Add `EmbeddingProjector` to `src/router/projector.rs`**
+- [x] **Task 2: Add `EmbeddingProjector` to `src/router/projector.rs`**
   - New module with dimension projection strategies:
     ```rust
     /// Projects an embedding vector to the draft model's hidden dimension.
@@ -178,7 +178,7 @@ Draft tokens with semantic bias toward retrieved code patterns
   - Unit test: all-zeros embedding produces all-zeros output
   - `LinearProjector` is a future extension point (needs trained weights)
 
-- [ ] **Task 3: Add anyrag `/search/embedding` response types to `src/router/types.rs`**
+- [x] **Task 3: Add anyrag `/search/embedding` response types to `src/router/types.rs`**
   - Types for parsing anyrag embedding search response:
     ```rust
     /// Response from anyrag `/search/embedding` endpoint.
@@ -210,7 +210,7 @@ Draft tokens with semantic bias toward retrieved code patterns
   - These types exist in microgpt-rs, not anyrag — they're the client's view of anyrag's API
   - anyrag may need a new endpoint or extension to existing search (see Cross-Project)
 
-- [ ] **Task 4: Implement `EmbeddingRouter` in `src/router/embedding.rs`**
+- [x] **Task 4: Implement `EmbeddingRouter` in `src/router/embedding.rs`**
   - `PromptRouter` impl with three-tier fallback:
     ```rust
     pub struct EmbeddingRouter {
@@ -251,7 +251,7 @@ Draft tokens with semantic bias toward retrieved code patterns
   - Timeout: 200ms default (configurable) — fail fast, fall back to keyword
   - Auth: Optional Bearer token from config
 
-- [ ] **Task 5: Add `speculative_step_embedding_conditioned` to `src/speculative/step.rs`**
+- [x] **Task 5: Add `speculative_step_embedding_conditioned` to `src/speculative/step.rs`**
   - New speculative step that uses retrieved embedding (not target model hidden state):
     ```rust
     /// Speculative step with embedding-conditioned draft.
@@ -285,13 +285,13 @@ Draft tokens with semantic bias toward retrieved code patterns
   - Plus zero-alloc `_with` variant reusing `SpeculativeContext`
   - Reuses existing `dflash_predict_conditioned_with` — no changes to dflash.rs
 
-- [ ] **Task 6: Add `embedding_router` feature to `Cargo.toml`**
+- [x] **Task 6: Add `embedding_router` feature to `Cargo.toml`**
   - New feature: `embedding_router = ["router", "reqwest", "tokio"]`
   - Depends on `router` (for types/registry), `reqwest` (for HTTP), `tokio` (for async runtime)
   - Add to `full` feature: `full = [..., "embedding_router"]`
   - NOT in default features (requires running anyrag server)
 
-- [ ] **Task 7: Module wiring (`src/router/mod.rs`, `src/lib.rs`)**
+- [x] **Task 7: Module wiring (`src/router/mod.rs`, `src/lib.rs`)**
   - Add to `src/router/mod.rs`:
     ```rust
     #[cfg(feature = "embedding_router")]
@@ -307,7 +307,7 @@ Draft tokens with semantic bias toward retrieved code patterns
   - Export `EmbeddingRouteDecision` and `EmbeddingRouterConfig` from `types.rs`
   - No changes to `src/lib.rs` (already has `#[cfg(feature = "router")] pub mod router`)
 
-- [ ] **Task 8: Add `EmbeddingPruner` adapter to `src/router/types.rs`**
+- [x] **Task 8: Add `EmbeddingPruner` adapter to `src/router/types.rs`**
   - Wrapper that combines domain routing with embedding retrieval:
     ```rust
     /// A screening pruner that also carries an optional embedding for
@@ -330,7 +330,7 @@ Draft tokens with semantic bias toward retrieved code patterns
     `speculative_step_embedding_conditioned` (retrieved embedding), or
     `speculative_step_with` (no conditioning)
 
-- [ ] **Task 9: Integration example (`examples/embedding_router_demo.rs`)**
+- [x] **Task 9: Integration example (`examples/embedding_router_demo.rs`)**
   - Demonstrates the full pipeline:
     1. Load config → build `EmbeddingRouter` with `TruncatePadProjector`
     2. Call `route_async("fn validate_token(")` with anyrag running
@@ -340,7 +340,7 @@ Draft tokens with semantic bias toward retrieved code patterns
     6. Compare marginals with/without embedding conditioning
   - Feature-gated: `required-features = ["embedding_router"]`
 
-- [ ] **Task 10: Unit tests**
+- [x] **Task 10: Unit tests**
   - `TruncatePadProjector`: truncate 768 → 64 (first 64 elements kept)
   - `TruncatePadProjector`: pad 32 → 64 (32 zeros appended)
   - `TruncatePadProjector`: identity 64 → 64 (unchanged)
@@ -353,7 +353,7 @@ Draft tokens with semantic bias toward retrieved code patterns
   - `speculative_step_embedding_conditioned`: empty embedding = unconditioned
   - Feature-gate: compiles with and without `embedding_router`
 
-- [ ] **Task 11: Update README**
+- [x] **Task 11: Update README**
   - Add "Embedding Router (Plan 024)" section to Architecture
   - Update Feature Flags section with `embedding_router`
   - Add data flow diagram
