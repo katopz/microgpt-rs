@@ -792,5 +792,6 @@ bench/
 - [ZAYA1-VL-8B Technical Report](https://arxiv.org/abs/2504.02268) — Zyphra, 2025 (bidirectional prefix attention, token-specific LoRAs)
 - [FlashPrefill](https://arxiv.org/abs/2603.06199) — Fan et al., 2026 (block-sparse drafter attention)
 - [Raven: High-Recall Sequence Modeling with Sparse Memory Routing](https://github.com/goombalab/raven) — Afzal, Bick, Xing, Cevher, Gu, 2025 (sparse Top-K slot routing, 99.4% recall at 16K context)
+- [Probabilistic Programs of Thought](https://arxiv.org/abs/2604.17290) — Garg et al., 2026 (logit-parameterized CPU resampling, entropy-based RV identification, ~7% accuracy boost with zero GPU overhead)
 - [EMO: Pretraining Mixture of Experts for Emergent Modularity](https://arxiv.org/abs/2406.08732) — Tang et al., 2024 (document-level routing → modular semantic experts)
 - [Hazy Research Megakernel](https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles) — Intelligence Per Watt methodology
