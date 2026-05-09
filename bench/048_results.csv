@@ -1,0 +1,27 @@
+commit,date,method,throughput,us_per_step,avg_accept_len
+a3c9ecf,2026-05-09T19:16:02,Transformer AR,747892,1.34,1.00
+a3c9ecf,2026-05-09T19:16:02,DFlash,4201637,1.90,8.00
+a3c9ecf,2026-05-09T19:16:02,DDTree Build,379608,2.63,0.00
+a3c9ecf,2026-05-09T19:16:02,Speculative (Simulated),1075133,4.65,5.00
+a3c9ecf,2026-05-09T19:16:02,Speculative (AR Draft),1534391,4.56,7.00
+a3c9ecf,2026-05-09T19:16:02,Leviathan (Algorithm 1),114494,10.30,1.18
+a3c9ecf,2026-05-09T19:16:02,Leviathan (no rollback),114358,10.31,1.18
+a3c9ecf,2026-05-09T19:16:02,Leviathan (w/ rollback),197697,5.94,1.18
+a3c9ecf,2026-05-09T19:16:02,Spec (unconditioned),1068998,4.68,5.00
+a3c9ecf,2026-05-09T19:16:02,Spec (conditioned),1143472,5.90,6.74
+a3c9ecf,2026-05-09T19:16:02,Prefill (no compress),19278100,3.32,64.00
+a3c9ecf,2026-05-09T19:16:02,Prefill (compressed),1958730,3.57,7.00
+a3c9ecf,2026-05-09T19:16:02,DDTree (no chain),372113,2.69,16.00
+a3c9ecf,2026-05-09T19:16:02,DDTree (chain-seed),398844,2.51,16.00
+a3c9ecf,2026-05-09T19:16:02,DDTree (screened R=1.0),307374,3.25,16.00
+a3c9ecf,2026-05-09T19:16:02,DDTree (screened adapter),308736,3.24,16.00
+a3c9ecf,2026-05-09T19:16:02,forward (flat),1189518,0.84,0.00
+a3c9ecf,2026-05-09T19:16:02,forward_paged,1001461,1.00,0.00
+a3c9ecf,2026-05-09T19:16:02,forward_raven (16 slots),1476696,0.68,0.00
+a3c9ecf,2026-05-09T19:16:02,raven_recall (1000 noise, slot 12=9.9→6.3 acc=63%),10169526,0.10,63.21
+a3c9ecf,2026-05-09T19:16:02,Prefill (causal seq),1143350,0.87,8.00
+a3c9ecf,2026-05-09T19:16:02,Prefill (bidirectional),1083043,0.92,8.00
+a3c9ecf,2026-05-09T19:16:02,Prefill (no LoRA),1083329,0.92,8.00
+a3c9ecf,2026-05-09T19:16:02,Prefill (w/ LoRA),891997,1.12,8.00
+a3c9ecf,2026-05-09T19:16:02,Generate (plain AR),1041103,7.68,8.00
+a3c9ecf,2026-05-09T19:16:02,Generate (prefill+LoRA),447480,17.88,8.00

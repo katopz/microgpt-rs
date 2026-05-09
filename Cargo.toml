@@ -99,3 +99,6 @@ required-features = ["embedding_router"]
 
 [[example]]
 name = "bidirectional_prefill_demo"
+
+[[example]]
+name = "py2rs_hello"
