@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::speculative::types::ScreeningPruner;
+use crate::types::LoraPair;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -49,8 +50,10 @@ pub struct ExpertBundle {
     pub domain: String,
     /// The screening pruner used to score token relevance during DDTree.
     pub pruner: Box<dyn ScreeningPruner>,
-    /// Path to a LoRA adapter file (loading deferred to a future plan).
+    /// Legacy single LoRA path (backward compat).
     pub lora_path: Option<PathBuf>,
+    /// Loaded LoRA pair for modality switching (Plan 025).
+    pub lora_pair: LoraPair,
 }
 
 // ---------------------------------------------------------------------------
@@ -83,9 +86,15 @@ pub struct DomainConfig {
     /// Path to a WASM pruner file (relative to pruner directory).
     #[serde(default)]
     pub pruner: Option<String>,
-    /// Path to a LoRA adapter file (relative to pruner directory).
+    /// Path to LoRA adapter file (backward compat: maps to writer_lora).
     #[serde(default)]
     pub lora: Option<String>,
+    /// Path to reader LoRA adapter (active during bidirectional prefill).
+    #[serde(default)]
+    pub reader_lora: Option<String>,
+    /// Path to writer LoRA adapter (active during causal decode).
+    #[serde(default)]
+    pub writer_lora: Option<String>,
     /// Name of a built-in native pruner: `"sudoku"`, `"tactical"`, `"no_pruner"`.
     #[serde(default)]
     pub native_pruner: Option<String>,
@@ -217,6 +226,8 @@ pub struct EmbeddingExpertBundle {
     pub projected_embedding: Option<Vec<f32>>,
     /// Source of the embedding (for diagnostics).
     pub embedding_source: Option<String>,
-    /// LoRA adapter path from domain config.
+    /// LoRA adapter path from domain config (legacy).
     pub lora_path: Option<PathBuf>,
+    /// Loaded LoRA pair for modality switching (Plan 025).
+    pub lora_pair: LoraPair,
 }

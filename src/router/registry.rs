@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::speculative::types::{NoScreeningPruner, ScreeningPruner};
+use crate::types::{LoraAdapter, LoraPair};
 use crate::wasm::WasmPruner;
 
 use super::types::{DomainConfig, ExpertBundle, RouterConfig};
@@ -46,11 +47,13 @@ impl ExpertRegistry {
         for domain_config in &config.domain {
             let pruner = Self::resolve_pruner(domain_config, pruner_dir);
             let lora_path = domain_config.lora.as_ref().map(|l| pruner_dir.join(l));
+            let lora_pair = Self::resolve_lora_pair(domain_config, pruner_dir);
 
             let bundle = ExpertBundle {
                 domain: domain_config.name.clone(),
                 pruner,
                 lora_path,
+                lora_pair,
             };
 
             if domain_config.name == "general" {
@@ -68,6 +71,7 @@ impl ExpertRegistry {
                     domain: "general".into(),
                     pruner: Box::new(NoScreeningPruner),
                     lora_path: None,
+                    lora_pair: LoraPair::none(),
                 },
             );
         }
@@ -185,6 +189,43 @@ impl ExpertRegistry {
             }
         }
     }
+
+    /// Resolve dual LoRA adapters from domain config.
+    /// Priority: reader_lora/writer_lora fields > legacy lora field.
+    /// Graceful degradation: failed loads log warning, proceed without LoRA.
+    fn resolve_lora_pair(domain: &DomainConfig, pruner_dir: &Path) -> LoraPair {
+        let reader = domain.reader_lora.as_ref().and_then(|p| {
+            let path = pruner_dir.join(p);
+            match LoraAdapter::load(&path) {
+                Ok(adapter) => Some(adapter),
+                Err(e) => {
+                    eprintln!(
+                        "[router] failed to load reader LoRA '{}': {e}; proceeding without",
+                        path.display(),
+                    );
+                    None
+                }
+            }
+        });
+
+        // Writer: writer_lora > legacy lora field
+        let writer_path = domain.writer_lora.as_ref().or(domain.lora.as_ref());
+        let writer = writer_path.and_then(|p| {
+            let path = pruner_dir.join(p);
+            match LoraAdapter::load(&path) {
+                Ok(adapter) => Some(adapter),
+                Err(e) => {
+                    eprintln!(
+                        "[router] failed to load writer LoRA '{}': {e}; proceeding without",
+                        path.display(),
+                    );
+                    None
+                }
+            }
+        });
+
+        LoraPair { reader, writer }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +247,8 @@ mod tests {
             keywords: vec![],
             pruner: None,
             lora: None,
+            reader_lora: None,
+            writer_lora: None,
             native_pruner: Some("no_pruner".into()),
         }
     }
@@ -239,6 +282,8 @@ mod tests {
                 keywords: vec!["test".into()],
                 pruner: None,
                 lora: None,
+                reader_lora: None,
+                writer_lora: None,
                 native_pruner: Some("no_pruner".into()),
             },
         ]);
@@ -258,6 +303,8 @@ mod tests {
                 keywords: vec!["python".into()],
                 pruner: None,
                 lora: Some("py2rs_lora.bin".into()),
+                reader_lora: None,
+                writer_lora: None,
                 native_pruner: Some("no_pruner".into()),
             },
         ]);
@@ -279,6 +326,8 @@ mod tests {
                 keywords: vec!["rust".into()],
                 pruner: Some("nonexistent.wasm".into()),
                 lora: None,
+                reader_lora: None,
+                writer_lora: None,
                 native_pruner: None,
             },
         ]);
@@ -313,6 +362,8 @@ mod tests {
                 keywords: vec!["bare".into()],
                 pruner: None,
                 lora: None,
+                reader_lora: None,
+                writer_lora: None,
                 native_pruner: None,
             },
         ]);

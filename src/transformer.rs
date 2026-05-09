@@ -179,6 +179,8 @@ pub struct ForwardContext {
     hidden: Vec<f32>,           // [mlp_hidden] MLP hidden
     pub logits: Vec<f32>,       // [vocab_size] output logits
     pub hidden_state: Vec<f32>, // [n_embd] final hidden state (Plan 009 compat)
+    /// LoRA intermediate buffer [lora_rank]. Pre-allocated, zero alloc in hot path.
+    pub lora_buf: Vec<f32>,
     // Sparse MLP buffers (Plan 022: TwELL-inspired unstructured sparsity)
     #[cfg(feature = "sparse_mlp")]
     active_indices: Vec<usize>, // [mlp_hidden] pre-allocated index buffer
@@ -201,10 +203,39 @@ impl ForwardContext {
             hidden: vec![0.0; config.mlp_hidden],
             logits: vec![0.0; config.vocab_size],
             hidden_state: vec![0.0; config.n_embd],
+            lora_buf: vec![0.0; config.lora_rank],
             #[cfg(feature = "sparse_mlp")]
             active_indices: vec![0; config.mlp_hidden],
             #[cfg(feature = "sparse_mlp")]
             active_values: vec![0.0; config.mlp_hidden],
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PrefillContext — Pre-allocated buffers for bidirectional prefill (Plan 025)
+// ---------------------------------------------------------------------------
+
+/// Pre-allocated context for bidirectional prefill phase.
+/// Created once at startup, reused across all requests. Zero alloc in request path.
+pub struct PrefillContext {
+    /// Hidden states for all prompt positions, carried between layers.
+    /// Size: [max_prompt_len × n_embd]. Only used when n_layer > 1.
+    /// For n_layer == 1, embeddings are computed on-the-fly and this buffer is unused.
+    hidden: Vec<f32>,
+    /// LoRA intermediate buffer. Size: [lora_rank].
+    /// Reused for every LoRA application across all projections.
+    lora_buf: Vec<f32>,
+    /// Max prompt length this context supports (= config.block_size).
+    max_prompt_len: usize,
+}
+
+impl PrefillContext {
+    pub fn new(config: &Config) -> Self {
+        Self {
+            hidden: vec![0.0; config.block_size * config.n_embd],
+            lora_buf: vec![0.0; config.lora_rank],
+            max_prompt_len: config.block_size,
         }
     }
 }
@@ -278,8 +309,8 @@ unsafe fn attention_head(
     }
 }
 
-/// Zero-alloc forward pass. Writes logits into `ctx.logits` and returns &mut to it.
-/// Multi-layer: RMSNorm → Attn → Res → RMSNorm → MLP → Res per layer, then LM Head.
+/// Causal decode: single token forward with optional LoRA adapter.
+/// Backward-compatible wrapper that passes `None` for LoRA.
 #[inline(always)]
 pub fn forward<'a>(
     ctx: &'a mut ForwardContext,
@@ -288,6 +319,22 @@ pub fn forward<'a>(
     token: usize,
     pos: usize,
     config: &Config,
+) -> &'a mut [f32] {
+    forward_base(ctx, weights, cache, token, pos, config, None)
+}
+
+/// Internal forward with optional LoRA (writer LoRA during decode).
+/// Zero-alloc forward pass. Writes logits into `ctx.logits` and returns &mut to it.
+/// Multi-layer: RMSNorm → Attn → Res → RMSNorm → MLP → Res per layer, then LM Head.
+#[inline(always)]
+fn forward_base<'a>(
+    ctx: &'a mut ForwardContext,
+    weights: &TransformerWeights,
+    cache: &mut MultiLayerKVCache,
+    token: usize,
+    pos: usize,
+    config: &Config,
+    lora: Option<&crate::types::LoraAdapter>,
 ) -> &'a mut [f32] {
     let n = config.n_embd;
     let hd = config.head_dim;
@@ -315,8 +362,17 @@ pub fn forward<'a>(
 
         // QKV projections from per-layer weights (GQA: K/V produce kv_dim outputs)
         matmul(&mut ctx.q, &layer_weights.attn_wq, &ctx.x, n, n);
+        if let Some(lora) = lora {
+            crate::types::lora_apply(&mut ctx.q, lora, &ctx.x, &mut ctx.lora_buf);
+        }
         matmul(&mut ctx.k, &layer_weights.attn_wk, &ctx.x, kvd, n);
+        if let Some(lora) = lora {
+            crate::types::lora_apply(&mut ctx.k, lora, &ctx.x, &mut ctx.lora_buf);
+        }
         matmul(&mut ctx.v, &layer_weights.attn_wv, &ctx.x, kvd, n);
+        if let Some(lora) = lora {
+            crate::types::lora_apply(&mut ctx.v, lora, &ctx.x, &mut ctx.lora_buf);
+        }
 
         // Store K,V in per-layer cache (kv_dim elements per position)
         let pos_off = pos * kvd;
@@ -359,6 +415,9 @@ pub fn forward<'a>(
 
         // Output projection + residual
         matmul(&mut ctx.x, &layer_weights.attn_wo, &ctx.attn_out, n, n);
+        if let Some(lora) = lora {
+            crate::types::lora_apply(&mut ctx.x, lora, &ctx.attn_out, &mut ctx.lora_buf);
+        }
         for i in 0..n {
             unsafe {
                 *ctx.x.get_unchecked_mut(i) += *ctx.xr.get_unchecked(i);
@@ -375,6 +434,9 @@ pub fn forward<'a>(
             config.mlp_hidden,
             n,
         );
+        if let Some(lora) = lora {
+            crate::types::lora_apply(&mut ctx.hidden, lora, &ctx.x, &mut ctx.lora_buf);
+        }
         // MLP w2: sparse when feature enabled and sparsity is high enough (Plan 022)
         #[cfg(feature = "sparse_mlp")]
         {
@@ -405,6 +467,9 @@ pub fn forward<'a>(
             n,
             config.mlp_hidden,
         );
+        if let Some(lora) = lora {
+            crate::types::lora_apply(&mut ctx.x, lora, &ctx.hidden, &mut ctx.lora_buf);
+        }
         for i in 0..n {
             unsafe {
                 *ctx.x.get_unchecked_mut(i) += *ctx.xr2.get_unchecked(i);
@@ -425,6 +490,312 @@ pub fn forward<'a>(
     );
 
     &mut ctx.logits
+}
+
+// ---------------------------------------------------------------------------
+// Bidirectional Prefill (Plan 025)
+// ---------------------------------------------------------------------------
+
+/// Bidirectional prefill: process prompt tokens with full mutual attention.
+///
+/// For each transformer layer:
+///   Phase A: Compute K/V for all prompt positions → store in KV cache
+///   Phase B: For each position, attend to ALL prompt K/V (bidirectional)
+///
+/// Returns logits for the last prompt position (used to sample first gen token).
+/// KV cache is populated as a side effect, shared with subsequent decode calls.
+///
+/// Zero-copy: no allocations. Reuses ForwardContext buffers per-position,
+/// PrefillContext::hidden for multi-layer inter-layer state.
+#[allow(clippy::too_many_lines)]
+pub fn forward_prefill<'a>(
+    ctx: &'a mut ForwardContext,
+    prefill: &mut PrefillContext,
+    weights: &TransformerWeights,
+    cache: &mut MultiLayerKVCache,
+    tokens: &[usize],
+    config: &Config,
+    lora: Option<&crate::types::LoraAdapter>,
+) -> &'a mut [f32] {
+    let prompt_len = tokens.len().min(prefill.max_prompt_len);
+    let n = config.n_embd;
+    let kvd = crate::types::kv_dim(config);
+    let hd = config.head_dim;
+    let n_kv = config.n_kv_head;
+
+    assert!(prompt_len > 0, "prefill requires at least one token");
+    assert!(
+        prompt_len <= config.block_size,
+        "prompt_len {prompt_len} exceeds block_size {}",
+        config.block_size
+    );
+
+    // Initialize hidden states for multi-layer (single-layer computes on-the-fly)
+    if config.n_layer > 1 {
+        for (p, &token) in tokens.iter().enumerate().take(prompt_len) {
+            let tok_off = token * n;
+            let pos_off = p * n;
+            for i in 0..n {
+                unsafe {
+                    *prefill.hidden.get_unchecked_mut(p * n + i) =
+                        *weights.wte.get_unchecked(tok_off + i)
+                            + *weights.wpe.get_unchecked(pos_off + i);
+                }
+            }
+        }
+    }
+
+    for (layer_idx, layer_weights) in weights.layers.iter().enumerate() {
+        let layer_cache = &mut cache.layers[layer_idx];
+
+        // ── Phase A: Compute K/V for ALL positions → store in cache ──
+        for (p, &token) in tokens.iter().enumerate().take(prompt_len) {
+            // Load hidden state
+            if config.n_layer > 1 {
+                ctx.x[..n].copy_from_slice(&prefill.hidden[p * n..(p + 1) * n]);
+            } else {
+                let tok_off = token * n;
+                let pos_off = p * n;
+                for i in 0..n {
+                    unsafe {
+                        *ctx.x.get_unchecked_mut(i) = *weights.wte.get_unchecked(tok_off + i)
+                            + *weights.wpe.get_unchecked(pos_off + i);
+                    }
+                }
+            }
+
+            // Pre-attention norm (matches forward_base exactly: double rmsnorm)
+            crate::types::rmsnorm(&mut ctx.x);
+            ctx.xr[..n].copy_from_slice(&ctx.x[..n]);
+            crate::types::rmsnorm(&mut ctx.x);
+
+            // K/V projections
+            crate::types::matmul(&mut ctx.k, &layer_weights.attn_wk, &ctx.x, kvd, n);
+            if let Some(lora) = lora {
+                crate::types::lora_apply(&mut ctx.k, lora, &ctx.x, &mut prefill.lora_buf);
+            }
+            crate::types::matmul(&mut ctx.v, &layer_weights.attn_wv, &ctx.x, kvd, n);
+            if let Some(lora) = lora {
+                crate::types::lora_apply(&mut ctx.v, lora, &ctx.x, &mut prefill.lora_buf);
+            }
+
+            // Store K/V in cache
+            let pos_off = p * kvd;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    ctx.k.as_ptr(),
+                    layer_cache.key.as_mut_ptr().add(pos_off),
+                    kvd,
+                );
+                std::ptr::copy_nonoverlapping(
+                    ctx.v.as_ptr(),
+                    layer_cache.value.as_mut_ptr().add(pos_off),
+                    kvd,
+                );
+            }
+        }
+
+        // ── Phase B: Bidirectional attention for ALL positions ──
+        for (p, &token) in tokens.iter().enumerate().take(prompt_len) {
+            // Load hidden state again (same source as Phase A)
+            if config.n_layer > 1 {
+                ctx.x[..n].copy_from_slice(&prefill.hidden[p * n..(p + 1) * n]);
+            } else {
+                let tok_off = token * n;
+                let pos_off = p * n;
+                for i in 0..n {
+                    unsafe {
+                        *ctx.x.get_unchecked_mut(i) = *weights.wte.get_unchecked(tok_off + i)
+                            + *weights.wpe.get_unchecked(pos_off + i);
+                    }
+                }
+            }
+
+            // Pre-attention norm
+            crate::types::rmsnorm(&mut ctx.x);
+            ctx.xr[..n].copy_from_slice(&ctx.x[..n]);
+            crate::types::rmsnorm(&mut ctx.x);
+
+            // Q projection
+            crate::types::matmul(&mut ctx.q, &layer_weights.attn_wq, &ctx.x, n, n);
+            if let Some(lora) = lora {
+                crate::types::lora_apply(&mut ctx.q, lora, &ctx.x, &mut prefill.lora_buf);
+            }
+
+            // Bidirectional attention: t_n = prompt_len (full prompt range)
+            let scale = 1.0 / (hd as f32).sqrt();
+            ctx.attn_out[..n].fill(0.0);
+            for h in 0..config.n_head {
+                let kv_group = h * n_kv / config.n_head;
+                unsafe {
+                    attention_head(
+                        &ctx.q,
+                        &layer_cache.key,
+                        &layer_cache.value,
+                        &mut ctx.attn_out,
+                        &mut ctx.scores,
+                        h * hd,
+                        kv_group * hd,
+                        kvd,
+                        hd,
+                        prompt_len, // ← BIDIRECTIONAL: full range, not pos+1
+                        scale,
+                    );
+                }
+            }
+
+            // Output projection + residual
+            crate::types::matmul(&mut ctx.x, &layer_weights.attn_wo, &ctx.attn_out, n, n);
+            if let Some(lora) = lora {
+                crate::types::lora_apply(&mut ctx.x, lora, &ctx.attn_out, &mut prefill.lora_buf);
+            }
+            for i in 0..n {
+                unsafe {
+                    *ctx.x.get_unchecked_mut(i) += *ctx.xr.get_unchecked(i);
+                }
+            }
+
+            // MLP: residual → RMSNorm → MLP → residual
+            ctx.xr2[..n].copy_from_slice(&ctx.x[..n]);
+            crate::types::rmsnorm(&mut ctx.x);
+            crate::types::matmul_relu(
+                &mut ctx.hidden,
+                &layer_weights.mlp_w1,
+                &ctx.x,
+                config.mlp_hidden,
+                n,
+            );
+            if let Some(lora) = lora {
+                crate::types::lora_apply(&mut ctx.hidden, lora, &ctx.x, &mut prefill.lora_buf);
+            }
+            // MLP w2 (with sparse support)
+            #[cfg(feature = "sparse_mlp")]
+            {
+                let alive = crate::types::sparse_matmul(
+                    &mut ctx.x,
+                    &layer_weights.mlp_w2,
+                    &ctx.hidden,
+                    n,
+                    config.mlp_hidden,
+                    &mut ctx.active_indices,
+                    &mut ctx.active_values,
+                );
+                if (alive as f32 / config.mlp_hidden as f32) > (1.0 - config.sparse_threshold) {
+                    crate::types::matmul(
+                        &mut ctx.x,
+                        &layer_weights.mlp_w2,
+                        &ctx.hidden,
+                        n,
+                        config.mlp_hidden,
+                    );
+                }
+            }
+            #[cfg(not(feature = "sparse_mlp"))]
+            crate::types::matmul(
+                &mut ctx.x,
+                &layer_weights.mlp_w2,
+                &ctx.hidden,
+                n,
+                config.mlp_hidden,
+            );
+            if let Some(lora) = lora {
+                crate::types::lora_apply(&mut ctx.x, lora, &ctx.hidden, &mut prefill.lora_buf);
+            }
+            for i in 0..n {
+                unsafe {
+                    *ctx.x.get_unchecked_mut(i) += *ctx.xr2.get_unchecked(i);
+                }
+            }
+
+            // Store hidden state for next layer (multi-layer only)
+            if config.n_layer > 1 {
+                prefill.hidden[p * n..(p + 1) * n].copy_from_slice(&ctx.x[..n]);
+            }
+        }
+    }
+
+    // Snapshot hidden state (last position)
+    ctx.hidden_state[..n].copy_from_slice(&ctx.x[..n]);
+
+    // LM Head
+    crate::types::matmul(
+        &mut ctx.logits,
+        &weights.lm_head,
+        &ctx.x,
+        config.vocab_size,
+        n,
+    );
+
+    &mut ctx.logits
+}
+
+/// Full generation pipeline: bidirectional prefill → causal decode.
+/// Switches from reader LoRA to writer LoRA at the prefill→decode boundary.
+/// Zero-copy: all buffers pre-allocated, no allocations in request path.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_with_prefill(
+    ctx: &mut ForwardContext,
+    prefill: &mut PrefillContext,
+    weights: &TransformerWeights,
+    cache: &mut MultiLayerKVCache,
+    config: &Config,
+    rng: &mut crate::types::Rng,
+    prompt_tokens: &[usize],
+    max_gen_tokens: usize,
+    lora_pair: &crate::types::LoraPair,
+) -> Vec<usize> {
+    // 1. Bidirectional prefill with reader LoRA
+    let logits = forward_prefill(
+        ctx,
+        prefill,
+        weights,
+        cache,
+        prompt_tokens,
+        config,
+        lora_pair.reader.as_ref(),
+    );
+
+    // 2. Sample first generation token from prefill output
+    let mut p_dist = logits.to_vec();
+    for p in p_dist.iter_mut() {
+        *p /= config.temperature;
+    }
+    crate::types::softmax(&mut p_dist);
+    let mut token = crate::types::sample_token(&p_dist, rng);
+
+    let mut generated = vec![token];
+    let mut pos = prompt_tokens.len();
+
+    // 3. Causal decode with writer LoRA
+    for _ in 1..max_gen_tokens {
+        if pos >= config.block_size {
+            break;
+        }
+
+        let logits = forward_base(
+            ctx,
+            weights,
+            cache,
+            token,
+            pos,
+            config,
+            lora_pair.writer.as_ref(),
+        );
+        for logit in logits.iter_mut() {
+            *logit /= config.temperature;
+        }
+        crate::types::softmax(logits);
+
+        token = crate::types::sample_token(logits, rng);
+        generated.push(token);
+        pos += 1;
+
+        if token == config.bos_token {
+            break;
+        }
+    }
+
+    generated
 }
 
 /// Forward pass using `PagedKVCache` instead of `MultiLayerKVCache`.
@@ -2289,6 +2660,273 @@ mod tests {
                 sparse_out[r],
                 expected
             );
+        }
+
+        // -----------------------------------------------------------------------
+        // Plan 025: Bidirectional Prefill + Modality LoRA Switching
+        // -----------------------------------------------------------------------
+
+        #[test]
+        fn test_forward_prefill_logits_finite() {
+            let config = Config::micro();
+            let mut rng = Rng::new(42);
+            let weights = TransformerWeights::new(&config, &mut rng);
+            let mut ctx = ForwardContext::new(&config);
+            let mut prefill = PrefillContext::new(&config);
+            let mut cache = MultiLayerKVCache::new(&config);
+            let tokens: Vec<usize> = (0..8).collect();
+            let logits = forward_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &tokens,
+                &config,
+                None,
+            );
+            assert_eq!(logits.len(), config.vocab_size);
+            for (i, &l) in logits.iter().enumerate() {
+                assert!(l.is_finite(), "prefill logit {i} is not finite: {l}");
+            }
+        }
+
+        #[test]
+        fn test_forward_prefill_populates_cache() {
+            let config = Config::micro();
+            let kvd = crate::types::kv_dim(&config);
+            let mut rng = Rng::new(42);
+            let weights = TransformerWeights::new(&config, &mut rng);
+            let mut ctx = ForwardContext::new(&config);
+            let mut prefill = PrefillContext::new(&config);
+            let mut cache = MultiLayerKVCache::new(&config);
+            let tokens: Vec<usize> = (0..5).collect();
+            forward_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &tokens,
+                &config,
+                None,
+            );
+            // All 5 positions should have K/V in cache
+            for p in 0..5 {
+                let off = p * kvd;
+                let key_sum: f32 = cache.layers[0].key[off..off + kvd].iter().sum();
+                let val_sum: f32 = cache.layers[0].value[off..off + kvd].iter().sum();
+                assert!(key_sum != 0.0, "K cache at pos {p} should be populated");
+                assert!(val_sum != 0.0, "V cache at pos {p} should be populated");
+            }
+        }
+
+        #[test]
+        fn test_forward_prefill_logits_shape() {
+            let config = Config::micro();
+            let mut rng = Rng::new(42);
+            let weights = TransformerWeights::new(&config, &mut rng);
+            let mut ctx = ForwardContext::new(&config);
+            let mut prefill = PrefillContext::new(&config);
+            let mut cache = MultiLayerKVCache::new(&config);
+            let tokens: Vec<usize> = vec![0, 1, 2];
+            let logits = forward_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &tokens,
+                &config,
+                None,
+            );
+            assert_eq!(logits.len(), config.vocab_size);
+        }
+
+        #[test]
+        fn test_forward_prefill_single_token() {
+            let config = Config::micro();
+            let mut rng = Rng::new(42);
+            let weights = TransformerWeights::new(&config, &mut rng);
+            let mut ctx = ForwardContext::new(&config);
+            let mut prefill = PrefillContext::new(&config);
+            let mut cache = MultiLayerKVCache::new(&config);
+            let tokens = vec![5];
+            let logits = forward_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &tokens,
+                &config,
+                None,
+            );
+            assert_eq!(logits.len(), config.vocab_size);
+            for (i, &l) in logits.iter().enumerate() {
+                assert!(
+                    l.is_finite(),
+                    "single-token prefill logit {i} not finite: {l}"
+                );
+            }
+        }
+
+        #[test]
+        fn test_prefill_then_decode_shared_cache() {
+            let config = Config::micro();
+            let mut rng = Rng::new(42);
+            let weights = TransformerWeights::new(&config, &mut rng);
+            let mut ctx = ForwardContext::new(&config);
+            let mut prefill = PrefillContext::new(&config);
+            let mut cache = MultiLayerKVCache::new(&config);
+
+            // Prefill with 4 tokens
+            let prompt: Vec<usize> = (0..4).collect();
+            let logits = forward_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &prompt,
+                &config,
+                None,
+            );
+            assert_eq!(logits.len(), config.vocab_size);
+
+            // Decode from position 4 (should use same cache)
+            let logits2 = forward(&mut ctx, &weights, &mut cache, 0, 4, &config);
+            assert_eq!(logits2.len(), config.vocab_size);
+            for (i, &l) in logits2.iter().enumerate() {
+                assert!(
+                    l.is_finite(),
+                    "decode after prefill logit {i} not finite: {l}"
+                );
+            }
+        }
+
+        #[test]
+        fn test_no_lora_matches_existing_forward() {
+            let config = Config::micro();
+            let mut rng = Rng::new(42);
+            let weights = TransformerWeights::new(&config, &mut rng);
+
+            // Existing forward (no LoRA)
+            let mut ctx1 = ForwardContext::new(&config);
+            let mut cache1 = MultiLayerKVCache::new(&config);
+            let logits1 = forward(&mut ctx1, &weights, &mut cache1, 0, 0, &config);
+
+            // New forward_base with None (should be identical)
+            let mut ctx2 = ForwardContext::new(&config);
+            let mut cache2 = MultiLayerKVCache::new(&config);
+            let logits2 = forward_base(&mut ctx2, &weights, &mut cache2, 0, 0, &config, None);
+
+            for i in 0..config.vocab_size {
+                let diff = (logits1[i] - logits2[i]).abs();
+                assert!(
+                    diff < 1e-6,
+                    "forward and forward_base(None) differ at {i}: {diff}"
+                );
+            }
+        }
+
+        #[test]
+        fn test_generate_with_prefill_produces_tokens() {
+            let config = Config::micro();
+            let mut rng = Rng::new(42);
+            let weights = TransformerWeights::new(&config, &mut rng);
+            let mut ctx = ForwardContext::new(&config);
+            let mut prefill = PrefillContext::new(&config);
+            let mut cache = MultiLayerKVCache::new(&config);
+
+            let prompt: Vec<usize> = (0..4).collect();
+            let generated = generate_with_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &config,
+                &mut rng,
+                &prompt,
+                10,
+                &crate::types::LoraPair::none(),
+            );
+
+            assert!(!generated.is_empty(), "should generate at least one token");
+            assert!(generated.len() <= 10, "should not exceed max_gen_tokens");
+            for (i, &t) in generated.iter().enumerate() {
+                assert!(t < config.vocab_size, "token {i} out of range: {t}");
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Multi-layer prefill tests
+        // -----------------------------------------------------------------------
+
+        fn small_target_2layer() -> Config {
+            let mut c = Config::small_target();
+            c.n_layer = 2;
+            c
+        }
+
+        #[test]
+        fn test_forward_prefill_multilayer_logits_finite() {
+            let config = small_target_2layer();
+            config.validate().unwrap();
+            let mut rng = Rng::new(42);
+            let weights = TransformerWeights::new(&config, &mut rng);
+            let mut ctx = ForwardContext::new(&config);
+            let mut prefill = PrefillContext::new(&config);
+            let mut cache = MultiLayerKVCache::new(&config);
+            let tokens: Vec<usize> = (0..8).collect();
+            let logits = forward_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &tokens,
+                &config,
+                None,
+            );
+            assert_eq!(logits.len(), config.vocab_size);
+            for (i, &l) in logits.iter().enumerate() {
+                assert!(
+                    l.is_finite(),
+                    "multilayer prefill logit {i} not finite: {l}"
+                );
+            }
+        }
+
+        #[test]
+        fn test_forward_prefill_multilayer_cache_populated() {
+            let config = small_target_2layer();
+            let kvd = crate::types::kv_dim(&config);
+            let mut rng = Rng::new(42);
+            let weights = TransformerWeights::new(&config, &mut rng);
+            let mut ctx = ForwardContext::new(&config);
+            let mut prefill = PrefillContext::new(&config);
+            let mut cache = MultiLayerKVCache::new(&config);
+            let tokens: Vec<usize> = (0..4).collect();
+            forward_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &tokens,
+                &config,
+                None,
+            );
+            // Both layers should have K/V populated
+            for layer in 0..2 {
+                for p in 0..4 {
+                    let off = p * kvd;
+                    let key_sum: f32 = cache.layers[layer].key[off..off + kvd].iter().sum();
+                    let val_sum: f32 = cache.layers[layer].value[off..off + kvd].iter().sum();
+                    assert!(
+                        key_sum != 0.0,
+                        "layer {layer} K cache at pos {p} should be populated"
+                    );
+                    assert!(
+                        val_sum != 0.0,
+                        "layer {layer} V cache at pos {p} should be populated"
+                    );
+                }
+            }
         }
     }
 }

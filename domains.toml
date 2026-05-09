@@ -30,7 +30,8 @@ pruner = "syn_validator.wasm"
 name = "py2rs"
 keywords = ["python", "rewrite", "fastapi", "flask", "translate"]
 pruner = "syn_validator.wasm"
-lora = "py2rs_lora.bin"
+reader_lora = "python_reader.bin"
+writer_lora = "rust_writer.bin"
 
 [[domain]]
 name = "general"

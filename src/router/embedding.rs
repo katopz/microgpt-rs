@@ -262,6 +262,8 @@ mod tests {
                 ],
                 pruner: None,
                 lora: None,
+                reader_lora: None,
+                writer_lora: None,
                 native_pruner: Some("sudoku".into()),
             },
             DomainConfig {
@@ -277,6 +279,8 @@ mod tests {
                 ],
                 pruner: Some("syn_validator.wasm".into()),
                 lora: None,
+                reader_lora: None,
+                writer_lora: None,
                 native_pruner: None,
             },
             DomainConfig {
@@ -284,6 +288,8 @@ mod tests {
                 keywords: vec![],
                 pruner: None,
                 lora: None,
+                reader_lora: None,
+                writer_lora: None,
                 native_pruner: Some("no_pruner".into()),
             },
         ]

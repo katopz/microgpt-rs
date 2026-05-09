@@ -96,3 +96,6 @@ required-features = ["router"]
 [[example]]
 name = "embedding_router_demo"
 required-features = ["embedding_router"]
+
+[[example]]
+name = "bidirectional_prefill_demo"

@@ -12,7 +12,7 @@
 //!                                        ↓
 //!                               ExpertRegistry::get_expert(domain)
 //!                                        ↓
-//!                               ExpertBundle { pruner, lora_path }
+//!                               ExpertBundle { pruner, lora_path, lora_pair }
 //!                                        ↓
 //!                          build_dd_tree_screened(marginals, config, &bundle.pruner)
 //! ```

@@ -199,6 +199,58 @@ if let Some(embedding) = &decision.embedding {
 
 Feature-gated behind `embedding_router` (requires running anyrag server). Offline use stays on `KeywordRouter`.
 
+### Bidirectional Prefill + Modality LoRA Switching (Plan 025)
+
+Distilled from [ZAYA1-VL-8B Technical Report](https://arxiv.org/abs/2504.02268) — two production techniques adapted for the Python→Rust translation pipeline:
+
+**1. Bidirectional Prefill:** During prefill, prompt tokens (Python code + anyRAG docs) attend to ALL other prompt tokens — no causal mask. Code is non-linear; a function body references a struct 3,000 tokens earlier. Generation tokens still use causal attention. Zero overhead on the decode hot path — prefill runs once per request.
+
+**2. Modality LoRA Switching:** Load two LoRA adapters per domain — a `reader_lora` (active during prefill) and a `writer_lora` (active during decode). The switch is a reference swap at the prefill→decode boundary. Zero data movement.
+
+```
+  tokens[0..prompt_len]                    tokens[prompt_len..]
+        │                                         │
+   ┌────┴────┐                              ┌─────┴─────┐
+   │ PREFILL │  bidirectional attention     │  DECODE   │  causal attention
+   │         │  reader_lora active          │           │  writer_lora active
+   └────┬────┘                              └─────┴─────┘
+        │ KV cache populated                      │ generates tokens
+        └──────────── shared KV cache ────────────┘
+```
+
+**Two-phase per layer (zero-copy):**
+
+| Phase | What | Buffers |
+|-------|------|---------|
+| A: KV Fill | Compute K/V for all positions → store in cache | Reuses `ForwardContext` per-position |
+| B: Bidirectional Attend | Q attends to K/V[0..prompt_len] via `attention_head(t_n=prompt_len)` | `attention_head` unchanged — caller controls range |
+
+Single-layer models: no extra memory. Multi-layer: `PrefillContext::hidden` buffer (`prompt_len × n_embd`, pre-allocated once).
+
+```rust
+let mut prefill = PrefillContext::new(&config);
+
+// Bidirectional prefill with reader LoRA
+let logits = forward_prefill(&mut ctx, &mut prefill, &weights, &mut cache,
+    &prompt_tokens, &config, lora_pair.reader.as_ref());
+
+// Causal decode with writer LoRA (reference swap, zero data movement)
+let logits = forward_base(&mut ctx, &weights, &mut cache, token, pos, &config,
+    lora_pair.writer.as_ref());
+```
+
+Domain config in `domains.toml`:
+```toml
+[[domain]]
+name = "py2rs"
+keywords = ["python", "rewrite", "translate"]
+pruner = "syn_validator.wasm"
+reader_lora = "python_reader.bin"   # active during bidirectional prefill
+writer_lora = "rust_writer.bin"     # active during causal decode
+```
+
+**LoRA application** is fused in-place after each projection: `output += (α/r) × B @ (A @ input)`. Zero intermediate buffers — the delta accumulates directly into the output. `LoraAdapter::load()` reads the same binary format as `gpu/lora.rs::export_lora` (blake3 checksum, LORA magic).
+
 ## 🧠 Deterministic Validator: Neuro-Symbolic Intercept
 
 The core idea: LLMs draft tokens from semantic probability, but can't natively enforce hard constraints. A deterministic rules engine sits between draft and verification:
@@ -678,8 +730,8 @@ Build with `--features <flag>` or `--all-features`.
 src/
   lib.rs            Module index
   main.rs           Entry point (proof → bench → Percepta bench → plot)
-  types.rs          Config (micro + draft, screening_threshold, sparse_threshold), Rng, softmax, rmsnorm, matmul, matmul_relu, sparse_matmul∘, sample_token
-  transformer.rs    TransformerWeights, KVCache, PagedKVCache, RavenKVCache, ForwardContext (+ sparse buffers∘), forward, forward_paged, forward_raven, generate, generate_into, generate_batch
+  types.rs          Config (micro + draft, screening_threshold, sparse_threshold), Rng, softmax, rmsnorm, matmul, matmul_relu, sparse_matmul∘, sample_token, LoraAdapter, LoraPair, lora_apply (Plan 025)
+  transformer.rs    TransformerWeights, KVCache, PagedKVCache, RavenKVCache, ForwardContext (+ sparse buffers∘ + lora_buf), PrefillContext, forward, forward_base, forward_prefill, forward_paged, forward_raven, generate, generate_into, generate_batch, generate_with_prefill
   speculative/      SOLID decomposition (plan 005):
     mod.rs          Re-exports
     types.rs        TreeNode, DraftResult, ConstraintPruner trait, ScreeningPruner trait, NoPruner, NoScreeningPruner, BinaryScreeningPruner, SpeculativeContext (zero-alloc), DDTreeBranchCache (wraps PagedKVCache)
@@ -696,6 +748,7 @@ src/
   rest/             REST module ¶
   router/           Prompt router + expert registry (Plan 023): KeywordRouter, ExpertRegistry, WasmPrunerCache, PromptRouter trait ◊
                     Embedding router + projector (Plan 024): EmbeddingRouter, TruncatePadProjector, EmbeddingProjector ⬡
+                    Dual LoRA loading (Plan 025): DomainConfig { reader_lora, writer_lora }, LoraPair in ExpertBundle ◊
   wasm/             WasmPruner (ConstraintPruner + ScreeningPruner), WASM runtime (abi, state, wasmtime loader, EXPORT_RELEVANCE) †
   percepta.rs       Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
                     Sudoku9x9, SymbolicValidator, StreamingSolver, SolveEvent
@@ -736,6 +789,7 @@ bench/
 - [DFlash: Block-Diffusion Speculative Decoding](https://arxiv.org/abs/2602.06036) — Wang et al., 2026 (chain-seed DDTree, target-conditioned draft)
 - [DDTree: Block Diffusion Draft Trees](https://arxiv.org/abs/2604.12989) — Ringel & Romano, 2026 (budget sweep, tree verify)
 - [Cross-Family Speculative Prefill](https://arxiv.org/abs/2603.02631) — Liu et al., ICLR 2026 (importance scoring, prompt compression)
+- [ZAYA1-VL-8B Technical Report](https://arxiv.org/abs/2504.02268) — Zyphra, 2025 (bidirectional prefix attention, token-specific LoRAs)
 - [FlashPrefill](https://arxiv.org/abs/2603.06199) — Fan et al., 2026 (block-sparse drafter attention)
 - [Raven: High-Recall Sequence Modeling with Sparse Memory Routing](https://github.com/goombalab/raven) — Afzal, Bick, Xing, Cevher, Gu, 2025 (sparse Top-K slot routing, 99.4% recall at 16K context)
 - [EMO: Pretraining Mixture of Experts for Emergent Modularity](https://arxiv.org/abs/2406.08732) — Tang et al., 2024 (document-level routing → modular semantic experts)

@@ -433,3 +433,182 @@ pub fn sample_token(probs: &[f32], rng: &mut Rng) -> usize {
     }
     probs.len() - 1
 }
+
+// ---------------------------------------------------------------------------
+// LoRA Adapter — CPU inference path (Plan 025)
+// ---------------------------------------------------------------------------
+
+/// CPU-side LoRA adapter for inference.
+/// Loads from the same binary format as `GpuLoraAdapter` (Plan 008):
+/// `[LORA(4) | version(4) | blake3(32) | payload...]`
+/// where payload = `[n_adapters(4) | rank(4) | alpha(4) | adapter_data...]`
+/// and adapter_data = `[in_dim(4) | out_dim(4) | a_f32s | b_f32s]`
+///
+/// Zero-copy: loaded once per domain, reference-passed during inference.
+pub struct LoraAdapter {
+    /// Down-projection: [rank × in_dim]
+    pub a: Vec<f32>,
+    /// Up-projection: [out_dim × rank]
+    pub b: Vec<f32>,
+    /// LoRA rank.
+    pub rank: usize,
+    /// Scaling factor (alpha / rank).
+    pub alpha: f32,
+    /// Input dimension.
+    pub in_dim: usize,
+    /// Output dimension.
+    pub out_dim: usize,
+}
+
+impl LoraAdapter {
+    /// Load a single-adapter LoRA file from the Plan 008 binary format.
+    /// For multi-adapter files (multiple targets like Q, K, V), loads the first adapter.
+    /// Returns the adapter with its rank, alpha, and weight matrices.
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        const LORA_MAGIC: &[u8; 4] = b"LORA";
+        const LORA_VERSION: u32 = 1;
+
+        let file_data =
+            std::fs::read(path).map_err(|e| format!("Failed to read lora file: {e}"))?;
+
+        if file_data.len() < 44 {
+            return Err("File too small for lora header".into());
+        }
+
+        if &file_data[0..4] != LORA_MAGIC {
+            return Err("Invalid lora magic bytes".into());
+        }
+
+        let version = u32::from_le_bytes(
+            file_data[4..8]
+                .try_into()
+                .map_err(|e: std::array::TryFromSliceError| format!("Version parse: {e}"))?,
+        );
+        if version != LORA_VERSION {
+            return Err(format!("Unsupported lora version: {version}"));
+        }
+
+        let stored_checksum = &file_data[8..40];
+        let payload = &file_data[40..];
+
+        let computed = blake3::hash(payload);
+        if computed.as_bytes() != stored_checksum {
+            return Err("LoRA file checksum mismatch".into());
+        }
+
+        let mut offset = 0usize;
+        let n_adapters = read_u32_le(payload, &mut offset)?;
+        let rank = read_u32_le(payload, &mut offset)? as usize;
+        let alpha = read_f32_le(payload, &mut offset)?;
+
+        if n_adapters == 0 {
+            return Err("No adapters in lora file".into());
+        }
+
+        // Load first adapter
+        let in_dim = read_u32_le(payload, &mut offset)? as usize;
+        let out_dim = read_u32_le(payload, &mut offset)? as usize;
+
+        let a_count = rank * in_dim;
+        let b_count = out_dim * rank;
+        let a_bytes = a_count * std::mem::size_of::<f32>();
+        let b_bytes = b_count * std::mem::size_of::<f32>();
+
+        if offset + a_bytes + b_bytes > payload.len() {
+            return Err("Truncated adapter data".into());
+        }
+
+        let a: Vec<f32> = payload[offset..offset + a_bytes]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().expect("chunk is 4 bytes")))
+            .collect();
+        offset += a_bytes;
+
+        let b: Vec<f32> = payload[offset..offset + b_bytes]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().expect("chunk is 4 bytes")))
+            .collect();
+
+        Ok(Self {
+            a,
+            b,
+            rank,
+            alpha,
+            in_dim,
+            out_dim,
+        })
+    }
+}
+
+/// Apply LoRA delta in-place: `output += (alpha/rank) × B @ (A @ input)`
+///
+/// `lora_buf` is a pre-allocated `[rank]` intermediate buffer — zero alloc in hot path.
+/// The B×hidden multiplication and scaling are fused directly into the output accumulation,
+/// avoiding a separate delta buffer.
+#[inline(always)]
+pub fn lora_apply(output: &mut [f32], lora: &LoraAdapter, input: &[f32], lora_buf: &mut [f32]) {
+    let scale = lora.alpha / lora.rank as f32;
+
+    // 1. hidden = A @ input  (rank × in_dim) @ [in_dim] → [rank]
+    matmul(lora_buf, &lora.a, input, lora.rank, lora.in_dim);
+
+    // 2. output += scale × (B @ hidden)  — fused, no intermediate delta buffer
+    for r in 0..lora.out_dim {
+        let row_off = r * lora.rank;
+        let mut sum = 0.0f32;
+        for k in 0..lora.rank {
+            unsafe {
+                sum += *lora.b.get_unchecked(row_off + k) * *lora_buf.get_unchecked(k);
+            }
+        }
+        unsafe {
+            *output.get_unchecked_mut(r) += scale * sum;
+        }
+    }
+}
+
+/// A loaded LoRA pair for modality-specific inference (Plan 025).
+/// Reader is active during bidirectional prefill, writer during causal decode.
+/// Switching is a reference swap — zero data movement.
+pub struct LoraPair {
+    /// LoRA active during bidirectional prefill (e.g., Python Reader).
+    pub reader: Option<LoraAdapter>,
+    /// LoRA active during causal decode (e.g., Rust Writer).
+    pub writer: Option<LoraAdapter>,
+}
+
+impl LoraPair {
+    /// Empty pair — no LoRA applied.
+    pub fn none() -> Self {
+        Self {
+            reader: None,
+            writer: None,
+        }
+    }
+}
+
+fn read_u32_le(data: &[u8], offset: &mut usize) -> Result<u32, String> {
+    if *offset + 4 > data.len() {
+        return Err("Unexpected end of data reading u32".into());
+    }
+    let val = u32::from_le_bytes(
+        data[*offset..*offset + 4]
+            .try_into()
+            .map_err(|e: std::array::TryFromSliceError| format!("u32 parse: {e}"))?,
+    );
+    *offset += 4;
+    Ok(val)
+}
+
+fn read_f32_le(data: &[u8], offset: &mut usize) -> Result<f32, String> {
+    if *offset + 4 > data.len() {
+        return Err("Unexpected end of data reading f32".into());
+    }
+    let val = f32::from_le_bytes(
+        data[*offset..*offset + 4]
+            .try_into()
+            .map_err(|e: std::array::TryFromSliceError| format!("f32 parse: {e}"))?,
+    );
+    *offset += 4;
+    Ok(val)
+}

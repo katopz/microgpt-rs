@@ -38,6 +38,8 @@ fn main() {
                 ],
                 pruner: None,
                 lora: None,
+                reader_lora: None,
+                writer_lora: None,
                 native_pruner: Some("sudoku".into()),
             },
             DomainConfig {
@@ -52,6 +54,8 @@ fn main() {
                 ],
                 pruner: None,
                 lora: None,
+                reader_lora: None,
+                writer_lora: None,
                 native_pruner: Some("tactical".into()),
             },
             DomainConfig {
@@ -67,6 +71,8 @@ fn main() {
                 ],
                 pruner: Some("syn_validator.wasm".into()),
                 lora: None,
+                reader_lora: None,
+                writer_lora: None,
                 native_pruner: None,
             },
             DomainConfig {
@@ -80,6 +86,8 @@ fn main() {
                 ],
                 pruner: Some("syn_validator.wasm".into()),
                 lora: Some("py2rs_lora.bin".into()),
+                reader_lora: None,
+                writer_lora: None,
                 native_pruner: None,
             },
             DomainConfig {
@@ -87,6 +95,8 @@ fn main() {
                 keywords: vec![],
                 pruner: None,
                 lora: None,
+                reader_lora: None,
+                writer_lora: None,
                 native_pruner: Some("no_pruner".into()),
             },
         ],
