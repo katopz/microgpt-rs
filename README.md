@@ -144,6 +144,11 @@ pub trait SpeculativeVerifier: Send + Sync {
 
 `SimulatedVerifier` is fast (no target model). `LeviathanVerifier` is the full Algorithm 1 — mathematically proven distribution-preserving, but needs large model asymmetry to be faster than pure AR.
 
+### PPoT: Logit-Parameterized CPU Resampling (Plan 026 + 027)
+ After DFlash produces marginals and DDTree rejects all paths, PPoT identifies high-entropy positions in the saved marginals and resamples variant token sequences using **only CPU** — no additional GPU forward passes. Resampled paths are screened through `ScreeningPruner` for verification. This activates only on failure (zero overhead on success path).
+
+ Plan 027 extends baseline with TRT-inspired adaptive rescue: rejection memory (ring buffer of "don't" insights), per-sample strategy cycling across `TokenRule` variants, and self-consistency ranking for multi-valid variant selection. Knowledge accumulates within a generation session, biasing future resampling toward historically successful positions and rules.
+
 ### Prompt Router: Batch-Level Domain Routing (Plan 023)
 
 Inspired by [EMO: Pretraining Mixture of Experts for Emergent Modularity](https://arxiv.org/abs/2406.08732) — document-level routing constraints force experts to learn high-level semantic domains instead of syntax. We distill this pattern into a config-driven prompt router:
@@ -666,6 +671,7 @@ cargo clippy --all-targets --all-features --quiet
 | `gpu` | `wgpu`, `bytemuck`, `pollster`, `safetensors` | wgpu context & buffers |
 | `wasm` | `wasmtime`, `wat` | WASM validator runtime (WasmPruner) |
 | `sparse_mlp` | — | TwELL-inspired sparse MLP matmul (Plan 022) |
+| `ppot` | — | PPoT logit-parameterized CPU resampling + adaptive rescue (Plans 026 + 027) |
 | `router` | `wasm` | Prompt router + expert registry (Plan 023) |
 | `embedding_router` | `router`, `reqwest`, `tokio` | Embedding router + KV cache priming via anyrag (Plan 024) |
 | `full` | all above (except leviathan, always on) | Enable all features |
@@ -689,6 +695,13 @@ src/
     verifier.rs     SpeculativeVerifier trait, SimulatedVerifier, LeviathanVerifier (all zero-alloc internals)
     step.rs         speculative_step, speculative_step_verifier, speculative_step_rollback, speculative_step_conditioned
     prefill.rs      PrefillScorer trait, AttentionScorer, compress_prompt, speculative_prefill, score_with
+    ppot/           PPoT logit-parameterized CPU resampling (Plans 026 + 027) ○
+      mod.rs        Module root, public API re-exports
+      types.rs      TokenRule enum (Digit/Compare/Arithmetic/Augment/All), PpotConfig
+      entropy.rs    token_entropy, identify_high_entropy_positions, identify_positions_adaptive
+      resample.rs   ppot_rescue, ppot_rescue_adaptive, ppot_resample_multi_strategy
+      knowledge.rs  RejectionInsight, SessionKnowledge (ring buffer, adaptive threshold)
+      rank.rs       rank_by_consistency, select_best_variant (self-consistency ranking)
     sudoku_pruner.rs  SudokuPruner (path-aware, cross-depth conflict detection) *
   tokenizer/        BPE tokenizer (encode/decode/train, Config::bpe())
   validator/        SynPruner + partial parser ‡
@@ -703,6 +716,7 @@ src/
   plot.rs           plot_results → PNG horizontal bar chart
   * behind --features sudoku
   ∘ behind --features sparse_mlp
+  ○ behind --features ppot
   ‡ behind --features validator
   § behind --features gpu
   ¶ behind --features rest
@@ -740,3 +754,5 @@ bench/
 - [Raven: High-Recall Sequence Modeling with Sparse Memory Routing](https://github.com/goombalab/raven) — Afzal, Bick, Xing, Cevher, Gu, 2025 (sparse Top-K slot routing, 99.4% recall at 16K context)
 - [EMO: Pretraining Mixture of Experts for Emergent Modularity](https://arxiv.org/abs/2406.08732) — Tang et al., 2024 (document-level routing → modular semantic experts)
 - [Hazy Research Megakernel](https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles) — Intelligence Per Watt methodology
+- [Probabilistic Programs of Thought](https://arxiv.org/abs/2604.17290) — Garg et al., 2025 (logit-parameterized CPU resampling, entropy-based RV identification, different-value constraint)
+- [Test-time Recursive Thinking](https://arxiv.org/abs/2602.03094) — Zhuang et al., 2025 (rejection memory, strategy cycling, self-consistency ranking without ground truth)

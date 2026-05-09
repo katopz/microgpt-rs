@@ -6,6 +6,9 @@ pub mod step;
 pub mod types;
 pub mod verifier;
 
+#[cfg(feature = "ppot")]
+pub mod ppot;
+
 // Re-exports — preserves existing import paths like `speculative::build_dd_tree`
 pub use dd_tree::{
     TreeBuilder, build_dd_tree, build_dd_tree_pruned, build_dd_tree_screened, extract_best_path,
@@ -46,3 +49,14 @@ pub use crate::pruners::SudokuPruner;
 
 #[cfg(feature = "rest")]
 pub use step::speculative_step_rest;
+
+// ── PPoT Re-exports (Plan 026 + 027) ──────────────────────────
+#[cfg(feature = "ppot")]
+pub use ppot::{
+    ErrorKind, PpotConfig, RejectionInsight, SessionKnowledge, TokenRule,
+    identify_high_entropy_positions, identify_high_entropy_positions_into,
+    identify_positions_adaptive, identify_positions_adaptive_into, identify_positions_by_rule,
+    identify_positions_by_rule_into, ppot_resample, ppot_resample_different_value,
+    ppot_resample_multi_strategy, ppot_resample_with_support, ppot_rescue, ppot_rescue_adaptive,
+    rank_by_consistency, rank_by_consistency_weighted, select_best_variant, token_entropy,
+};
