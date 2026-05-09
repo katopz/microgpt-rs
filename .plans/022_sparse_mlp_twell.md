@@ -8,7 +8,9 @@
 
 ## Overview
 
-Add a CPU sparse matmul path for the MLP's second weight matrix (`w2 @ hidden`), exploiting the natural sparsity of ReLU activations. When `hidden` is 95%+ zeros, this skips the dead neurons and dramatically reduces FLOPs. Feature-gated behind `sparse_mlp` with runtime auto-detection for safe fallback.
+Add a CPU sparse matmul path for the MLP's second weight matrix (`w2 @ hidden`), exploiting the natural sparsity of ReLU activations. ReLU zeros out ~50% of neurons by definition; with L1 regularization during training, sparsity can reach 90-99%. This skips dead neurons to reduce FLOPs. Feature-gated behind `sparse_mlp` with runtime auto-detection for safe fallback.
+
+**Caveat**: This is CPU index-packing sparse matmul, not the paper's TwELL (Tile-wise ELLPACK) which is a GPU-specific tiled format. Our current models use random weights, so actual speedup is unproven. Targets real LLMs with `mlp_hidden >= 1024`; small configs (micro: 64, bpe: 128) likely won't benefit due to packing overhead exceeding savings.
 
 ---
 
