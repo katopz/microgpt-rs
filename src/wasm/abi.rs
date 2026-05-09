@@ -55,6 +55,11 @@ pub const INVALID: u32 = 0;
 /// Required export: `is_valid(depth, token_idx, parent_ptr, parent_len) -> i32`.
 pub const EXPORT_IS_VALID: &str = "is_valid";
 
+/// Optional export: `relevance(depth, token_idx, parent_ptr, parent_len) -> u32`.
+/// Returns Q16.16 fixed-point relevance score (0x00000000=0.0, 0x00010000=1.0).
+/// If missing, host falls back to `is_valid` with binary 0/1 → 0.0/1.0.
+pub const EXPORT_RELEVANCE: &str = "relevance";
+
 /// Optional export: `validate_string(ptr, len) -> i32`.
 pub const EXPORT_VALIDATE_STRING: &str = "validate_string";
 

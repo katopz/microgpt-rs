@@ -34,6 +34,57 @@ impl ConstraintPruner for NoPruner {
     }
 }
 
+// ── Screening Pruner: Absolute Relevance (Plan 021) ─────────────
+
+/// Graded relevance pruner replacing binary valid/invalid with continuous score.
+///
+/// Distilled from "Screening Is Enough" (arXiv:2604.01178).
+/// Returns `R ∈ [0.0, 1.0]` which is blended into log-prob space:
+/// - `1.0` = perfect match, no penalty (`ln(1.0) = 0.0`)
+/// - `0.5` = mediocre match, soft penalty (`ln(0.5) ≈ -0.69`)
+/// - `0.0` = hard rejection / trim (`ln(0.0) = -∞`)
+///
+/// This subsumes [`ConstraintPruner`] as the special case `R ∈ {0.0, 1.0}`.
+/// A blanket impl provides automatic upgrade from any `ConstraintPruner`.
+pub trait ScreeningPruner: Send + Sync {
+    /// Returns the absolute relevance of taking this token given the path.
+    ///
+    /// `parent_tokens[i]` = token placed at depth `i` in the current path.
+    /// At depth 0, `parent_tokens` is empty.
+    fn relevance(&self, depth: usize, token_idx: usize, parent_tokens: &[usize]) -> f32;
+}
+
+/// Adapter: wraps any [`ConstraintPruner`] as a [`ScreeningPruner`] with binary relevance.
+/// - `is_valid() == true` → relevance 1.0 (no penalty)
+/// - `is_valid() == false` → relevance 0.0 (hard trim)
+///
+/// Use this to pass a `ConstraintPruner` where a `ScreeningPruner` is expected.
+/// We use an explicit adapter instead of a blanket impl to avoid conflicts
+/// with types that implement `ConstraintPruner` but need a custom `ScreeningPruner`
+/// (e.g., `WasmPruner` which uses the WASM `relevance` export when available).
+pub struct BinaryScreeningPruner<P>(pub P);
+
+impl<P: ConstraintPruner + Send + Sync> ScreeningPruner for BinaryScreeningPruner<P> {
+    #[inline]
+    fn relevance(&self, depth: usize, token_idx: usize, parent_tokens: &[usize]) -> f32 {
+        if self.0.is_valid(depth, token_idx, parent_tokens) {
+            1.0
+        } else {
+            0.0
+        }
+    }
+}
+
+/// No-op screener: returns 1.0 for everything (no penalty, no trimming).
+pub struct NoScreeningPruner;
+
+impl ScreeningPruner for NoScreeningPruner {
+    #[inline]
+    fn relevance(&self, _depth: usize, _token_idx: usize, _parent_tokens: &[usize]) -> f32 {
+        1.0
+    }
+}
+
 // ── DDTree Node ────────────────────────────────────────────────
 
 /// DDTree node for Best-First Search.

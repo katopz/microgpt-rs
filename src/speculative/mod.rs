@@ -8,8 +8,8 @@ pub mod verifier;
 
 // Re-exports — preserves existing import paths like `speculative::build_dd_tree`
 pub use dd_tree::{
-    TreeBuilder, build_dd_tree, build_dd_tree_pruned, extract_best_path, extract_best_path_into,
-    extract_parent_tokens, merge_retrieved_branches,
+    TreeBuilder, build_dd_tree, build_dd_tree_pruned, build_dd_tree_screened, extract_best_path,
+    extract_best_path_into, extract_parent_tokens, merge_retrieved_branches,
 };
 pub use dflash::{
     dflash_predict, dflash_predict_ar, dflash_predict_ar_with, dflash_predict_conditioned,
@@ -24,7 +24,8 @@ pub use sampling::{
 };
 pub use step::{speculative_step, speculative_step_verifier};
 pub use types::{
-    ConstraintPruner, DDTreeBranchCache, DraftResult, NoPruner, SpeculativeContext, TreeNode,
+    BinaryScreeningPruner, ConstraintPruner, DDTreeBranchCache, DraftResult, NoPruner,
+    NoScreeningPruner, ScreeningPruner, SpeculativeContext, TreeNode,
 };
 pub use verifier::{SimulatedVerifier, SpeculativeVerifier};
 

@@ -20,6 +20,8 @@ pub struct Config {
     pub lora_alpha: f32,
     pub lora_dropout: f32,
     pub lora_targets: Vec<String>,
+    // Screening Pruner (Plan 021)
+    pub screening_threshold: f32,
 }
 
 impl Config {
@@ -45,6 +47,7 @@ impl Config {
             lora_alpha: 8.0,
             lora_dropout: 0.0,
             lora_targets: Vec::new(),
+            screening_threshold: 0.0,
         }
     }
 
@@ -86,6 +89,7 @@ impl Config {
             lora_alpha: 8.0,
             lora_dropout: 0.0,
             lora_targets: Vec::new(),
+            screening_threshold: 0.0,
         }
     }
 
@@ -111,6 +115,7 @@ impl Config {
             lora_alpha: 8.0,
             lora_dropout: 0.0,
             lora_targets: Vec::new(),
+            screening_threshold: 0.0,
         }
     }
 
@@ -134,6 +139,7 @@ impl Config {
             lora_alpha: 8.0,
             lora_dropout: 0.0,
             lora_targets: Vec::new(),
+            screening_threshold: 0.0,
         }
     }
 
@@ -159,6 +165,7 @@ impl Config {
             lora_alpha: 8.0,
             lora_dropout: 0.0,
             lora_targets: Vec::new(),
+            screening_threshold: 0.0,
         }
     }
 
@@ -183,6 +190,7 @@ impl Config {
             lora_alpha: 8.0,
             lora_dropout: 0.0,
             lora_targets: Vec::new(),
+            screening_threshold: 0.0,
         }
     }
 

@@ -1,6 +1,10 @@
 use std::collections::BinaryHeap;
 
-use super::types::{ConstraintPruner, NoPruner, TreeNode};
+#[cfg(test)]
+use super::types::BinaryScreeningPruner;
+#[cfg(test)]
+use super::types::NoScreeningPruner;
+use super::types::{ConstraintPruner, NoPruner, ScreeningPruner, TreeNode};
 use rayon::prelude::*;
 
 /// Extract tokens from `parent_path` bitfield for path-aware pruning.
@@ -69,6 +73,30 @@ pub fn build_dd_tree_pruned(
 ) -> Vec<TreeNode> {
     let mut builder = TreeBuilder::new(config);
     builder.build(marginals, config, pruner, chain_seed);
+    std::mem::take(&mut builder.tree)
+}
+
+/// DDTree with Screening Pruner: Build verification tree from marginals,
+/// blending LLM log-probabilities with absolute relevance scores.
+///
+/// This is the upgraded version of [`build_dd_tree_pruned`]. Instead of
+/// binary valid/invalid, the [`ScreeningPruner`] returns `R ∈ [0.0, 1.0]`:
+/// - `R = 1.0` → no penalty (`ln(1.0) = 0.0`)
+/// - `0.0 < R < 1.0` → soft penalty (`ln(R)` added to score)
+/// - `R ≤ threshold` → hard trim (branch killed, never added to heap)
+///
+/// Score formula: `blended = parent_score + ln(P_llm) + ln(R)`
+///
+/// The `screening_threshold` is read from `config.screening_threshold`.
+/// When threshold is `0.0`, only `R == 0.0` triggers hard trim (pure softmask).
+pub fn build_dd_tree_screened(
+    marginals: &[&[f32]],
+    config: &crate::types::Config,
+    screener: &dyn ScreeningPruner,
+    chain_seed: bool,
+) -> Vec<TreeNode> {
+    let mut builder = TreeBuilder::new(config);
+    builder.build_screened(marginals, config, screener, chain_seed);
     std::mem::take(&mut builder.tree)
 }
 
@@ -465,6 +493,290 @@ impl TreeBuilder {
     /// Consume the builder and return the tree as an owned `Vec`.
     pub fn into_tree(self) -> Vec<TreeNode> {
         self.tree
+    }
+
+    /// Build DDTree with graded relevance screening (Plan 021).
+    ///
+    /// Like [`build()`] but uses [`ScreeningPruner`] for continuous relevance
+    /// instead of binary [`ConstraintPruner`]. The relevance score `R ∈ [0.0, 1.0]`
+    /// is blended into log-prob space: `score += ln(P_llm) + ln(R)`.
+    ///
+    /// Branches with `relevance <= config.screening_threshold` are hard-trimmed.
+    pub fn build_screened(
+        &mut self,
+        marginals: &[&[f32]],
+        config: &crate::types::Config,
+        screener: &dyn ScreeningPruner,
+        chain_seed: bool,
+    ) -> &[TreeNode] {
+        let threshold = config.screening_threshold;
+        self.heap.clear();
+        self.tree.clear();
+        self.chain_nodes.clear();
+        self.chain_parent_tokens.clear();
+
+        if marginals.is_empty() {
+            return &self.tree;
+        }
+
+        if chain_seed {
+            // ── Phase A: Build greedy chain backbone with screening ──
+            let mut cumulative_score: f32 = 0.0;
+            let mut parent_path: u128 = 0;
+
+            for (depth, marginal) in marginals.iter().enumerate() {
+                if self.tree.len() >= config.tree_budget {
+                    break;
+                }
+
+                let best_token = marginal
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, _)| i);
+
+                let Some(token_idx) = best_token else {
+                    break;
+                };
+                let prob = marginal[token_idx];
+
+                if prob <= 0.0 {
+                    break;
+                }
+
+                let relevance = screener.relevance(depth, token_idx, &self.chain_parent_tokens);
+                if relevance <= threshold {
+                    break;
+                }
+
+                // Blended score: ln(P_llm) + ln(R)
+                cumulative_score += prob.ln() + relevance.ln();
+                let node_path = if depth == 0 {
+                    token_idx as u128
+                } else {
+                    (parent_path << 16) | (token_idx as u128)
+                };
+
+                let node = TreeNode {
+                    score: cumulative_score,
+                    depth,
+                    token_idx,
+                    parent_path: node_path,
+                };
+
+                self.tree.push(node);
+                self.chain_nodes.push(node);
+                parent_path = node_path;
+                self.chain_parent_tokens.push(token_idx);
+            }
+
+            // ── Phase B: Seed heap with siblings + last chain children ──
+            if self.chain_nodes.is_empty() {
+                if config.vocab_size > 256 {
+                    let nodes: Vec<TreeNode> = marginals[0]
+                        .par_iter()
+                        .enumerate()
+                        .filter_map(|(i, &prob)| {
+                            if prob <= 0.0 {
+                                return None;
+                            }
+                            let relevance = screener.relevance(0, i, &[]);
+                            if relevance <= threshold {
+                                return None;
+                            }
+                            Some(TreeNode {
+                                score: prob.ln() + relevance.ln(),
+                                depth: 0,
+                                token_idx: i,
+                                parent_path: i as u128,
+                            })
+                        })
+                        .collect();
+                    self.heap.extend(nodes);
+                } else {
+                    for (i, &prob) in marginals[0].iter().enumerate() {
+                        if prob <= 0.0 {
+                            continue;
+                        }
+                        let relevance = screener.relevance(0, i, &[]);
+                        if relevance <= threshold {
+                            continue;
+                        }
+                        self.heap.push(TreeNode {
+                            score: prob.ln() + relevance.ln(),
+                            depth: 0,
+                            token_idx: i,
+                            parent_path: i as u128,
+                        });
+                    }
+                }
+            } else {
+                for chain_node in &self.chain_nodes {
+                    let depth = chain_node.depth;
+                    let parent_chain_score = if depth == 0 {
+                        0.0f32
+                    } else {
+                        self.chain_nodes[depth - 1].score
+                    };
+
+                    let sibling_parent_tokens = extract_parent_tokens_into(
+                        chain_node.parent_path >> 16,
+                        depth,
+                        &mut self.parent_tokens_buf,
+                    );
+
+                    for (i, &prob) in marginals[depth].iter().enumerate() {
+                        if i == chain_node.token_idx {
+                            continue;
+                        }
+                        if prob <= 0.0 {
+                            continue;
+                        }
+                        let relevance = screener.relevance(depth, i, sibling_parent_tokens);
+                        if relevance <= threshold {
+                            continue;
+                        }
+                        let sibling_path = if depth == 0 {
+                            i as u128
+                        } else {
+                            let ancestor_path = chain_node.parent_path >> 16;
+                            (ancestor_path << 16) | (i as u128)
+                        };
+
+                        self.heap.push(TreeNode {
+                            score: parent_chain_score + prob.ln() + relevance.ln(),
+                            depth,
+                            token_idx: i,
+                            parent_path: sibling_path,
+                        });
+                    }
+                }
+
+                let last = self.chain_nodes.last().unwrap();
+                if last.depth + 1 < marginals.len() {
+                    let next_depth = last.depth + 1;
+                    let parent_tokens = extract_parent_tokens_into(
+                        last.parent_path,
+                        last.depth + 1,
+                        &mut self.parent_tokens_buf,
+                    );
+                    for (i, &prob) in marginals[next_depth].iter().enumerate() {
+                        if prob <= 0.0 {
+                            continue;
+                        }
+                        let relevance = screener.relevance(next_depth, i, parent_tokens);
+                        if relevance <= threshold {
+                            continue;
+                        }
+                        self.heap.push(TreeNode {
+                            score: last.score + prob.ln() + relevance.ln(),
+                            depth: next_depth,
+                            token_idx: i,
+                            parent_path: (last.parent_path << 16) | (i as u128),
+                        });
+                    }
+                }
+            }
+        } else {
+            // Original seeding with screening
+            if config.vocab_size > 256 {
+                let nodes: Vec<TreeNode> = marginals[0]
+                    .par_iter()
+                    .enumerate()
+                    .filter_map(|(i, &prob)| {
+                        if prob <= 0.0 {
+                            return None;
+                        }
+                        let relevance = screener.relevance(0, i, &[]);
+                        if relevance <= threshold {
+                            return None;
+                        }
+                        Some(TreeNode {
+                            score: prob.ln() + relevance.ln(),
+                            depth: 0,
+                            token_idx: i,
+                            parent_path: i as u128,
+                        })
+                    })
+                    .collect();
+                self.heap.extend(nodes);
+            } else {
+                for (i, &prob) in marginals[0].iter().enumerate() {
+                    if prob <= 0.0 {
+                        continue;
+                    }
+                    let relevance = screener.relevance(0, i, &[]);
+                    if relevance <= threshold {
+                        continue;
+                    }
+                    self.heap.push(TreeNode {
+                        score: prob.ln() + relevance.ln(),
+                        depth: 0,
+                        token_idx: i,
+                        parent_path: i as u128,
+                    });
+                }
+            }
+        }
+
+        // ── Phase C: Best-first expansion with screening ─────────
+        while self.tree.len() < config.tree_budget {
+            let Some(best) = self.heap.pop() else {
+                break;
+            };
+            self.tree.push(best);
+
+            if best.depth + 1 < marginals.len() {
+                let next_depth = best.depth + 1;
+                let parent_tokens = extract_parent_tokens_into(
+                    best.parent_path,
+                    best.depth + 1,
+                    &mut self.parent_tokens_buf,
+                );
+                for (i, &prob) in marginals[next_depth].iter().enumerate() {
+                    if prob <= 0.0 {
+                        continue;
+                    }
+                    let relevance = screener.relevance(next_depth, i, parent_tokens);
+                    if relevance <= threshold {
+                        continue;
+                    }
+                    // SCREENING: ln(P_llm) + ln(R) blended score
+                    self.heap.push(TreeNode {
+                        score: best.score + prob.ln() + relevance.ln(),
+                        depth: next_depth,
+                        token_idx: i,
+                        parent_path: (best.parent_path << 16) | (i as u128),
+                    });
+                }
+            }
+        }
+
+        &self.tree
+    }
+
+    /// Build tree with screening and merge retrieved branches in one call.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_and_merge_screened(
+        &mut self,
+        marginals: &[&[f32]],
+        config: &crate::types::Config,
+        screener: &dyn ScreeningPruner,
+        chain_seed: bool,
+        token_sequences: &[Vec<usize>],
+        scores: &[f32],
+        rest_weight: f32,
+    ) -> &[TreeNode] {
+        self.build_screened(marginals, config, screener, chain_seed);
+        merge_retrieved_branches(
+            &mut self.tree,
+            marginals,
+            config,
+            token_sequences,
+            scores,
+            rest_weight,
+        );
+        &self.tree
     }
 }
 
@@ -872,6 +1184,242 @@ mod tests {
         assert!(
             tree.is_empty(),
             "empty marginals should produce empty tree with chain_seed=true"
+        );
+    }
+
+    // ── ScreeningPruner Tests (Plan 021) ──────────────────────
+
+    /// Screener that returns fixed relevance per token index.
+    struct FixedRelevanceScreener {
+        relevances: Vec<f32>,
+    }
+
+    impl ScreeningPruner for FixedRelevanceScreener {
+        fn relevance(&self, _depth: usize, token_idx: usize, _parent_tokens: &[usize]) -> f32 {
+            self.relevances.get(token_idx).copied().unwrap_or(0.1)
+        }
+    }
+
+    #[test]
+    fn test_screened_no_screener_matches_unpruned() {
+        // NoScreeningPruner returns 1.0 everywhere → ln(1.0)=0.0 → same as unpruned
+        let (weights, config) = make_draft();
+        let marginals = dflash_predict(&weights, &config, 0, 0);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+
+        let tree_unpruned = build_dd_tree(&mv, &config);
+        let tree_screened = build_dd_tree_screened(&mv, &config, &NoScreeningPruner, false);
+
+        assert_eq!(
+            tree_unpruned.len(),
+            tree_screened.len(),
+            "NoScreeningPruner should produce identical tree size"
+        );
+        for (a, b) in tree_unpruned.iter().zip(tree_screened.iter()) {
+            assert!(
+                (a.score - b.score).abs() < 1e-5,
+                "scores should match: {} vs {}",
+                a.score,
+                b.score
+            );
+            assert_eq!(a.token_idx, b.token_idx, "tokens should match");
+        }
+    }
+
+    #[test]
+    fn test_screened_binary_compat_via_adapter() {
+        // BinaryScreeningPruner adapter: ConstraintPruner → ScreeningPruner with R∈{0.0,1.0}
+        let (weights, config) = make_draft();
+        let marginals = dflash_predict(&weights, &config, 0, 0);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+
+        let tree_pruned = build_dd_tree_pruned(&mv, &config, &NoPruner, false);
+        // NoPruner wrapped in adapter: is_valid=true → relevance=1.0 → ln(1.0)=0.0
+        let tree_screened =
+            build_dd_tree_screened(&mv, &config, &BinaryScreeningPruner(NoPruner), false);
+
+        assert_eq!(
+            tree_pruned.len(),
+            tree_screened.len(),
+            "binary compat: same tree size via adapter"
+        );
+        for (a, b) in tree_pruned.iter().zip(tree_screened.iter()) {
+            assert!(
+                (a.score - b.score).abs() < 1e-5,
+                "binary compat: scores should match"
+            );
+        }
+    }
+
+    #[test]
+    fn test_screened_relevance_zero_hard_trims() {
+        let mut config = Config::draft();
+        config.tree_budget = 64;
+
+        // 3 tokens: index 0 has high prob but R=0.0, index 1 has lower prob but R=1.0
+        let mut m0 = vec![0.01; config.vocab_size];
+        m0[0] = 0.9; // high LLM prob
+        m0[1] = 0.05; // lower LLM prob
+        let marginals = [m0];
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+
+        let screener = FixedRelevanceScreener {
+            relevances: vec![0.0, 1.0], // token 0 trimmed, token 1 passes
+        };
+
+        let tree = build_dd_tree_screened(&mv, &config, &screener, false);
+
+        // Token 0 should be completely absent (hard trim)
+        for node in &tree {
+            assert_ne!(
+                node.token_idx, 0,
+                "token 0 with relevance 0.0 should be hard-trimmed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_screened_relevance_half_applies_penalty() {
+        let mut config = Config::draft();
+        config.tree_budget = 64;
+
+        // Two tokens with same LLM prob but different relevance
+        let mut m0 = vec![0.01; config.vocab_size];
+        m0[0] = 0.5;
+        m0[1] = 0.5;
+        let marginals = [m0];
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+
+        let screener = FixedRelevanceScreener {
+            relevances: vec![1.0, 0.5], // token 1 gets -0.69 penalty
+        };
+
+        let tree = build_dd_tree_screened(&mv, &config, &screener, false);
+
+        let node_0 = tree.iter().find(|n| n.token_idx == 0);
+        let node_1 = tree.iter().find(|n| n.token_idx == 1);
+
+        assert!(node_0.is_some(), "token 0 should be in tree");
+        assert!(node_1.is_some(), "token 1 should be in tree");
+
+        let score_0 = node_0.unwrap().score;
+        let score_1 = node_1.unwrap().score;
+
+        // Token 0: ln(0.5) + ln(1.0) = ln(0.5) + 0
+        // Token 1: ln(0.5) + ln(0.5) = ln(0.5) - 0.693...
+        let expected_diff = 0.5f32.ln().abs(); // ≈ 0.693
+        let actual_diff = score_0 - score_1;
+
+        assert!(
+            (actual_diff - expected_diff).abs() < 1e-4,
+            "penalty should be ln(0.5) ≈ -0.693, got diff={actual_diff:.4}, expected={expected_diff:.4}"
+        );
+    }
+
+    #[test]
+    fn test_screened_relevance_one_no_penalty() {
+        let mut config = Config::draft();
+        config.tree_budget = 64;
+
+        let mut m0 = vec![0.01; config.vocab_size];
+        m0[0] = 0.8;
+        let marginals = [m0];
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+
+        let screener = FixedRelevanceScreener {
+            relevances: vec![1.0],
+        };
+
+        let tree = build_dd_tree_screened(&mv, &config, &screener, false);
+
+        let node = tree.iter().find(|n| n.token_idx == 0);
+        assert!(node.is_some(), "token 0 should be in tree");
+
+        let expected_score = 0.8f32.ln(); // ln(P) + ln(1.0) = ln(P) + 0
+        assert!(
+            (node.unwrap().score - expected_score).abs() < 1e-5,
+            "relevance 1.0 should not modify score"
+        );
+    }
+
+    #[test]
+    fn test_screened_threshold_trims_mediocre() {
+        let mut config = Config::draft();
+        config.tree_budget = 64;
+        config.screening_threshold = 0.4; // trim anything ≤ 0.4
+
+        let mut m0 = vec![0.01; config.vocab_size];
+        m0[0] = 0.5;
+        m0[1] = 0.5;
+        m0[2] = 0.5;
+        let marginals = [m0];
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+
+        let screener = FixedRelevanceScreener {
+            relevances: vec![0.3, 0.5, 0.8], // token 0 trimmed (≤0.4), 1 and 2 pass
+        };
+
+        let tree = build_dd_tree_screened(&mv, &config, &screener, false);
+
+        // Token 0 (R=0.3 ≤ threshold 0.4) should be absent
+        for node in &tree {
+            assert_ne!(
+                node.token_idx, 0,
+                "token 0 with R=0.3 should be trimmed by threshold 0.4"
+            );
+        }
+        // Token 1 (R=0.5 > threshold) and token 2 (R=0.8 > threshold) should be present
+        assert!(
+            tree.iter().any(|n| n.token_idx == 1),
+            "token 1 with R=0.5 should survive threshold 0.4"
+        );
+        assert!(
+            tree.iter().any(|n| n.token_idx == 2),
+            "token 2 with R=0.8 should survive threshold 0.4"
+        );
+    }
+
+    #[test]
+    fn test_screened_empty_marginals() {
+        let config = Config::draft();
+        let tree = build_dd_tree_screened(&[], &config, &NoScreeningPruner, false);
+        assert!(tree.is_empty(), "empty marginals should produce empty tree");
+    }
+
+    #[test]
+    fn test_screened_chain_seed_with_relevance() {
+        let mut config = Config::draft();
+        config.tree_budget = 64;
+
+        let mut m0 = vec![0.01; config.vocab_size];
+        m0[5] = 0.9;
+        let mut m1 = vec![0.01; config.vocab_size];
+        m1[10] = 0.85;
+        let marginals = [m0, m1];
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+
+        // Give token 5 at depth 0 a relevance of 0.6
+        let mut relevances = vec![0.1; config.vocab_size];
+        relevances[5] = 0.6;
+        relevances[10] = 1.0;
+        let screener = FixedRelevanceScreener { relevances };
+
+        let tree = build_dd_tree_screened(&mv, &config, &screener, true);
+
+        // Chain should build: token 5 (R=0.6), token 10 (R=1.0)
+        assert!(
+            tree.len() >= 2,
+            "chain should have at least 2 nodes, got {}",
+            tree.len()
+        );
+
+        // Score for token 5 should include ln(0.6) penalty
+        let chain_d0 = tree.iter().find(|n| n.depth == 0 && n.token_idx == 5);
+        assert!(chain_d0.is_some(), "chain node at depth 0 should exist");
+        let expected_d0 = 0.9f32.ln() + 0.6f32.ln();
+        assert!(
+            (chain_d0.unwrap().score - expected_d0).abs() < 1e-4,
+            "chain d0 score should include ln(0.6) penalty"
         );
     }
 }

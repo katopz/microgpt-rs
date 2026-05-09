@@ -28,7 +28,7 @@ use std::sync::Mutex;
 
 use wasmtime::{Config, Engine, Linker, Memory, Module, Store, TypedFunc};
 
-use crate::speculative::types::ConstraintPruner;
+use crate::speculative::types::{ConstraintPruner, ScreeningPruner};
 
 use super::abi;
 use super::state::ValidatorState;
@@ -44,6 +44,7 @@ struct WasmInner {
     store: Store<ValidatorState>,
     is_valid_fn: TypedFunc<(u32, u32, u32, u32), u32>,
     validate_string_fn: Option<TypedFunc<(u32, u32), u32>>,
+    relevance_fn: Option<TypedFunc<(u32, u32, u32, u32), u32>>,
     memory: Memory,
 }
 
@@ -69,6 +70,39 @@ impl WasmInner {
         {
             Ok(result) => result == abi::VALID,
             Err(_) => false,
+        }
+    }
+
+    /// Call `relevance` in the WASM module. Returns Q16.16 fixed-point decoded to f32.
+    /// Falls back to binary `is_valid` (0.0/1.0) if relevance export is missing.
+    fn call_relevance(&mut self, depth: usize, token_idx: usize, parent_tokens: &[usize]) -> f32 {
+        // If relevance export exists, use it
+        if let Some(relevance_fn) = self.relevance_fn.as_ref() {
+            if self.store.set_fuel(abi::FUEL_PER_CALL).is_err() {
+                return 0.0;
+            }
+
+            let (ptr, len) =
+                match abi::write_parent_tokens(&self.memory, &mut self.store, parent_tokens) {
+                    Ok(result) => result,
+                    Err(_) => return 0.0,
+                };
+
+            match relevance_fn.call(&mut self.store, (depth as u32, token_idx as u32, ptr, len)) {
+                Ok(raw) => {
+                    // Decode Q16.16 fixed-point: f32 = raw_u32 / 65536.0
+                    let relevance = raw as f32 / 65536.0;
+                    relevance.clamp(0.0, 1.0)
+                }
+                Err(_) => 0.0,
+            }
+        } else {
+            // Fallback: binary is_valid → 0.0 or 1.0
+            if self.call_is_valid(depth, token_idx, parent_tokens) {
+                1.0
+            } else {
+                0.0
+            }
         }
     }
 
@@ -171,6 +205,11 @@ impl WasmPruner {
             .get_typed_func::<(u32, u32), u32>(&mut store, abi::EXPORT_VALIDATE_STRING)
             .ok();
 
+        // 8b. Extract relevance export (optional, Plan 021)
+        let relevance_fn = instance
+            .get_typed_func::<(u32, u32, u32, u32), u32>(&mut store, abi::EXPORT_RELEVANCE)
+            .ok();
+
         // 9. Extract name and version function exports
         let name_fn: TypedFunc<(), u32> = instance
             .get_typed_func(&mut store, abi::EXPORT_NAME)
@@ -211,6 +250,7 @@ impl WasmPruner {
                 store,
                 is_valid_fn,
                 validate_string_fn,
+                relevance_fn,
                 memory,
             }),
         })
@@ -260,6 +300,18 @@ impl ConstraintPruner for WasmPruner {
             Err(_) => return false,
         };
         inner.call_is_valid(depth, token_idx, parent_tokens)
+    }
+}
+
+// ── ScreeningPruner Implementation (Plan 021) ───────────────────
+
+impl ScreeningPruner for WasmPruner {
+    fn relevance(&self, depth: usize, token_idx: usize, parent_tokens: &[usize]) -> f32 {
+        let mut inner = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(_) => return 0.0,
+        };
+        inner.call_relevance(depth, token_idx, parent_tokens)
     }
 }
 

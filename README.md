@@ -105,6 +105,28 @@ Static-Only: 100 nodes,  84 accumulated-valid (84.0%)   ← misses cross-depth c
 Path-Aware:  100 nodes, 100 accumulated-valid (100.0%)   ← catches everything
 ```
 
+### ScreeningPruner: Absolute Relevance (Plan 021)
+
+Distilled from ["Screening Is Enough"](https://arxiv.org/abs/2604.01178) — upgrades binary pruning to **graded relevance**:
+
+```rust
+pub trait ScreeningPruner: Send + Sync {
+    fn relevance(&self, depth: usize, token_idx: usize, parent_tokens: &[usize]) -> f32;
+}
+```
+
+Score formula: `blended = parent_score + ln(P_llm) + ln(R)`
+
+| Relevance R | ln(R) | Effect |
+|---|---|---|
+| 1.0 | 0.0 | No penalty — perfect match |
+| 0.5 | -0.69 | Soft penalty — mediocre match |
+| 0.0 | -∞ | **Hard trim** — branch killed |
+
+`ConstraintPruner` adapts via `BinaryScreeningPruner(pruner)` (R ∈ {0.0, 1.0}). `WasmPruner` implements `ScreeningPruner` natively — loads optional WASM `relevance` export (Q16.16 fixed-point), falls back to binary `is_valid` if missing.
+
+`config.screening_threshold` (default `0.0`) controls hard-trim cutoff. Set `> 0.0` to aggressively trim low-relevance branches.
+
 ### SpeculativeVerifier (Strategy Pattern)
 
 Based on [Algorithm 1 from Leviathan et al. 2022](https://arxiv.org/pdf/2211.17192) — the verification strategy is swappable via trait:
@@ -178,32 +200,48 @@ pub enum SolveEvent {
 
 Run on Apple Silicon (single-threaded, `--release` profile, 50k iterations, **zero-alloc hot paths**):
 
-**Models:** Target (embd=16, heads=4, mlp=64) · Draft (embd=4, heads=2, mlp=16) · Benchmark run `044` (commit `0d52e11`)
+**Models:** Target (embd=16, heads=4, mlp=64) · Draft (embd=4, heads=2, mlp=16) · Benchmark run `047` (commit `4a6b592`)
 
 ```
 Method                         Throughput         μs/step  Avg Accept Len
 ───────────────────────────────────────────────────────────────────────────────
-Transformer AR                  1,153,065 tok/s       0.87            1.00
-DFlash                         3,854,077 tok/s       2.08            8.00
-DDTree Build                     361,662 trees/s      2.77            —
-Speculative (Simulated)        1,008,030 tok/s       4.96            5.00
-Speculative (AR Draft)         1,458,004 tok/s       4.80            7.00
-Leviathan (Algorithm 1)         110,259 tok/s      10.69            1.18
-Leviathan (no rollback)         109,930 tok/s      10.72            1.18
-Leviathan (w/ rollback)         185,353 tok/s       6.34            1.18
-Spec (unconditioned)           1,012,393 tok/s       4.94            5.00
-Spec (conditioned)              1,099,772 tok/s       6.13            6.74
-Prefill (no compress)         19,190,151 tok/s       3.34           64.00
-Prefill (compressed)           1,921,788 tok/s       3.64            7.00
-DDTree (no chain)                364,027 trees/s      2.75           16.00
-DDTree (chain-seed)              377,198 trees/s      2.65           16.00
-forward (flat)                 1,122,676 trees/s      0.89            —
-forward_paged                    942,262 trees/s      1.06            —
+Transformer AR                    900,464 tok/s       1.11            1.00
+DFlash                           4,231,267 tok/s       1.89            8.00
+DDTree Build                      430,911 trees/s      2.32            —
+Speculative (Simulated)          1,143,669 tok/s       4.37            5.00
+Speculative (AR Draft)           1,643,545 tok/s       4.26            7.00
+Leviathan (Algorithm 1)           114,387 tok/s      10.31            1.18
+Leviathan (no rollback)           114,085 tok/s      10.33            1.18
+Leviathan (w/ rollback)           206,605 tok/s       5.69            1.18
+Spec (unconditioned)             1,145,669 tok/s       4.36            5.00
+Spec (conditioned)               1,157,438 tok/s       5.83            6.74
+Prefill (no compress)           19,425,142 tok/s       3.29           64.00
+Prefill (compressed)             1,962,114 tok/s       3.57            7.00
+DDTree (no chain)                  433,000 trees/s      2.31           16.00
+DDTree (chain-seed)                447,251 trees/s      2.24           16.00
+DDTree (screened R=1.0)            338,390 trees/s      2.96           16.00
+DDTree (screened adapter)          340,539 trees/s      2.94           16.00
+forward (flat)                   1,200,263 trees/s      0.83            —
+forward_paged                    1,008,350 trees/s      0.99            —
+forward_raven (16 slots)         1,617,183 trees/s      0.62            —
+raven_recall (1000 noise)        9,252,063 tok/s       0.11           63.21
 ───────────────────────────────────────────────────────────────────────────────
-📈 Best speedup: 1.26x (Speculative AR Draft vs AR)
+📈 Best speedup: 1.27x (Speculative AR Draft vs AR)
 ```
 
-![Benchmark Chart](bench/044_bench_result.png)
+![Benchmark Chart](bench/047_bench_result.png)
+
+### ScreeningPruner Overhead (Plan 021)
+
+The `build_screened()` path adds ~28% overhead vs `build()` due to `relevance()` trait call + `ln(R)` per candidate:
+
+| Method | μs/step | Notes |
+|--------|---------|-------|
+| DDTree (no chain) | 2.31 | Original `ConstraintPruner` path — zero regression |
+| DDTree (screened R=1.0) | 2.96 | `NoScreeningPruner` — `ln(1.0)=0.0` no-op penalty |
+| DDTree (screened adapter) | 2.94 | `BinaryScreeningPruner(NoPruner)` — adapter overhead |
+
+Overhead is expected: screening calls `relevance()` + computes `ln(R)` for every candidate token. This is **opt-in** — existing `build()` path is untouched. When screening actually eliminates garbage branches, fewer nodes are explored → effective throughput improves.
 
 ### What each benchmark measures
 
@@ -245,8 +283,10 @@ The benchmarks progress from individual components to full pipelines:
 
 | Benchmark | What differs | Why it matters |
 |-----------|-------------|----------------|
-| **DDTree (no chain)** | Standard best-first: seeds heap with all root marginals, expands greedily by score. | Baseline tree construction. |
-| **DDTree (chain-seed)** | **Chain-seed optimization**: first builds a greedy backbone (argmax at each depth with cumulative log-prob), then seeds the heap with siblings at each chain depth + children of the last chain node. Inspired by [DFlash](https://arxiv.org/abs/2602.06036). | The chain provides a "highway" through the tree that pure best-first might miss. Slightly faster (2.56 vs 2.66 μs) because the initial heap population is more focused. |
+| **DDTree (no chain)** | Standard best-first: seeds heap with all root marginals, expands greedily by score. | Baseline tree construction. 2.31 μs. |
+| **DDTree (chain-seed)** | **Chain-seed optimization**: first builds a greedy backbone (argmax at each depth with cumulative log-prob), then seeds the heap with siblings at each chain depth + children of the last chain node. Inspired by [DFlash](https://arxiv.org/abs/2602.06036). | The chain provides a "highway" that pure best-first might miss. 2.24 μs (3% faster than no-chain). |
+| **DDTree (screened R=1.0)** | `build_screened()` with `NoScreeningPruner` — calls `relevance()` (returns 1.0) + computes `ln(1.0)=0.0` for every candidate. Opt-in screening path. | Measures overhead of the screening trait call + log computation vs original `build()`. 2.96 μs (+28% vs no-chain baseline). Expected: screening trades per-candidate cost for better tree quality when R < 1.0. |
+| **DDTree (screened adapter)** | `build_screened()` with `BinaryScreeningPruner(NoPruner)` — wraps `ConstraintPruner` as `ScreeningPruner` (R ∈ {0.0, 1.0}). | Measures adapter overhead. 2.94 μs — nearly identical to direct screening, confirming the adapter adds negligible cost. |
 
 > These benchmarks require the target model for real verification or hidden state extraction.
 
@@ -256,13 +296,13 @@ Pre-allocated `SpeculativeContext` + `TreeBuilder` structs eliminate per-step he
 
 | Method | Before (μs) | After (μs) | Improvement |
 |--------|-------------|-------------|-------------|
-| DFlash | 2.60 | 1.95 | **33% faster** |
-| DDTree Build | 3.19 | 2.78 | **15% faster** |
-| Speculative (Simulated) | 5.92 | 4.82 | **23% faster** |
-| Speculative (AR Draft) | 5.70 | 4.73 | **21% faster** |
-| Prefill (no compress) | 23.78 | 3.32 | **616% faster** |
-| Prefill (compressed) | 23.99 | 3.61 | **565% faster** |
-| DDTree (chain-seed) | 3.16 | 2.54 | **24% faster** |
+| DFlash | 2.60 | 1.89 | **38% faster** |
+| DDTree Build | 3.19 | 2.32 | **27% faster** |
+| Speculative (Simulated) | 5.92 | 4.37 | **26% faster** |
+| Speculative (AR Draft) | 5.70 | 4.26 | **25% faster** |
+| Prefill (no compress) | 23.78 | 3.29 | **623% faster** |
+| Prefill (compressed) | 23.99 | 3.57 | **572% faster** |
+| DDTree (chain-seed) | 3.16 | 2.24 | **29% faster** |
 
 ### Speculative Decoding Pipeline
 
@@ -279,9 +319,9 @@ Result:  γ+1 tokens accepted at best, 1 at worst (guaranteed progress).
 
 | Verifier | How it verifies | Target model? | Perf |
 |----------|----------------|---------------|------|
-| `SimulatedVerifier` | Accepts ceil(γ × rate) tokens + bonus from last marginal | ❌ No | ~1.05M tok/s |
-| `SimulatedVerifier` (AR) | Same, but autoregressive drafting (conditional q(x\|x<t)) | ❌ No | ~1.44M tok/s |
-| `LeviathanVerifier` | Real p/q rejection + residual distribution + bonus from target p(x) | ✅ Yes | ~110K tok/s |
+| `SimulatedVerifier` | Accepts ceil(γ × rate) tokens + bonus from last marginal | ❌ No | ~1.14M tok/s |
+| `SimulatedVerifier` (AR) | Same, but autoregressive drafting (conditional q(x\|x<t)) | ❌ No | ~1.64M tok/s |
+| `LeviathanVerifier` | Real p/q rejection + residual distribution + bonus from target p(x) | ✅ Yes | ~114K tok/s |
 
 The `SpeculativeVerifier` trait makes them swappable — same `speculate()` interface, different verification strategy. When LoRA fine-tuning improves draft/target alignment, real verification becomes viable.
 
@@ -291,12 +331,12 @@ The `SpeculativeVerifier` trait makes them swappable — same `speculate()` inte
 
 ```
 Leviathan cost:  γ × draft_cost + (γ+1) × target_cost + overhead
-              =  8 × 0.25μs      + 9 × 0.84μs            + ~1.6μs
-              =  2.0μs            + 7.6μs                + 1.6μs  = 10.65μs / 1.18 accepted = 9.0μs/token
+              =  8 × 0.24μs      + 9 × 1.11μs            + ~1.6μs
+              =  1.9μs            + 10.0μs               + 1.6μs  = 10.31μs / 1.18 accepted = 8.7μs/token
 
 Simulated cost:  DFlash + DDTree + acceptance
-              =  1.98μs  + 2.66μs + ~0.12μs
-              =  4.76μs / 5 accepted = 0.95μs/token
+              =  1.89μs  + 2.32μs + ~0.16μs
+              =  4.37μs / 5 accepted = 0.87μs/token
 ```
 
 With random weights the draft and target distributions are poorly aligned → low acceptance rate (1.18/8 = 15%). After LoRA fine-tuning, acceptance should approach 80%+ and Leviathan becomes competitive at larger model sizes.
@@ -568,13 +608,13 @@ cargo run --features wasm
 src/
   lib.rs            Module index
   main.rs           Entry point (proof → bench → Percepta bench → plot)
-  types.rs          Config (micro + draft), Rng, softmax, rmsnorm, matmul, sample_token
+  types.rs          Config (micro + draft, screening_threshold), Rng, softmax, rmsnorm, matmul, sample_token
   transformer.rs    TransformerWeights, KVCache, PagedKVCache, RavenKVCache, ForwardContext, forward, forward_paged, forward_raven, generate, generate_into, generate_batch
   speculative/      SOLID decomposition (plan 005):
     mod.rs          Re-exports
-    types.rs        TreeNode, DraftResult, ConstraintPruner trait, NoPruner, SpeculativeContext (zero-alloc), DDTreeBranchCache (wraps PagedKVCache)
+    types.rs        TreeNode, DraftResult, ConstraintPruner trait, ScreeningPruner trait, NoPruner, NoScreeningPruner, BinaryScreeningPruner, SpeculativeContext (zero-alloc), DDTreeBranchCache (wraps PagedKVCache)
     sampling.rs     sample_from_distribution, sample_residual_distribution, sample_residual_distribution_into
-    dd_tree.rs      build_dd_tree, build_dd_tree_pruned, TreeBuilder (zero-alloc, parent_tokens_buf), extract_parent_tokens, extract_parent_tokens_into
+    dd_tree.rs      build_dd_tree, build_dd_tree_pruned, build_dd_tree_screened, TreeBuilder (zero-alloc, parent_tokens_buf), extract_parent_tokens, extract_parent_tokens_into
     dflash.rs       dflash_predict, dflash_predict_with, dflash_predict_ar, dflash_predict_ar_with, dflash_predict_parallel
     verifier.rs     SpeculativeVerifier trait, SimulatedVerifier, LeviathanVerifier (all zero-alloc internals)
     step.rs         speculative_step, speculative_step_verifier, speculative_step_rollback, speculative_step_conditioned
@@ -584,7 +624,7 @@ src/
   validator/        SynPruner + partial parser ‡
   gpu/              wgpu context & buffers §
   rest/             REST module ¶
-  wasm/             WasmPruner + WASM runtime (abi, state, wasmtime loader) †
+  wasm/             WasmPruner (ConstraintPruner + ScreeningPruner), WASM runtime (abi, state, wasmtime loader, EXPORT_RELEVANCE) †
   percepta.rs       Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
                     Sudoku9x9, SymbolicValidator, StreamingSolver, SolveEvent
   benchmark.rs      BenchResult, run_all, save_results_csv (AR / DFlash / DDTree / Speculative / AR Draft / Leviathan)

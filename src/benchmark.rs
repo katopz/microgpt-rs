@@ -1,7 +1,7 @@
 use crate::speculative::{
-    AttentionScorer, NoPruner, SimulatedVerifier, SpeculativeContext, TreeBuilder, compress_prompt,
-    dflash_predict_ar_with, dflash_predict_with, extract_best_path_into, sample_from_distribution,
-    speculative_step_verifier,
+    AttentionScorer, NoPruner, NoScreeningPruner, SimulatedVerifier, SpeculativeContext,
+    TreeBuilder, compress_prompt, dflash_predict_ar_with, dflash_predict_with,
+    extract_best_path_into, sample_from_distribution, speculative_step_verifier,
 };
 use crate::transformer::{
     ForwardContext, MultiLayerKVCache, PagedKVCache, RavenKVCache, TransformerWeights, forward,
@@ -144,6 +144,12 @@ pub fn run_all(config: &Config) -> Vec<BenchResult> {
     let (no_chain, chain) = bench_ddtree_chain_seed(&draft_weights, &draft_config, warmup, iters);
     results.push(no_chain);
     results.push(chain);
+
+    // Screening Pruner regression check (Plan 021)
+    let (screened_noop, screened_adapter) =
+        bench_ddtree_screened(&draft_weights, &draft_config, warmup, iters);
+    results.push(screened_noop);
+    results.push(screened_adapter);
 
     // Paged vs flat cache comparison
     let (flat_br, paged_br) = bench_paged_vs_flat_cache(config);
@@ -547,6 +553,77 @@ pub fn bench_ddtree_chain_seed(
 
 /// Benchmark: DDTree budget sweep across multiple budgets.
 /// Returns results for each budget with and without chain-seed.
+/// Benchmark: DDTree with ScreeningPruner vs original ConstraintPruner (Plan 021).
+///
+/// Returns two results:
+/// 1. `build_screened()` with `NoScreeningPruner` (R=1.0 everywhere) — should match original DDTree
+/// 2. `build_screened()` with `BinaryScreeningPruner(NoPruner)` — adapter path overhead check
+///
+/// Both should show zero regression vs the baseline `build()` with `NoPruner`.
+pub fn bench_ddtree_screened(
+    draft_weights: &TransformerWeights,
+    draft_config: &Config,
+    warmup: usize,
+    iters: usize,
+) -> (BenchResult, BenchResult) {
+    use crate::speculative::BinaryScreeningPruner;
+
+    let mut sctx = SpeculativeContext::new(draft_config);
+    sctx.reset();
+    dflash_predict_with(&mut sctx, draft_weights, draft_config, 0, 0);
+    let mv: Vec<&[f32]> = (0..sctx.steps_populated)
+        .map(|step| sctx.marginal_slice(step, draft_config.vocab_size))
+        .collect();
+
+    let mut tree_builder = TreeBuilder::new(draft_config);
+
+    // Warmup both paths
+    for _ in 0..warmup {
+        let _ = tree_builder.build_screened(&mv, draft_config, &NoScreeningPruner, false);
+        let _ =
+            tree_builder.build_screened(&mv, draft_config, &BinaryScreeningPruner(NoPruner), false);
+    }
+
+    // Benchmark: NoScreeningPruner (R=1.0, pure screening path, no penalty)
+    let start = Instant::now();
+    let mut total_nodes_noop = 0usize;
+    for _ in 0..iters {
+        let tree = tree_builder.build_screened(&mv, draft_config, &NoScreeningPruner, false);
+        total_nodes_noop += tree.len();
+    }
+    let elapsed_noop = start.elapsed();
+
+    // Benchmark: BinaryScreeningPruner adapter (ConstraintPruner → ScreeningPruner)
+    let start = Instant::now();
+    let mut total_nodes_adapter = 0usize;
+    for _ in 0..iters {
+        let tree =
+            tree_builder.build_screened(&mv, draft_config, &BinaryScreeningPruner(NoPruner), false);
+        total_nodes_adapter += tree.len();
+    }
+    let elapsed_adapter = start.elapsed();
+
+    let ops_noop = iters as f64 / elapsed_noop.as_secs_f64();
+    let ops_adapter = iters as f64 / elapsed_adapter.as_secs_f64();
+
+    (
+        BenchResult {
+            label: "DDTree (screened R=1.0)".into(),
+            throughput: ops_noop,
+            time_per_step_us: elapsed_noop.as_micros() as f64 / iters as f64,
+            avg_acceptance_len: total_nodes_noop as f64 / iters as f64,
+            color: (0, 191, 255),
+        },
+        BenchResult {
+            label: "DDTree (screened adapter)".into(),
+            throughput: ops_adapter,
+            time_per_step_us: elapsed_adapter.as_micros() as f64 / iters as f64,
+            avg_acceptance_len: total_nodes_adapter as f64 / iters as f64,
+            color: (30, 144, 255),
+        },
+    )
+}
+
 pub fn bench_ddtree_budget_sweep(
     draft_weights: &TransformerWeights,
     draft_config: &Config,
