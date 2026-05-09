@@ -178,9 +178,8 @@ impl GpuLoss {
 
         let mut total_loss = 0.0f32;
 
-        for i in 0..batch_seq {
+        for (i, &target) in targets.iter().enumerate() {
             let offset = i * vocab_size;
-            let target = targets[i];
 
             // Find max for numerical stability
             let mut max_logit = f32::NEG_INFINITY;

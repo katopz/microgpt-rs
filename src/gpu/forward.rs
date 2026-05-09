@@ -68,7 +68,11 @@ struct AttnScoreParams {
     head_dim: u32,
     pos: u32,
     scale: f32,
-    _pad: u32,
+    kv_offset: u32,
+    kv_stride: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 #[repr(C)]
@@ -257,8 +261,10 @@ pub struct GpuForwardPass {
     // Reusable uniform buffers (one per shader type)
     uniform_matmul: Buffer,
     uniform_elem: Buffer,
+    #[allow(dead_code)] // Reserved for future GPU-native softmax dispatch
     uniform_softmax: Buffer,
     uniform_layernorm: Buffer,
+    #[allow(dead_code)] // Reserved for future GPU-native embedding dispatch
     uniform_embedding: Buffer,
     uniform_attn_score: Buffer,
     uniform_lora_a: Buffer,
@@ -353,8 +359,6 @@ impl GpuForwardPass {
     /// Run forward pass for a sequence of tokens.
     /// Returns the logits buffer [seq_len * vocab_size].
     pub fn forward(&self, token_ids: &[usize]) -> Result<&Buffer, GpuError> {
-        let seq_len = token_ids.len();
-
         // Upload token IDs as u32 buffer
         let tokens_u32: Vec<u32> = token_ids.iter().map(|&t| t as u32).collect();
         let _tokens_buf = upload_f32(
@@ -373,7 +377,7 @@ impl GpuForwardPass {
         });
         self.ctx.queue.write_buffer(&tokens_buf, 0, tokens_bytes);
 
-        for pos in 0..seq_len {
+        for (pos, &token_id) in token_ids.iter().enumerate() {
             let mut encoder =
                 self.ctx
                     .device
@@ -382,7 +386,7 @@ impl GpuForwardPass {
                     });
 
             // 1. Embedding: hidden = wte[token] + wpe[pos]
-            self.dispatch_embedding(&mut encoder, &tokens_buf, pos)?;
+            self.dispatch_embedding(&mut encoder, &tokens_buf, token_id, pos)?;
 
             // 2. Layer loop
             for layer_idx in 0..self.config.n_layer {
@@ -404,19 +408,12 @@ impl GpuForwardPass {
         &self,
         encoder: &mut CommandEncoder,
         _tokens_buf: &Buffer,
+        token_id: usize,
         pos: usize,
     ) -> Result<(), GpuError> {
         let n = self.config.n_embd;
-        let token_bytes = (pos as u32).to_le_bytes();
-        let token_buf = self.ctx.device.create_buffer(&BufferDescriptor {
-            label: Some("single_token"),
-            size: 4,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.ctx.queue.write_buffer(&token_buf, 0, &token_bytes);
 
-        // Manual embedding: copy wte[token*n..(token+1)*n] + wpe[pos*n..(pos+1)*n] → hidden
+        // CPU embedding: wte[token_id*n..(token_id+1)*n] + wpe[pos*n..(pos+1)*n] → hidden
         // Use elementwise add: hidden = wte_row + wpe_row
         // First, copy wte row to hidden using copy shader, then add wpe row
         // Simpler: do it on CPU for single position, upload. For training, this is fast enough.
@@ -435,11 +432,9 @@ impl GpuForwardPass {
         )
         .map_err(|e| GpuError::BufferError(format!("wpe download: {e}")))?;
 
-        // Get token from the input - we need to pass it somehow
-        // For now, we reconstruct from the downloaded wte
-        // This is a simplified approach - the full impl would use the embedding shader
+        // wte indexed by token_id, wpe indexed by position
         let hidden_data: Vec<f32> = (0..n)
-            .map(|i| wte_data[pos * n + i] + wpe_data[pos * n + i])
+            .map(|i| wte_data[token_id * n + i] + wpe_data[pos * n + i])
             .collect();
         self.ctx.queue.write_buffer(
             &self.activations.hidden,
@@ -476,14 +471,7 @@ impl GpuForwardPass {
         self.dispatch_rmsnorm(encoder, &self.activations.hidden, n)?;
 
         // 3. QKV projections with LoRA
-        // Save input for LoRA backward
-        self.dispatch_copy(
-            encoder,
-            &self.activations.hidden,
-            &self.activations.lora_inputs[GpuLoraBuffers::adapter_index(layer_idx, LoraTarget::Q)],
-            n,
-        )?;
-
+        // (lora_inputs saved inside dispatch_lora_merge for each adapter)
         self.dispatch_lora_merge(
             encoder,
             &layer.attn_wq,
@@ -881,8 +869,12 @@ impl GpuForwardPass {
         let adapter_idx = GpuLoraBuffers::adapter_index(layer_idx, target);
         let adapter = &self.lora.adapters[adapter_idx];
         let intermediate = &self.activations.lora_intermediates[adapter_idx];
+        let lora_input_buf = &self.activations.lora_inputs[adapter_idx];
         let rank = self.lora.rank;
         let alpha = self.lora.alpha;
+
+        // Save input for LoRA backward pass (needed for gradient computation)
+        self.dispatch_copy(encoder, input, lora_input_buf, in_dim)?;
 
         // Check if input aliases output — lora_b_forward binds input as read
         // and output as read-write; WebGPU forbids same buffer in both roles.
@@ -976,7 +968,7 @@ impl GpuForwardPass {
         let hd = self.config.head_dim;
         let n_head = self.config.n_head;
         let n_kv = self.config.n_kv_head;
-        let _kvd = n_kv * hd;
+        let kvd = n_kv * hd;
         let scale = 1.0 / (hd as f32).sqrt();
         let _t_n = pos + 1; // number of positions to attend to
 
@@ -1012,7 +1004,11 @@ impl GpuForwardPass {
                     head_dim: hd as u32,
                     pos: pos as u32,
                     scale,
-                    _pad: 0,
+                    kv_offset: (kv_group * hd) as u32,
+                    kv_stride: kvd as u32,
+                    _pad0: 0,
+                    _pad1: 0,
+                    _pad2: 0,
                 },
             );
 

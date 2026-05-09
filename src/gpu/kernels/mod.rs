@@ -103,9 +103,11 @@ pub fn create_pipeline(
 // ── Bind group helpers ─────────────────────────────────────────────
 
 /// Standard visibility for compute shaders.
+#[allow(dead_code)]
 const COMPUTE_VIS: wgpu::ShaderStages = wgpu::ShaderStages::COMPUTE;
 
 /// Create a storage buffer binding layout (read-only).
+#[allow(dead_code)]
 pub fn storage_read_binding(binding: u32) -> BindGroupLayoutEntry {
     BindGroupLayoutEntry {
         binding,
@@ -120,6 +122,7 @@ pub fn storage_read_binding(binding: u32) -> BindGroupLayoutEntry {
 }
 
 /// Create a storage buffer binding layout (read-write).
+#[allow(dead_code)]
 pub fn storage_rw_binding(binding: u32) -> BindGroupLayoutEntry {
     BindGroupLayoutEntry {
         binding,
@@ -134,6 +137,7 @@ pub fn storage_rw_binding(binding: u32) -> BindGroupLayoutEntry {
 }
 
 /// Create a uniform buffer binding layout.
+#[allow(dead_code)]
 pub fn uniform_binding(binding: u32) -> BindGroupLayoutEntry {
     BindGroupLayoutEntry {
         binding,
@@ -148,6 +152,7 @@ pub fn uniform_binding(binding: u32) -> BindGroupLayoutEntry {
 }
 
 /// Create a uniform buffer initialized with raw bytes.
+#[allow(dead_code)]
 pub fn create_uniform_buffer(device: &Device, data: &[u8], label: &str) -> Buffer {
     device.create_buffer(&BufferDescriptor {
         label: Some(label),
@@ -158,6 +163,7 @@ pub fn create_uniform_buffer(device: &Device, data: &[u8], label: &str) -> Buffe
 }
 
 /// Write uniform data to an existing buffer via queue.
+#[allow(dead_code)]
 pub fn write_uniform<T: bytemuck::Pod>(queue: &wgpu::Queue, buffer: &Buffer, data: &T) {
     let bytes = bytemuck::cast_slice(std::slice::from_ref(data));
     queue.write_buffer(buffer, 0, bytes);
@@ -302,6 +308,7 @@ pub fn dispatch_count(total: usize, workgroup_size: usize) -> u32 {
 
 /// Dispatch for 2D workgroups (e.g., matmul 16x16).
 #[inline]
+#[allow(dead_code)]
 pub fn dispatch_2d(rows: usize, cols: usize, wg_x: usize, wg_y: usize) -> [u32; 3] {
     [dispatch_count(rows, wg_x), dispatch_count(cols, wg_y), 1]
 }
