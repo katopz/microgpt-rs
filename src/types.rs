@@ -578,6 +578,270 @@ impl LoraAdapter {
             out_dim,
         })
     }
+
+    /// Load LoRA adapters from a safetensors file (e.g., HuggingFace format).
+    /// Parses keys like `model.layers.{N}.self_attn.{target}.lora_{A|B}.weight`
+    /// or `model.layers.{N}.mlp.{target}.lora_{A|B}.weight`.
+    /// Returns one adapter per (layer, target) pair, sorted by layer then target.
+    /// Alpha defaults to `rank * 2` since safetensors doesn't store alpha.
+    #[cfg(feature = "gpu")]
+    pub fn load_from_safetensors(path: &std::path::Path) -> Result<Vec<Self>, String> {
+        use std::collections::BTreeMap;
+
+        let file_data =
+            std::fs::read(path).map_err(|e| format!("Failed to read safetensors file: {e}"))?;
+        let st = safetensors::SafeTensors::deserialize(&file_data)
+            .map_err(|e| format!("Failed to parse safetensors: {e}"))?;
+
+        /// Intermediate entry while parsing safetensors: (a_data, b_data, a_shape, b_shape)
+        type Entry = (Vec<f32>, Vec<f32>, Vec<usize>, Vec<usize>);
+        // (layer, target) -> Entry — BTreeMap for deterministic order
+        let mut entries: BTreeMap<(usize, String), Entry> = BTreeMap::new();
+
+        for tensor_name in st.names() {
+            let tensor = st
+                .tensor(tensor_name)
+                .map_err(|e| format!("Tensor access error: {e}"))?;
+
+            // Parse: model.layers.{N}.{group}.{target}.lora_{A|B}.weight
+            let parts: Vec<&str> = tensor_name.split('.').collect();
+            if parts.len() < 7 {
+                continue;
+            }
+
+            match (parts.first(), parts.get(1)) {
+                (Some(&"model"), Some(&"layers")) => {}
+                _ => continue,
+            }
+
+            let layer: usize = parts
+                .get(2)
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| format!("Invalid layer number in key: {tensor_name}"))?;
+
+            let target = match parts.get(4) {
+                Some(t) => t.to_string(),
+                _ => continue,
+            };
+
+            match target.as_str() {
+                "q_proj" | "k_proj" | "v_proj" | "o_proj" | "gate_proj" | "up_proj"
+                | "down_proj" => {}
+                _ => continue,
+            }
+
+            let is_a = match parts.get(5) {
+                Some(&"lora_A") => true,
+                Some(&"lora_B") => false,
+                _ => continue,
+            };
+
+            match tensor.dtype() {
+                safetensors::Dtype::F32 => {}
+                other => {
+                    return Err(format!(
+                        "Unsupported dtype {other:?} for tensor {tensor_name}, expected F32"
+                    ));
+                }
+            }
+
+            let shape: Vec<usize> = tensor.shape().to_vec();
+            let data: Vec<f32> = tensor
+                .data()
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes(c.try_into().expect("chunk is 4 bytes")))
+                .collect();
+
+            let key = (layer, target);
+            let entry = entries
+                .entry(key)
+                .or_insert_with(|| (Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+
+            if is_a {
+                entry.0 = data;
+                entry.2 = shape;
+            } else {
+                entry.1 = data;
+                entry.3 = shape;
+            }
+        }
+
+        let mut adapters = Vec::new();
+        for ((_layer, _target), (a, b, a_shape, b_shape)) in entries {
+            if a.is_empty() || b.is_empty() {
+                return Err("Incomplete lora pair: missing A or B matrix".into());
+            }
+
+            if a_shape.len() != 2 || b_shape.len() != 2 {
+                return Err(format!(
+                    "Expected 2D tensors, got A:{a_shape:?} B:{b_shape:?}"
+                ));
+            }
+
+            // A: [rank × in_dim], B: [out_dim × rank]
+            let rank = a_shape[0];
+            let in_dim = a_shape[1];
+            let out_dim = b_shape[0];
+            let alpha = (rank * 2) as f32;
+
+            adapters.push(Self {
+                a,
+                b,
+                rank,
+                alpha,
+                in_dim,
+                out_dim,
+            });
+        }
+
+        if adapters.is_empty() {
+            return Err("No valid lora adapters found in safetensors file".into());
+        }
+
+        Ok(adapters)
+    }
+
+    /// Load LoRA adapters from a WASM-compatible binary format.
+    ///
+    /// Format:
+    /// ```text
+    /// [MAGIC: "LORA" 4B]
+    /// [VERSION: 1B]
+    /// [RANK: 2B LE]
+    /// [N_LAYERS: 2B LE]
+    /// [N_TARGETS: 2B LE]
+    /// [TARGET_IDS: N_TARGETS × 2B LE]  (0=q_proj, 1=k_proj, 2=v_proj, 3=o_proj,
+    ///                                    4=gate_proj, 5=up_proj, 6=down_proj)
+    /// [LAYER_DATA: for each (layer, target):
+    ///   [A_ROWS: 2B][A_COLS: 2B][A_DATA: A_ROWS×A_COLS × 4B f32]
+    ///   [B_ROWS: 2B][B_COLS: 2B][B_DATA: B_ROWS×B_COLS × 4B f32]
+    /// ]
+    /// [BLAKE3_HASH: 32B]  — covers everything before it
+    /// ```
+    ///
+    /// Alpha defaults to `rank * 2`.
+    pub fn load_from_wasm_binary(path: &std::path::Path) -> Result<Vec<Self>, String> {
+        const WASM_MAGIC: &[u8; 4] = b"LORA";
+        const WASM_VERSION: u8 = 1;
+
+        let file_data =
+            std::fs::read(path).map_err(|e| format!("Failed to read wasm lora file: {e}"))?;
+
+        // Minimum: magic(4) + version(1) + rank(2) + n_layers(2) + n_targets(2) + hash(32) = 43
+        if file_data.len() < 43 {
+            return Err("File too small for wasm lora header".into());
+        }
+
+        // Validate blake3 checksum — last 32 bytes cover everything before them
+        let data_len = file_data.len() - 32;
+        let stored_checksum = &file_data[data_len..];
+        let computed = blake3::hash(&file_data[..data_len]);
+        if computed.as_bytes() != stored_checksum {
+            return Err("WASM LoRA file checksum mismatch".into());
+        }
+
+        let mut offset = 0usize;
+
+        // Magic
+        if &file_data[offset..offset + 4] != WASM_MAGIC {
+            return Err("Invalid wasm lora magic bytes".into());
+        }
+        offset += 4;
+
+        // Version
+        let version = file_data[offset];
+        if version != WASM_VERSION {
+            return Err(format!("Unsupported wasm lora version: {version}"));
+        }
+        offset += 1;
+
+        // Rank
+        let rank = read_u16_le(&file_data, &mut offset)? as usize;
+
+        // N_LAYERS
+        let n_layers = read_u16_le(&file_data, &mut offset)? as usize;
+
+        // N_TARGETS
+        let n_targets = read_u16_le(&file_data, &mut offset)? as usize;
+
+        if n_layers == 0 || n_targets == 0 {
+            return Err("No layers or targets in wasm lora file".into());
+        }
+
+        // TARGET_IDS
+        let mut target_ids = Vec::with_capacity(n_targets);
+        for _ in 0..n_targets {
+            let tid = read_u16_le(&file_data, &mut offset)?;
+            match tid {
+                0..=6 => target_ids.push(tid),
+                _ => return Err(format!("Invalid target ID: {tid}")),
+            }
+        }
+
+        // LAYER_DATA
+        let alpha = (rank * 2) as f32;
+        let mut adapters = Vec::with_capacity(n_layers * n_targets);
+
+        for _layer in 0..n_layers {
+            for &_target_id in &target_ids {
+                // A matrix: [rank × in_dim]
+                let a_rows = read_u16_le(&file_data, &mut offset)? as usize;
+                let a_cols = read_u16_le(&file_data, &mut offset)? as usize;
+                let a_count = a_rows * a_cols;
+                let a_bytes = a_count * std::mem::size_of::<f32>();
+
+                if offset + a_bytes > data_len {
+                    return Err("Truncated A matrix data".into());
+                }
+
+                let a: Vec<f32> = file_data[offset..offset + a_bytes]
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().expect("chunk is 4 bytes")))
+                    .collect();
+                offset += a_bytes;
+
+                // B matrix: [out_dim × rank]
+                let b_rows = read_u16_le(&file_data, &mut offset)? as usize;
+                let b_cols = read_u16_le(&file_data, &mut offset)? as usize;
+                let b_count = b_rows * b_cols;
+                let b_bytes = b_count * std::mem::size_of::<f32>();
+
+                if offset + b_bytes > data_len {
+                    return Err("Truncated B matrix data".into());
+                }
+
+                let b: Vec<f32> = file_data[offset..offset + b_bytes]
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().expect("chunk is 4 bytes")))
+                    .collect();
+                offset += b_bytes;
+
+                let in_dim = a_cols;
+                let out_dim = b_rows;
+
+                adapters.push(Self {
+                    a,
+                    b,
+                    rank,
+                    alpha,
+                    in_dim,
+                    out_dim,
+                });
+            }
+        }
+
+        if offset != data_len {
+            return Err(format!(
+                "Unexpected trailing data: read {offset}, expected {data_len}"
+            ));
+        }
+
+        if adapters.is_empty() {
+            return Err("No adapters loaded from wasm lora file".into());
+        }
+
+        Ok(adapters)
+    }
 }
 
 /// Apply LoRA delta in-place: `output += (alpha/rank) × B @ (A @ input)`
@@ -650,5 +914,18 @@ fn read_f32_le(data: &[u8], offset: &mut usize) -> Result<f32, String> {
             .map_err(|e: std::array::TryFromSliceError| format!("f32 parse: {e}"))?,
     );
     *offset += 4;
+    Ok(val)
+}
+
+fn read_u16_le(data: &[u8], offset: &mut usize) -> Result<u16, String> {
+    if *offset + 2 > data.len() {
+        return Err("Unexpected end of data reading u16".into());
+    }
+    let val = u16::from_le_bytes(
+        data[*offset..*offset + 2]
+            .try_into()
+            .map_err(|e: std::array::TryFromSliceError| format!("u16 parse: {e}"))?,
+    );
+    *offset += 2;
     Ok(val)
 }

@@ -370,6 +370,315 @@ pub fn load_lora(
     })
 }
 
+// ── SafeTensors loader ────────────────────────────────────────────
+
+/// Load LoRA adapters from a safetensors file and upload to GPU.
+///
+/// Expected key format:
+/// - `model.layers.{N}.self_attn.{target}.lora_{A|B}.weight`
+/// - `model.layers.{N}.mlp.{target}.lora_{A|B}.weight`
+///
+/// Valid targets: `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`
+pub fn load_lora_from_safetensors(
+    device: &Device,
+    queue: &Queue,
+    path: &Path,
+    alpha: f32,
+) -> Result<GpuLoraBuffers, GpuError> {
+    let file_data = std::fs::read(path)
+        .map_err(|e| GpuError::BufferError(format!("Failed to read safetensors file: {e}")))?;
+
+    let safetensors = safetensors::SafeTensors::deserialize(&file_data)
+        .map_err(|e| GpuError::BufferError(format!("Failed to parse safetensors: {e}")))?;
+
+    // Collect adapter entries: (layer_idx, target_name)
+    let mut entries: Vec<(usize, String)> = Vec::new();
+
+    for tensor_name in safetensors.names() {
+        if !tensor_name.ends_with(".lora_A.weight") {
+            continue;
+        }
+
+        // Parse: model.layers.{N}.{module}.{target}.lora_A.weight
+        let parts: Vec<&str> = tensor_name.split('.').collect();
+        if parts.len() != 7 {
+            continue;
+        }
+
+        let layer_idx = parts[2].parse::<usize>().map_err(|e| {
+            GpuError::BufferError(format!("Invalid layer index in {tensor_name}: {e}"))
+        })?;
+        let target_name = parts[4].to_string();
+
+        // Validate by resolving module
+        let _ = target_module(&target_name)?;
+
+        entries.push((layer_idx, target_name));
+    }
+
+    // Sort by (layer, target) for consistent ordering
+    entries.sort_by(|a, b| match a.0.cmp(&b.0) {
+        std::cmp::Ordering::Equal => a.1.cmp(&b.1),
+        other => other,
+    });
+
+    if entries.is_empty() {
+        return Err(GpuError::BufferError(
+            "No LoRA adapters found in safetensors file".into(),
+        ));
+    }
+
+    // Determine rank from first A matrix
+    let first_entry = &entries[0];
+    let first_module = target_module(&first_entry.1)?;
+    let first_key = format!(
+        "model.layers.{}.{first_module}.{}.lora_A.weight",
+        first_entry.0, first_entry.1
+    );
+    let first_tensor = safetensors
+        .tensor(&first_key)
+        .map_err(|e| GpuError::BufferError(format!("Failed to get tensor: {e}")))?;
+    let rank = first_tensor.shape()[0];
+    let effective_alpha = if alpha != 0.0 {
+        alpha
+    } else {
+        (rank * 2) as f32
+    };
+
+    let mut adapters = Vec::with_capacity(entries.len());
+
+    for (i, (layer_idx, target_name)) in entries.iter().enumerate() {
+        let module = target_module(target_name)?;
+        let a_key = format!("model.layers.{layer_idx}.{module}.{target_name}.lora_A.weight");
+        let b_key = format!("model.layers.{layer_idx}.{module}.{target_name}.lora_B.weight");
+
+        let a_tensor = safetensors
+            .tensor(&a_key)
+            .map_err(|e| GpuError::BufferError(format!("Failed to get A tensor: {e}")))?;
+        let b_tensor = safetensors
+            .tensor(&b_key)
+            .map_err(|e| GpuError::BufferError(format!("Failed to get B tensor: {e}")))?;
+
+        // Validate dtype is F32
+        match a_tensor.dtype() {
+            safetensors::Dtype::F32 => {}
+            other => {
+                return Err(GpuError::BufferError(format!(
+                    "Unsupported A dtype: {other:?}"
+                )));
+            }
+        }
+        match b_tensor.dtype() {
+            safetensors::Dtype::F32 => {}
+            other => {
+                return Err(GpuError::BufferError(format!(
+                    "Unsupported B dtype: {other:?}"
+                )));
+            }
+        }
+
+        let a_shape = a_tensor.shape();
+        let b_shape = b_tensor.shape();
+        let adapter_rank = a_shape[0];
+        let in_dim = a_shape[1];
+        let out_dim = b_shape[0];
+        let a_count = adapter_rank * in_dim;
+        let b_count = out_dim * adapter_rank;
+
+        let a_data: Vec<f32> = a_tensor
+            .data()
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("chunk is 4 bytes")))
+            .collect();
+        let b_data: Vec<f32> = b_tensor
+            .data()
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("chunk is 4 bytes")))
+            .collect();
+
+        let label = format!("lora_{i}");
+        let a = upload_f32(device, queue, &a_data, &format!("{label}_a"));
+        let b = upload_f32(device, queue, &b_data, &format!("{label}_b"));
+        let grad_a = create_buffer(device, a_count, &format!("{label}_grad_a"));
+        let grad_b = create_buffer(device, b_count, &format!("{label}_grad_b"));
+        let m_a = create_buffer(device, a_count, &format!("{label}_m_a"));
+        let v_a = create_buffer(device, a_count, &format!("{label}_v_a"));
+        let m_b = create_buffer(device, b_count, &format!("{label}_m_b"));
+        let v_b = create_buffer(device, b_count, &format!("{label}_v_b"));
+
+        adapters.push(GpuLoraAdapter {
+            a,
+            b,
+            grad_a,
+            grad_b,
+            m_a,
+            v_a,
+            m_b,
+            v_b,
+            in_dim,
+            out_dim,
+            rank: adapter_rank,
+        });
+    }
+
+    Ok(GpuLoraBuffers {
+        adapters,
+        rank,
+        alpha: effective_alpha,
+    })
+}
+
+// ── WASM binary loader ────────────────────────────────────────────
+
+/// Load LoRA adapters from a WASM binary format and upload to GPU.
+///
+/// Format:
+/// ```text
+/// [MAGIC: "LORA" 4 bytes]
+/// [VERSION: 1 byte]
+/// [RANK: 2 bytes LE]
+/// [N_LAYERS: 2 bytes LE]
+/// [N_TARGETS: 2 bytes LE]
+/// [TARGET_IDS: N_TARGETS × 2 bytes LE]
+/// [LAYER_DATA: for each (layer, target):
+///   [A_ROWS: 2 bytes][A_COLS: 2 bytes][A_DATA: A_ROWS×A_COLS × 4 bytes f32]
+///   [B_ROWS: 2 bytes][B_COLS: 2 bytes][B_DATA: B_ROWS×B_COLS × 4 bytes f32]
+/// ]
+/// [BLAKE3_HASH: 32 bytes]
+/// ```
+pub fn load_lora_from_wasm_binary(
+    device: &Device,
+    queue: &Queue,
+    path: &Path,
+    alpha: f32,
+) -> Result<GpuLoraBuffers, GpuError> {
+    let file_data = std::fs::read(path)
+        .map_err(|e| GpuError::BufferError(format!("Failed to read wasm lora file: {e}")))?;
+
+    // Minimum: magic(4) + version(1) + rank(2) + n_layers(2) + n_targets(2) + hash(32) = 43
+    if file_data.len() < 43 {
+        return Err(GpuError::BufferError(
+            "File too small for wasm lora header".into(),
+        ));
+    }
+
+    // Validate blake3 checksum (last 32 bytes)
+    let hash_offset = file_data.len() - 32;
+    let stored_hash = &file_data[hash_offset..];
+    let computed = blake3::hash(&file_data[..hash_offset]);
+    if computed.as_bytes() != stored_hash {
+        return Err(GpuError::BufferError(
+            "WASM LoRA file checksum mismatch".into(),
+        ));
+    }
+
+    // Validate magic
+    if &file_data[0..4] != LORA_MAGIC {
+        return Err(GpuError::BufferError(
+            "Invalid wasm lora magic bytes".into(),
+        ));
+    }
+
+    let data = &file_data[..hash_offset];
+    let mut offset = 4usize;
+
+    let version = data[offset];
+    offset += 1;
+    if version != 1 {
+        return Err(GpuError::BufferError(format!(
+            "Unsupported wasm lora version: {version}"
+        )));
+    }
+
+    let rank = read_u16_le(data, &mut offset)? as usize;
+    let n_layers = read_u16_le(data, &mut offset)? as usize;
+    let n_targets = read_u16_le(data, &mut offset)? as usize;
+
+    let target_ids: Vec<u16> = (0..n_targets)
+        .map(|_| read_u16_le(data, &mut offset))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let effective_alpha = if alpha != 0.0 {
+        alpha
+    } else {
+        (rank * 2) as f32
+    };
+    let mut adapters = Vec::with_capacity(n_layers * n_targets);
+
+    for layer_idx in 0..n_layers {
+        for target_id in &target_ids {
+            let a_rows = read_u16_le(data, &mut offset)? as usize;
+            let a_cols = read_u16_le(data, &mut offset)? as usize;
+            let a_count = a_rows * a_cols;
+            let a_bytes = a_count * std::mem::size_of::<f32>();
+
+            if offset + a_bytes > data.len() {
+                return Err(GpuError::BufferError(format!(
+                    "Truncated A data for layer {layer_idx} target {target_id}"
+                )));
+            }
+
+            let a_data: Vec<f32> = data[offset..offset + a_bytes]
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("chunk is 4 bytes")))
+                .collect();
+            offset += a_bytes;
+
+            let b_rows = read_u16_le(data, &mut offset)? as usize;
+            let b_cols = read_u16_le(data, &mut offset)? as usize;
+            let b_count = b_rows * b_cols;
+            let b_bytes = b_count * std::mem::size_of::<f32>();
+
+            if offset + b_bytes > data.len() {
+                return Err(GpuError::BufferError(format!(
+                    "Truncated B data for layer {layer_idx} target {target_id}"
+                )));
+            }
+
+            let b_data: Vec<f32> = data[offset..offset + b_bytes]
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("chunk is 4 bytes")))
+                .collect();
+            offset += b_bytes;
+
+            // A: [a_rows, a_cols] = [rank, in_dim], B: [b_rows, b_cols] = [out_dim, rank]
+            let in_dim = a_cols;
+            let out_dim = b_rows;
+
+            let i = adapters.len();
+            let label = format!("lora_{i}");
+            let a = upload_f32(device, queue, &a_data, &format!("{label}_a"));
+            let b = upload_f32(device, queue, &b_data, &format!("{label}_b"));
+            let grad_a = create_buffer(device, a_count, &format!("{label}_grad_a"));
+            let grad_b = create_buffer(device, b_count, &format!("{label}_grad_b"));
+            let m_a = create_buffer(device, a_count, &format!("{label}_m_a"));
+            let v_a = create_buffer(device, a_count, &format!("{label}_v_a"));
+            let m_b = create_buffer(device, b_count, &format!("{label}_m_b"));
+            let v_b = create_buffer(device, b_count, &format!("{label}_v_b"));
+
+            adapters.push(GpuLoraAdapter {
+                a,
+                b,
+                grad_a,
+                grad_b,
+                m_a,
+                v_a,
+                m_b,
+                v_b,
+                in_dim,
+                out_dim,
+                rank,
+            });
+        }
+    }
+
+    Ok(GpuLoraBuffers {
+        adapters,
+        rank,
+        alpha: effective_alpha,
+    })
+}
+
 // ── Helpers ────────────────────────────────────────────────────────
 
 fn read_u32_le(data: &[u8], offset: &mut usize) -> Result<u32, GpuError> {
@@ -396,6 +705,27 @@ fn read_f32_le(data: &[u8], offset: &mut usize) -> Result<f32, GpuError> {
     );
     *offset += 4;
     Ok(val)
+}
+
+fn read_u16_le(data: &[u8], offset: &mut usize) -> Result<u16, GpuError> {
+    if *offset + 2 > data.len() {
+        return Err(GpuError::BufferError("Unexpected end of data".into()));
+    }
+    let val = u16::from_le_bytes(
+        data[*offset..*offset + 2]
+            .try_into()
+            .expect("slice is 2 bytes"),
+    );
+    *offset += 2;
+    Ok(val)
+}
+
+fn target_module(target: &str) -> Result<&'static str, GpuError> {
+    match target {
+        "q_proj" | "k_proj" | "v_proj" | "o_proj" => Ok("self_attn"),
+        "gate_proj" | "up_proj" | "down_proj" => Ok("mlp"),
+        _ => Err(GpuError::BufferError(format!("Unknown target: {target}"))),
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
