@@ -179,6 +179,11 @@ pub struct ForwardContext {
     hidden: Vec<f32>,           // [mlp_hidden] MLP hidden
     pub logits: Vec<f32>,       // [vocab_size] output logits
     pub hidden_state: Vec<f32>, // [n_embd] final hidden state (Plan 009 compat)
+    // Sparse MLP buffers (Plan 022: TwELL-inspired unstructured sparsity)
+    #[cfg(feature = "sparse_mlp")]
+    active_indices: Vec<usize>, // [mlp_hidden] pre-allocated index buffer
+    #[cfg(feature = "sparse_mlp")]
+    active_values: Vec<f32>, // [mlp_hidden] pre-allocated value buffer
 }
 
 impl ForwardContext {
@@ -196,6 +201,10 @@ impl ForwardContext {
             hidden: vec![0.0; config.mlp_hidden],
             logits: vec![0.0; config.vocab_size],
             hidden_state: vec![0.0; config.n_embd],
+            #[cfg(feature = "sparse_mlp")]
+            active_indices: vec![0; config.mlp_hidden],
+            #[cfg(feature = "sparse_mlp")]
+            active_values: vec![0.0; config.mlp_hidden],
         }
     }
 }
@@ -366,6 +375,29 @@ pub fn forward<'a>(
             config.mlp_hidden,
             n,
         );
+        // MLP w2: sparse when feature enabled and sparsity is high enough (Plan 022)
+        #[cfg(feature = "sparse_mlp")]
+        {
+            let alive = types::sparse_matmul(
+                &mut ctx.x,
+                &layer_weights.mlp_w2,
+                &ctx.hidden,
+                n,
+                config.mlp_hidden,
+                &mut ctx.active_indices,
+                &mut ctx.active_values,
+            );
+            if (alive as f32 / config.mlp_hidden as f32) > (1.0 - config.sparse_threshold) {
+                matmul(
+                    &mut ctx.x,
+                    &layer_weights.mlp_w2,
+                    &ctx.hidden,
+                    n,
+                    config.mlp_hidden,
+                );
+            }
+        }
+        #[cfg(not(feature = "sparse_mlp"))]
         matmul(
             &mut ctx.x,
             &layer_weights.mlp_w2,
@@ -496,6 +528,29 @@ pub fn forward_paged<'a>(
             config.mlp_hidden,
             n,
         );
+        // MLP w2: sparse when feature enabled and sparsity is high enough (Plan 022)
+        #[cfg(feature = "sparse_mlp")]
+        {
+            let alive = types::sparse_matmul(
+                &mut ctx.x,
+                &layer_weights.mlp_w2,
+                &ctx.hidden,
+                n,
+                config.mlp_hidden,
+                &mut ctx.active_indices,
+                &mut ctx.active_values,
+            );
+            if (alive as f32 / config.mlp_hidden as f32) > (1.0 - config.sparse_threshold) {
+                matmul(
+                    &mut ctx.x,
+                    &layer_weights.mlp_w2,
+                    &ctx.hidden,
+                    n,
+                    config.mlp_hidden,
+                );
+            }
+        }
+        #[cfg(not(feature = "sparse_mlp"))]
         matmul(
             &mut ctx.x,
             &layer_weights.mlp_w2,
@@ -1077,6 +1132,29 @@ pub fn forward_raven<'a>(
             config.mlp_hidden,
             n,
         );
+        // MLP w2: sparse when feature enabled and sparsity is high enough (Plan 022)
+        #[cfg(feature = "sparse_mlp")]
+        {
+            let alive = types::sparse_matmul(
+                &mut ctx.x,
+                &layer_weights.mlp_w2,
+                &ctx.hidden,
+                n,
+                config.mlp_hidden,
+                &mut ctx.active_indices,
+                &mut ctx.active_values,
+            );
+            if (alive as f32 / config.mlp_hidden as f32) > (1.0 - config.sparse_threshold) {
+                matmul(
+                    &mut ctx.x,
+                    &layer_weights.mlp_w2,
+                    &ctx.hidden,
+                    n,
+                    config.mlp_hidden,
+                );
+            }
+        }
+        #[cfg(not(feature = "sparse_mlp"))]
         matmul(
             &mut ctx.x,
             &layer_weights.mlp_w2,
@@ -2029,6 +2107,187 @@ mod tests {
                 lt[0].len(),
                 expected,
                 "layer {layer_idx} should have {expected} pages after rollback"
+            );
+        }
+    }
+
+    // ======================================================================
+    // Sparse MLP tests (Plan 022: TwELL-inspired)
+    // ======================================================================
+
+    /// Sparse matmul produces identical output to dense at 0% sparsity (all alive).
+    #[cfg(feature = "sparse_mlp")]
+    #[test]
+    fn test_sparse_matmul_0_percent_sparsity() {
+        let rows = 16;
+        let cols = 64;
+        let weight: Vec<f32> = (0..rows * cols).map(|i| (i % 100) as f32 * 0.01).collect();
+        let input: Vec<f32> = (0..cols).map(|i| (i as f32 + 1.0) * 0.1).collect();
+        let mut dense_out = vec![0.0f32; rows];
+        let mut sparse_out = vec![0.0f32; rows];
+        let mut indices = vec![0usize; cols];
+        let mut values = vec![0.0f32; cols];
+
+        crate::types::matmul(&mut dense_out, &weight, &input, rows, cols);
+        crate::types::sparse_matmul(
+            &mut sparse_out,
+            &weight,
+            &input,
+            rows,
+            cols,
+            &mut indices,
+            &mut values,
+        );
+
+        for i in 0..rows {
+            assert!(
+                (dense_out[i] - sparse_out[i]).abs() < 1e-3,
+                "Mismatch at {i}: dense={}, sparse={}",
+                dense_out[i],
+                sparse_out[i]
+            );
+        }
+    }
+
+    /// Sparse matmul produces identical output at 95% sparsity.
+    #[cfg(feature = "sparse_mlp")]
+    #[test]
+    fn test_sparse_matmul_95_percent_sparsity() {
+        let rows = 16;
+        let cols = 64;
+        let weight: Vec<f32> = (0..rows * cols).map(|i| (i % 100) as f32 * 0.01).collect();
+        let mut input = vec![0.0f32; cols];
+        // 5% alive
+        for i in (0..cols).step_by(20) {
+            input[i] = 1.0;
+        }
+        let mut dense_out = vec![0.0f32; rows];
+        let mut sparse_out = vec![0.0f32; rows];
+        let mut indices = vec![0usize; cols];
+        let mut values = vec![0.0f32; cols];
+
+        crate::types::matmul(&mut dense_out, &weight, &input, rows, cols);
+        crate::types::sparse_matmul(
+            &mut sparse_out,
+            &weight,
+            &input,
+            rows,
+            cols,
+            &mut indices,
+            &mut values,
+        );
+
+        for i in 0..rows {
+            assert!(
+                (dense_out[i] - sparse_out[i]).abs() < 1e-4,
+                "Mismatch at {i}: dense={}, sparse={}",
+                dense_out[i],
+                sparse_out[i]
+            );
+        }
+    }
+
+    /// Sparse matmul with 100% sparsity (all zeros) produces all-zero output.
+    #[cfg(feature = "sparse_mlp")]
+    #[test]
+    fn test_sparse_matmul_100_percent_sparsity() {
+        let rows = 16;
+        let cols = 64;
+        let weight: Vec<f32> = (0..rows * cols).map(|i| (i % 100) as f32 * 0.01).collect();
+        let input = vec![0.0f32; cols];
+        let mut sparse_out = vec![0.0f32; rows];
+        let mut indices = vec![0usize; cols];
+        let mut values = vec![0.0f32; cols];
+
+        let alive = crate::types::sparse_matmul(
+            &mut sparse_out,
+            &weight,
+            &input,
+            rows,
+            cols,
+            &mut indices,
+            &mut values,
+        );
+
+        assert_eq!(alive, 0, "Expected 0 alive neurons");
+        for i in 0..rows {
+            assert_eq!(sparse_out[i], 0.0, "Expected zero output at {i}");
+        }
+    }
+
+    /// ForwardContext buffers are correctly sized when sparse_mlp is enabled.
+    #[cfg(feature = "sparse_mlp")]
+    #[test]
+    fn test_forward_context_sparse_buffers() {
+        let config = crate::types::Config::micro();
+        let ctx = super::ForwardContext::new(&config);
+        assert_eq!(ctx.active_indices.len(), config.mlp_hidden);
+        assert_eq!(ctx.active_values.len(), config.mlp_hidden);
+    }
+
+    /// Forward pass works correctly with sparse_mlp enabled.
+    #[cfg(feature = "sparse_mlp")]
+    #[test]
+    fn test_forward_with_sparse_mlp() {
+        let config = crate::types::Config::micro();
+        let mut rng = crate::types::Rng::new(42);
+        let weights = crate::transformer::TransformerWeights::new(&config, &mut rng);
+        let mut ctx = crate::transformer::ForwardContext::new(&config);
+        let mut cache = crate::transformer::MultiLayerKVCache::new(&config);
+
+        let logits = crate::transformer::forward(&mut ctx, &weights, &mut cache, 26, 0, &config);
+
+        // Verify logits are finite
+        for l in logits {
+            assert!(l.is_finite(), "Logit is not finite: {l}");
+        }
+    }
+
+    /// Sparse matmul with negative values (should be treated as dead by ReLU context).
+    #[cfg(feature = "sparse_mlp")]
+    #[test]
+    fn test_sparse_matmul_negative_input() {
+        let rows = 8;
+        let cols = 32;
+        let weight: Vec<f32> = (0..rows * cols).map(|i| (i % 100) as f32 * 0.01).collect();
+        let mut input = vec![0.0f32; cols];
+        // Mix of positive, negative, zero
+        input[0] = 1.0;
+        input[1] = -1.0; // Should be ignored (not > 0)
+        input[2] = 0.5;
+        input[3] = -0.5; // Should be ignored
+        // Rest are 0.0
+
+        let mut dense_out = vec![0.0f32; rows];
+        let mut sparse_out = vec![0.0f32; rows];
+        let mut indices = vec![0usize; cols];
+        let mut values = vec![0.0f32; cols];
+
+        crate::types::matmul(&mut dense_out, &weight, &input, rows, cols);
+        crate::types::sparse_matmul(
+            &mut sparse_out,
+            &weight,
+            &input,
+            rows,
+            cols,
+            &mut indices,
+            &mut values,
+        );
+
+        // Both should match since matmul doesn't skip negatives but sparse_matmul skips input[c] <= 0
+        // So we need to compare against a modified dense that also skips negatives
+        for r in 0..rows {
+            let mut expected = 0.0f32;
+            for c in 0..cols {
+                if input[c] > 0.0 {
+                    expected += weight[r * cols + c] * input[c];
+                }
+            }
+            assert!(
+                (sparse_out[r] - expected).abs() < 1e-4,
+                "Mismatch at {r}: sparse={}, expected={}",
+                sparse_out[r],
+                expected
             );
         }
     }

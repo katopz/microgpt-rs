@@ -564,6 +564,10 @@ impl GpuForwardPass {
         )?;
         self.dispatch_relu(encoder, &self.activations.mlp_hidden, mlp_hidden)?;
 
+        // NOTE: GPU MLP w2 stays dense (Plan 022: TwELL sparse is CPU-only).
+        // Unstructured sparsity causes warp divergence and uncoalesced memory access on GPU.
+        // If GPU sparse is needed, use structured N:M sparsity (separate plan).
+        // See: .plans/022_sparse_mlp_twell.md and .research/08_Sakana_TwELL_Sparse_MLP.md
         self.dispatch_lora_merge(
             encoder,
             &layer.mlp_w2,

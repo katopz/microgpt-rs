@@ -22,6 +22,8 @@ pub struct Config {
     pub lora_targets: Vec<String>,
     // Screening Pruner (Plan 021)
     pub screening_threshold: f32,
+    // Sparse MLP (Plan 022)
+    pub sparse_threshold: f32,
 }
 
 impl Config {
@@ -48,6 +50,7 @@ impl Config {
             lora_dropout: 0.0,
             lora_targets: Vec::new(),
             screening_threshold: 0.0,
+            sparse_threshold: 0.8,
         }
     }
 
@@ -90,6 +93,7 @@ impl Config {
             lora_dropout: 0.0,
             lora_targets: Vec::new(),
             screening_threshold: 0.0,
+            sparse_threshold: 0.8,
         }
     }
 
@@ -116,6 +120,7 @@ impl Config {
             lora_dropout: 0.0,
             lora_targets: Vec::new(),
             screening_threshold: 0.0,
+            sparse_threshold: 0.8,
         }
     }
 
@@ -140,6 +145,7 @@ impl Config {
             lora_dropout: 0.0,
             lora_targets: Vec::new(),
             screening_threshold: 0.0,
+            sparse_threshold: 0.8,
         }
     }
 
@@ -166,6 +172,7 @@ impl Config {
             lora_dropout: 0.0,
             lora_targets: Vec::new(),
             screening_threshold: 0.0,
+            sparse_threshold: 0.8,
         }
     }
 
@@ -191,6 +198,7 @@ impl Config {
             lora_dropout: 0.0,
             lora_targets: Vec::new(),
             screening_threshold: 0.0,
+            sparse_threshold: 0.8,
         }
     }
 
@@ -355,6 +363,61 @@ pub fn matmul_relu(output: &mut [f32], weight: &[f32], input: &[f32], rows: usiz
             *output.get_unchecked_mut(r) = sum.max(0.0);
         }
     }
+}
+
+/// Sparse matrix-vector multiply for ReLU-activated inputs (TwELL-inspired).
+///
+/// Only processes columns where `input[c] > 0.0`, skipping dead neurons entirely.
+/// Exploits the natural sparsity of ReLU activations in MLP layers where 95-99%
+/// of hidden neurons are exactly zero after training with L1 regularization.
+///
+/// Distilled from "Sparser, Faster, Lighter Transformer Language Models"
+/// (arXiv:2603.23198) by Sakana AI & NVIDIA.
+///
+/// Two-phase execution:
+/// 1. Dynamic Packing: scan input, store non-zero indices & values into pre-allocated buffers
+/// 2. Sparse Multiply: only iterate weights at alive column indices
+///
+/// Returns the number of alive (non-zero) neurons for diagnostics/threshold checks.
+/// Buffers `active_indices` and `active_values` must be pre-allocated to at least `cols` capacity.
+#[cfg(feature = "sparse_mlp")]
+#[inline(always)]
+pub fn sparse_matmul(
+    output: &mut [f32],
+    weight: &[f32],
+    input: &[f32],
+    rows: usize,
+    cols: usize,
+    active_indices: &mut [usize],
+    active_values: &mut [f32],
+) -> usize {
+    // Phase 1: Pack alive neurons (software TwELL formulation)
+    let mut alive = 0;
+    for c in 0..cols {
+        if unsafe { *input.get_unchecked(c) } > 0.0 {
+            unsafe {
+                *active_indices.get_unchecked_mut(alive) = c;
+                *active_values.get_unchecked_mut(alive) = *input.get_unchecked(c);
+            }
+            alive += 1;
+        }
+    }
+
+    // Phase 2: Sparse multiply — only process alive neurons
+    for r in 0..rows {
+        let row_off = r * cols;
+        let mut sum = 0.0f32;
+        for i in 0..alive {
+            let c = unsafe { *active_indices.get_unchecked(i) };
+            let val = unsafe { *active_values.get_unchecked(i) };
+            sum += unsafe { *weight.get_unchecked(row_off + c) } * val;
+        }
+        unsafe {
+            *output.get_unchecked_mut(r) = sum;
+        }
+    }
+
+    alive
 }
 
 /// Sample a token index from a probability distribution using cumulative scan.

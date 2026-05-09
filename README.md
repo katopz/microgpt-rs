@@ -408,6 +408,56 @@ When `r_t[slot] == 0`: `decay = exp(0) = 1.0` → `H_new = H_old` → **perfectl
 | RAG routing | N/A | Draft model's `r_t` vector → anyrag slot selection |
 | Router weights | Dummy (K dim cycling) | Learned via WGPU training pipeline (Plan 008) |
 
+## ⚡ TwELL Sparse MLP: Unstructured Sparsity Acceleration
+
+Based on ["Sparser, Faster, Lighter Transformer Language Models"](https://arxiv.org/abs/2603.23198) (Sakana AI & NVIDIA) — skips dead neurons in the MLP's second weight matrix, exploiting the natural sparsity of ReLU activations.
+
+### The Core Idea
+
+MLP layers (`W1 → ReLU → W2`) account for ~80% of LLM FLOPs. With ReLU (which microgpt-rs already uses), up to 99% of hidden neurons become exactly `0.0` after training with light L1 regularization. Standard dense matmul wastes cycles computing `0 × weight`. The TwELL-inspired sparse matmul dynamically packs non-zero indices and skips dead neurons entirely.
+
+```
+Dense W2:   output[r] = Σ_{c=0}^{cols-1} W[r,c] × hidden[c]    → always cols multiplications
+Sparse W2:  output[r] = Σ_{c ∈ alive} W[r,c] × hidden[c]        → only alive multiplications
+```
+
+### What We Implemented
+
+| Component | Details |
+|-----------|---------|
+| **`sparse_matmul`** | Two-phase: pack alive indices → sparse multiply. Feature-gated behind `sparse_mlp`. |
+| **Pre-allocated buffers** | `active_indices` + `active_values` in `ForwardContext`, zero alloc in hot loop. |
+| **Runtime auto-detection** | `config.sparse_threshold` (default `0.8`): falls back to dense when sparsity is too low. |
+| **3 forward paths** | `forward()`, `forward_paged()`, `forward_raven()` all use sparse when enabled. |
+| **CPU-only** | GPU stays dense — unstructured sparsity causes warp divergence. |
+
+### Usage
+
+```sh
+# Enable sparse MLP (opt-in, backward compatible)
+cargo run --features sparse_mlp
+
+# Benchmark sparse vs dense at various sparsity levels
+cargo test --features sparse_mlp -- bench_sparse_mlp
+```
+
+### The Trinity
+
+```
+Raven:      O(1) memory   — the memory problem (fixed KV slots)
+Screening:  O(1) judgment — the branching problem (absolute relevance pruning)
+TwELL:      O(alive) FLOPs — the compute problem (sparse MLP acceleration)
+```
+
+### Caveats (Honest)
+
+| Limitation | What It Means |
+|------------|---------------|
+| **Sparsity depends on training** | Without L1 regularization, ReLU sparsity may be only 70-80%. Runtime fallback to dense handles this. |
+| **Small models won't benefit** | At `mlp_hidden=64` (micro config), packing overhead may exceed savings. Best for `mlp_hidden >= 256`. |
+| **No GPU benefit** | Unstructured sparsity causes warp divergence. GPU sparse needs structured N:M patterns (separate future work). |
+| **Must benchmark** | Speedup claims must be validated on real model weights, not synthetic data. |
+
 ## 🔬 Percepta: O(log N) 2D Convex Hull Attention
 
 Based on [Percepta's "Can LLMs Be Computers?"](https://www.percepta.ai/blog/can-llms-be-computers) — the idea that transformers with 2D attention heads can execute programs internally for millions of steps without quadratic slowdown.
@@ -556,6 +606,7 @@ cargo clippy --all-targets --all-features --quiet
 | `rest` | `reqwest`, `tokio` | REST module |
 | `gpu` | `wgpu`, `bytemuck`, `pollster`, `safetensors` | wgpu context & buffers |
 | `wasm` | `wasmtime`, `wat` | WASM validator runtime (WasmPruner) |
+| `sparse_mlp` | — | TwELL-inspired sparse MLP matmul (Plan 022) |
 | `full` | all above (except leviathan, always on) | Enable all features |
 
 Build with `--features <flag>` or `--all-features`.
@@ -608,8 +659,8 @@ cargo run --features wasm
 src/
   lib.rs            Module index
   main.rs           Entry point (proof → bench → Percepta bench → plot)
-  types.rs          Config (micro + draft, screening_threshold), Rng, softmax, rmsnorm, matmul, sample_token
-  transformer.rs    TransformerWeights, KVCache, PagedKVCache, RavenKVCache, ForwardContext, forward, forward_paged, forward_raven, generate, generate_into, generate_batch
+  types.rs          Config (micro + draft, screening_threshold, sparse_threshold), Rng, softmax, rmsnorm, matmul, matmul_relu, sparse_matmul∘, sample_token
+  transformer.rs    TransformerWeights, KVCache, PagedKVCache, RavenKVCache, ForwardContext (+ sparse buffers∘), forward, forward_paged, forward_raven, generate, generate_into, generate_batch
   speculative/      SOLID decomposition (plan 005):
     mod.rs          Re-exports
     types.rs        TreeNode, DraftResult, ConstraintPruner trait, ScreeningPruner trait, NoPruner, NoScreeningPruner, BinaryScreeningPruner, SpeculativeContext (zero-alloc), DDTreeBranchCache (wraps PagedKVCache)
@@ -627,9 +678,10 @@ src/
   wasm/             WasmPruner (ConstraintPruner + ScreeningPruner), WASM runtime (abi, state, wasmtime loader, EXPORT_RELEVANCE) †
   percepta.rs       Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
                     Sudoku9x9, SymbolicValidator, StreamingSolver, SolveEvent
-  benchmark.rs      BenchResult, run_all, save_results_csv (AR / DFlash / DDTree / Speculative / AR Draft / Leviathan)
+  benchmark.rs      BenchResult, run_all, save_results_csv (AR / DFlash / DDTree / Speculative / AR Draft / Leviathan / Sparse MLP∘)
   plot.rs           plot_results → PNG horizontal bar chart
   * behind --features sudoku
+  ∘ behind --features sparse_mlp
   ‡ behind --features validator
   § behind --features gpu
   ¶ behind --features rest
@@ -654,6 +706,7 @@ bench/
 - [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/pdf/2211.17192) — Leviathan et al., 2022 (Algorithm 1: draft → target scoring → p/q rejection → residual sampling → bonus token)
 - SpecInfer — tree-based speculative verification (inspiration for DDTree)
 - [Percepta: Can LLMs Be Computers?](https://www.percepta.ai/blog/can-llms-be-computers) — 2D convex hull attention for in-model execution
+- [Sparser, Faster, Lighter Transformer Language Models](https://arxiv.org/abs/2603.23198) — Sakana AI & NVIDIA, 2025 (TwELL: tile-wise ELLPACK sparse MLP, unstructured sparsity exploitation)
 - [Luce-Org/lucebox-hub](https://github.com/Luce-Org/lucebox-hub/) — Open LLM Inference, Rewritten by Hand for One Specific Chip at a Time
 - [DFlash: Block-Diffusion Speculative Decoding](https://arxiv.org/abs/2602.06036) — Wang et al., 2026 (chain-seed DDTree, target-conditioned draft)
 - [DDTree: Block Diffusion Draft Trees](https://arxiv.org/abs/2604.12989) — Ringel & Romano, 2026 (budget sweep, tree verify)
