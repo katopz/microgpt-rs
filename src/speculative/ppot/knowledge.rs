@@ -30,22 +30,23 @@ use super::types::{PpotConfig, TokenRule};
 pub struct RejectionInsight {
     /// Position in the token sequence that was resampled.
     pub position: usize,
-    /// Token rule used for this resampling attempt.
-    pub rule: TokenRule,
     /// Original token at this position before resampling.
     pub original_token: usize,
     /// Token attempted during resampling.
     pub attempted_token: usize,
-    /// Error category if rejected (placeholder for future constraint diagnostics).
-    pub error_kind: Option<ErrorKind>,
     /// Shannon entropy at this position (uncertainty measure).
     pub entropy: f32,
+    /// Token rule used for this resampling attempt.
+    pub rule: TokenRule,
+    /// Error category if rejected (placeholder for future constraint diagnostics).
+    pub error_kind: Option<ErrorKind>,
     /// Whether the pruner accepted this variant.
     pub accepted: bool,
 }
 
 /// Categorization of rejection reasons (future use for structured "don'ts").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ErrorKind {
     /// Token violates a hard constraint (e.g., invalid digit in math expression).
     ConstraintViolation,
@@ -224,6 +225,7 @@ impl SessionKnowledge {
     /// Thin wrapper that calls [`record`](Self::record) for each insight.
     /// Useful when collecting insights into a buffer before recording
     /// (avoids interleaving knowledge queries with writes).
+    #[inline]
     pub fn record_batch(&mut self, insights: impl Iterator<Item = RejectionInsight>) {
         for insight in insights {
             self.record(insight);
@@ -339,9 +341,11 @@ impl SessionKnowledge {
     /// Preferred rules for a position, sorted by success rate descending.
     ///
     /// Returns rules that have been tried at this position with positive results,
-    /// ordered from most to least successful. Empty if no insights exist for
-    /// the position.
-    pub fn preferred_rules(&self, position: usize) -> Vec<TokenRule> {
+    /// ordered from most to least successful. Returns `[None; 5]` if no insights
+    /// exist for the position.
+    ///
+    /// Stack-allocated (no heap) — max 5 rules (one per `TokenRule` variant).
+    pub fn preferred_rules(&self, position: usize) -> [Option<TokenRule>; 5] {
         let mut rule_stats: [(TokenRule, f32); 5] = [
             (TokenRule::Digit, 0.0),
             (TokenRule::Compare, 0.0),
@@ -373,12 +377,16 @@ impl SessionKnowledge {
         // Sort by score descending
         rule_stats.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Return only rules with positive score
-        rule_stats
-            .iter()
-            .filter(|(_, score)| *score > 0.0)
-            .map(|(rule, _)| *rule)
-            .collect()
+        // Fill fixed-size array with rules having positive score
+        let mut result = [None; 5];
+        let mut out_idx = 0;
+        for (rule, score) in &rule_stats {
+            if *score > 0.0 && out_idx < 5 {
+                result[out_idx] = Some(*rule);
+                out_idx += 1;
+            }
+        }
+        result
     }
 
     /// Compute adaptive entropy threshold based on last rescue result.
@@ -430,10 +438,10 @@ impl SessionKnowledge {
 
     /// Approximate memory usage in bytes.
     pub fn memory_usage(&self) -> usize {
-        // RejectionInsight is approximately:
-        // position(8) + rule(1+7padding) + original_token(8) + attempted_token(8)
-        // + error_kind(1+7padding) + entropy(4) + accepted(1+7padding) ≈ ~48 bytes
-        self.count * 48 + std::mem::size_of::<Self>()
+        // RejectionInsight with optimal field packing:
+        // position(8) + original_token(8) + attempted_token(8) + entropy(4)
+        // + rule(1) + error_kind(1) + accepted(1) + padding(1) ≈ ~32 bytes
+        self.count * 32 + std::mem::size_of::<Self>()
     }
 }
 
@@ -469,7 +477,7 @@ mod tests {
         assert!(!k.should_skip_position(0));
         assert_eq!(k.success_rate(TokenRule::Digit), 0.5);
         assert_eq!(k.position_affinity(0), 0.0);
-        assert!(k.preferred_rules(0).is_empty());
+        assert!(k.preferred_rules(0).iter().all(|r| r.is_none()));
     }
 
     #[test]
@@ -544,8 +552,13 @@ mod tests {
         k.record(make_insight(0, TokenRule::Arithmetic, false));
 
         let preferred = k.preferred_rules(0);
-        assert!(!preferred.is_empty());
-        assert_eq!(preferred[0], TokenRule::Digit, "Digit should be preferred");
+        let has_preferred = preferred.iter().any(|r| r.is_some());
+        assert!(has_preferred, "should have at least one preferred rule");
+        assert_eq!(
+            preferred[0],
+            Some(TokenRule::Digit),
+            "Digit should be preferred"
+        );
     }
 
     #[test]

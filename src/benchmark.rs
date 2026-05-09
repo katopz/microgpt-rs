@@ -1663,8 +1663,8 @@ fn bench_ppot_resample(
             ));
         }
         let digit_support = TokenRule::Digit.support(vocab_size);
+        let mut temp_scratch = vec![0.0f32; vocab_size];
         for _ in 0..num_samples {
-            let mut temp_scratch = vec![0.0f32; vocab_size];
             std::hint::black_box(crate::speculative::ppot::ppot_resample_with_support(
                 &base_path,
                 &marginals,
@@ -1706,11 +1706,11 @@ fn bench_ppot_resample(
 
     // Benchmark: Support-constrained resample (Digit rule)
     let digit_support = TokenRule::Digit.support(vocab_size);
+    let mut temp_scratch = vec![0.0f32; vocab_size];
     let start = Instant::now();
     let mut total_samples_support = 0usize;
     for _ in 0..iters {
         for _ in 0..num_samples {
-            let mut temp_scratch = vec![0.0f32; vocab_size];
             std::hint::black_box(crate::speculative::ppot::ppot_resample_with_support(
                 &base_path,
                 &marginals,

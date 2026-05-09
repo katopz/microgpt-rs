@@ -45,13 +45,12 @@ fn sample_from_support(
     }
 
     // Build restricted distribution
+    // i is bounded by len = support.len().min(scratch.len()), so support[i] is safe.
+    // Only probs needs a bounds check (support tokens may exceed vocab).
     let mut sum = 0.0f32;
     for (i, slot) in scratch.iter_mut().enumerate().take(len) {
-        let p = support
-            .get(i)
-            .and_then(|&tok| probs.get(tok))
-            .copied()
-            .unwrap_or(0.0);
+        let tok = support[i];
+        let p = if tok < probs.len() { probs[tok] } else { 0.0 };
         *slot = p;
         sum += p;
     }
@@ -212,7 +211,12 @@ pub fn ppot_resample_multi_strategy(
     scratch: &mut [f32],
     rng: &mut Rng,
 ) -> Vec<Vec<usize>> {
+    // Pre-allocate all variants as copies of base_path (single bulk allocation).
+    // Resampling writes directly into each variant — no per-iteration to_vec().
     let mut variants = Vec::with_capacity(count);
+    for _ in 0..count {
+        variants.push(base_path.to_vec());
+    }
 
     // Build strategy sequence: preferred first, then cycle through STRATEGIES
     let mut strategy_iter = preferred
@@ -220,34 +224,35 @@ pub fn ppot_resample_multi_strategy(
         .chain(TokenRule::STRATEGIES.iter().cycle())
         .take(count);
 
-    for _ in 0..count {
+    for variant in variants.iter_mut() {
         let &rule = strategy_iter.next().unwrap_or(&TokenRule::All);
 
-        let variant = if matches!(rule, TokenRule::All) {
-            // Unrestricted: just use different-value constraint
-            ppot_resample_different_value(base_path, marginals, positions, scratch, rng)
+        if matches!(rule, TokenRule::All) {
+            // Unrestricted: different-value constraint, resample in-place
+            for &pos in positions {
+                if pos < marginals.len() && pos < variant.len() {
+                    variant[pos] =
+                        sample_different_value(marginals[pos], base_path[pos], scratch, rng);
+                }
+            }
         } else {
             // Constrained: resample within rule's cached support, different value
             let support = config.support_for(rule);
-            let mut result = base_path.to_vec();
             for &pos in positions {
-                if pos < marginals.len() && pos < result.len() {
+                if pos < marginals.len() && pos < variant.len() {
                     let probs = marginals[pos];
                     let original = base_path[pos];
                     // Reuse outer scratch (>= vocab_size >= support.len())
                     let candidate = sample_from_support(probs, support, scratch, rng);
                     // If same as original, try once more (simple retry)
-                    result[pos] = if candidate == original && support.len() > 1 {
+                    variant[pos] = if candidate == original && support.len() > 1 {
                         sample_from_support(probs, support, scratch, rng)
                     } else {
                         candidate
                     };
                 }
             }
-            result
-        };
-
-        variants.push(variant);
+        }
     }
 
     variants
@@ -381,7 +386,13 @@ pub fn ppot_rescue_adaptive(
     // 3. Get preferred rules from knowledge (if any)
     let preferred: Vec<TokenRule> = positions
         .first()
-        .map(|&pos| knowledge.preferred_rules(pos))
+        .map(|&pos| {
+            knowledge
+                .preferred_rules(pos)
+                .into_iter()
+                .flatten()
+                .collect()
+        })
         .unwrap_or_default();
 
     // 4. Generate multi-strategy variants
@@ -406,10 +417,6 @@ pub fn ppot_rescue_adaptive(
         .map(|&pos| super::entropy::token_entropy(marginals.get(pos).copied().unwrap_or(&[])))
         .collect();
 
-    // Collect insights for batch recording
-    let mut insights_buf: Vec<RejectionInsight> =
-        Vec::with_capacity(variants.len() * positions.len());
-
     for (idx, variant) in variants.iter().enumerate() {
         let accepted = is_path_valid(variant, pruner);
 
@@ -420,7 +427,7 @@ pub fn ppot_rescue_adaptive(
 
         for (pos_idx, &pos) in positions.iter().enumerate() {
             if pos < variant.len() {
-                insights_buf.push(RejectionInsight {
+                knowledge.record(RejectionInsight {
                     position: pos,
                     rule,
                     original_token: base_path.get(pos).copied().unwrap_or(0),
@@ -437,8 +444,6 @@ pub fn ppot_rescue_adaptive(
             valid_indices.push(idx);
         }
     }
-
-    knowledge.record_batch(insights_buf.into_iter());
 
     // 6. Select best variant
     match valid_variants.len() {
