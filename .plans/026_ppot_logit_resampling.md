@@ -62,7 +62,7 @@ The primary integration point is **post-DDTree rescue**: when speculative decodi
   - `pub ppot_enabled: bool` — default `false` (must opt-in)
   - Parse from existing config file format, backward compatible (missing fields use defaults)
 
-- [ ] **Task 7: Benchmarks** (`src/benchmark.rs`)
+- [x] **Task 7: Benchmarks** (`src/benchmark.rs`)
   - Benchmark: entropy calculation overhead (should be <1% of DFlash time)
   - Benchmark: PPoT resample throughput (samples/ms on CPU)
   - Benchmark: end-to-end speculative decoding with PPoT rescue vs without
@@ -90,7 +90,7 @@ The primary integration point is **post-DDTree rescue**: when speculative decodi
 | `src/speculative/mod.rs` | ✅ Add `pub mod ppot` (feature-gated) |
 | `Cargo.toml` | ✅ Add `[features] ppot = []` |
 | `README.md` | ✅ Add PPoT architecture section |
-| `src/benchmark.rs` | ⬜ Pending: add PPoT benchmarks (Task 7) |
+| `src/benchmark.rs` | ✅ Add PPoT benchmarks: entropy, resample, rescue (Task 7) |
 
 ---
 

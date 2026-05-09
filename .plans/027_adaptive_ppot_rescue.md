@@ -3,7 +3,7 @@
 **Branch:** `develop/feature/027_adaptive_ppot_rescue`
 **Depends on:** Plan 026 (PPoT Logit Resampling) — must be complete and benchmarked first
 **Research:** `.research/12_TRT_Test-time_Recursive_Thinking.md`
-**Status:** ✅ Mostly Complete (Task 7 benchmarks pending)
+**Status:** ✅ Complete
 
 ---
 
@@ -123,7 +123,7 @@ TRT proves three things we can apply at token level:
   - Add `adaptive_ppot: bool` config flag (default: true when ppot enabled)
   - Integration test: full speculative step with adaptive rescue
 
-- [ ] **Task 7: Benchmarks — before/after comparison** (`src/benchmark.rs`) — PENDING
+- [x] **Task 7: Benchmarks — before/after comparison** (`src/benchmark.rs`)
   - **Must run AFTER Plan 026 benchmarks are recorded**
   - Benchmark: adaptive rescue vs random rescue acceptance rate
   - Benchmark: adaptive rescue overhead (should match PPoT baseline ±2%)
@@ -151,7 +151,7 @@ TRT proves three things we can apply at token level:
 | `src/speculative/ppot/types.rs` | ✅ **Extend:** adaptive threshold fields in `PpotConfig` |
 | `src/speculative/ppot/mod.rs` | ✅ **Update:** re-export new types, wire adaptive API |
 | `src/speculative/step.rs` | ✅ API available, integration point wired via `ppot_rescue_adaptive()` |
-| `src/benchmark.rs` | ⬜ **Pending:** add Plan 027 benchmarks with 026 comparison (Task 7) |
+| `src/benchmark.rs` | ✅ **Added:** Plan 027 adaptive rescue benchmark with Plan 026 comparison (Task 7) |
 | `README.md` | ✅ **Update:** add Adaptive PPoT section |
 
 ---
