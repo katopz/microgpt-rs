@@ -96,9 +96,33 @@ The primary integration point is **post-DDTree rescue**: when speculative decodi
 
 ## Test Results
 
-78 PPoT-specific tests passing (all 242 total tests pass):
+78 PPoT-specific tests passing (320 total with `--features ppot`):
 - `types.rs`: 9 tests (TokenRule support sets, PpotConfig defaults, clamp)
 - `entropy.rs`: 11 tests (entropy values, position identification, boundary cases)
 - `resample.rs`: 19 tests (sampling, rescue, support constraint, different-value)
 - `knowledge.rs`: 14 tests (ring buffer eviction, success rate, adaptive threshold)
 - `rank.rs`: 25 tests (agreement counting, consistency ranking, best variant selection)
+
+---
+
+## Benchmark Results (bench/048, release, 50K iterations)
+
+| Method | μs/step | Throughput |
+|---|---|---|
+| PPoT Entropy (H calc) | 0.05 μs | 21.6M ops/s |
+| PPoT Resample (basic) | 0.05 μs | 18.9M samples/s |
+| PPoT Resample (diff-value) | 0.14 μs | 7.2M samples/s |
+| PPoT Resample (digit) | 0.08 μs | 12.2M samples/s |
+| PPoT Greedy Fallback | 1.88 μs | 532K steps/s |
+| PPoT Rescue (Plan 026) | 2.50 μs | 400K steps/s |
+| PPoT Adaptive (Plan 027) | 4.09 μs | 245K steps/s |
+
+### Overhead Analysis
+
+- Plan 026 rescue: **+0.62 μs** over greedy (1.88 → 2.50 μs) — only on rejection path
+- Plan 027 adaptive: **+2.21 μs** over greedy (1.88 → 4.09 μs) — only on rejection path
+- Entropy overhead: 0.05 μs for 8 steps = **2.7%** of DFlash time (1.90 μs)
+
+### Icache Note
+
+Enabling `--features ppot` adds 72 KB to binary (1.55 → 1.63 MB, +4.7%), causing 7–15% icache regression in unrelated benchmarks (DDTree, Speculative). This is expected binary bloat, not a bug. Zero regression when feature is disabled.

@@ -139,6 +139,38 @@ Always benchmark before AND after adding parallelism. If the serial version is f
 Parallel overhead: thread wake (~2μs) + work stealing (~3μs) + synchronization.
 If your total work is < 10μs, parallelism will make it slower.
 
+### Don't: Ignore binary bloat from feature flags
+
+Adding code behind a feature flag still affects the **entire binary** when enabled:
+- Larger binary → more icache misses → slower hot loops in unrelated code
+- Feature-gated code in the same crate affects code layout and branch prediction
+- 72 KB of PPoT code caused 7–15% regression in DDTree/Speculative/forward_raven
+
+```
+# Binary size impact
+No ppot:  1.55 MB  →  DDTree Build: 2.33 μs
+With ppot: 1.63 MB (+4.7%) →  DDTree Build: 2.66 μs (+14.2%)
+
+# These don't even CALL ppot code — pure icache displacement
+```
+
+**Mitigation:**
+- Isolate feature-gated benchmarks into separate binaries (`[[bin]]`) or test files
+- Compare `cargo run --release` (no feature) vs `cargo run --release --features X` on the same commit
+- Never compare across different thermal states — run back-to-back on the same binary session
+- If regressions appear only with the feature enabled and code is properly gated, it's binary bloat, not a bug
+
+### Don't: Compare benchmarks across different CPU thermal states
+
+Laptop CPUs throttle aggressively. A 30% regression may just be thermal:
+```
+# Same commit, same binary, different runs:
+Run 1 (cold CPU):  Transformer AR = 1.11 μs  (900K tok/s)
+Run 2 (warm CPU):  Transformer AR = 1.44 μs  (692K tok/s)  ← "regression" is just heat
+```
+
+**Always compare same-commit, back-to-back runs** to isolate feature impact from system noise.
+
 ## Profiling Template
 
 ```rust
@@ -168,13 +200,45 @@ fn prof_components() {
 
 ## Real-World Results (PPoT Plan 027)
 
+### Micro-optimizations (component-level, debug build)
+
 | Optimization | Before | After | Technique |
 |---|---|---|---|
 | Knowledge queries | 2.67 μs | 0.58 μs | Precomputed `[PositionStats; 16]` |
 | position_affinity | 0.75 μs | 0.04 μs | O(1) array lookup vs O(n) scan |
 | should_skip | 0.77 μs | 0.03 μs | O(1) accepted/rejected counters |
-| Multi-strategy gen | 8.05 μs | 5.33 μs | Cached support sets in config |
+| preferred_rules | 1.14 μs | 0.50 μs | Stack array `[Option<TokenRule>; 5]` vs Vec alloc |
+| Multi-strategy gen | 8.05 μs | 5.33 μs | Cached support sets + in-place resample |
 | Rank consistency | 7.42 μs | 6.10 μs | Chunked u64 compare (4-at-a-time) |
 | Rayon parallel rank | 6.10 μs | 39.2 μs | REMOVED — overhead dominates m≤16 |
+| RejectionInsight | 56 bytes | 32 bytes | Field reorder + `#[repr(u8)]` ErrorKind |
 | Plan 027 total (debug) | 88.6 μs | 75.9 μs | -14% overall |
-| Plan 027 total (release) | — | 4.5 μs | Only 2.6 μs over greedy baseline |
+| Plan 027 total (release) | — | 4.09 μs | Only 2.2 μs over greedy baseline |
+
+### Release benchmark (bench/048, 50K iterations)
+
+| Method | μs/step | Throughput |
+|---|---|---|
+| PPoT Entropy (H calc) | 0.05 μs | 21.6M ops/s |
+| PPoT Resample (basic) | 0.05 μs | 18.9M samples/s |
+| PPoT Resample (diff-value) | 0.14 μs | 7.2M samples/s |
+| PPoT Resample (digit) | 0.08 μs | 12.2M samples/s |
+| PPoT Greedy Fallback | 1.88 μs | 532K steps/s |
+| PPoT Rescue (Plan 026) | 2.50 μs | 400K steps/s |
+| PPoT Adaptive (Plan 027) | 4.09 μs | 245K steps/s |
+
+### Icache regression from feature flag (same commit, back-to-back)
+
+Binary: 1.55 MB → 1.63 MB (+4.7%) when `--features ppot` enabled.
+
+| Method | No-ppot μs | W/ ppot μs | Delta | Cause |
+|---|---|---|---|---|
+| DDTree Build | 2.33 | 2.66 | +14.2% | Icache displacement |
+| DDTree (no chain) | 2.31 | 2.65 | +14.7% | Icache displacement |
+| DDTree (chain-seed) | 2.19 | 2.49 | +13.7% | Icache displacement |
+| Spec (unconditioned) | 4.27 | 4.61 | +8.0% | Icache displacement |
+| forward (flat) | 0.82 | 0.85 | +3.7% | Noise |
+| DFlash | 1.89 | 1.90 | +0.5% | Unaffected |
+| Leviathan (Algorithm 1) | 10.22 | 10.32 | +1.0% | Unaffected |
+
+**Verdict:** Not a bug — expected cost of adding 72KB of feature-gated code. PPoT is opt-in. Zero regression when feature is disabled.
