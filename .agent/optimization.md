@@ -241,4 +241,40 @@ Binary: 1.55 MB → 1.63 MB (+4.7%) when `--features ppot` enabled.
 | DFlash | 1.89 | 1.90 | +0.5% | Unaffected |
 | Leviathan (Algorithm 1) | 10.22 | 10.32 | +1.0% | Unaffected |
 
-**Verdict:** Not a bug — expected cost of adding 72KB of feature-gated code. PPoT is opt-in. Zero regression when feature is disabled.
+**Verdict:** Not a bug — expected cost of adding 72KB of feature-gated code. PPoT is opt-in. Zero regression when feature disabled.
+
+## Remaining Opportunities (not yet implemented)
+
+These were found during full codebase scan but not yet applied:
+
+### 1. Separate PPoT benchmarks into `[[bin]]` to eliminate icache regression
+Current: PPoT benchmarks in `src/benchmark.rs` compile into main binary (1.63 MB).
+Better: Move to `examples/ppot_bench.rs` so main binary stays 1.55 MB.
+Saves: 7–15% on DDTree/Speculative when ppot feature enabled.
+
+### 2. `sample_from_support` — eliminate remaining branch
+Still has `if tok < probs.len()` per element. For known-valid support sets (cached via PpotConfig),
+all token IDs are guaranteed in-range. Use `unsafe get_unchecked` when support is pre-validated.
+Saves: ~1 branch per element in constrained resample.
+
+### 3. `ppot_rescue` (Plan 026) — doesn't use cached supports
+Calls `ppot_resample_different_value` which uses full vocab (no support constraint).
+Should accept `&PpotConfig` and use `config.support_for(rule)` when rule != All.
+Currently only Plan 027's `ppot_rescue_adaptive` benefits from cached supports.
+
+### 4. `is_path_valid` — calls `pruner.relevance()` per token (virtual dispatch)
+`dyn ScreeningPruner` forces dynamic dispatch on every token in every variant.
+For 10 variants × 8 tokens = 80 virtual calls per rescue.
+Could use enum dispatch or generic monomorphization, but would change public API.
+
+### 5. `rank_by_consistency` — still clones winner via `valid_variants[idx].clone()`
+In `select_best_variant`, the final step clones the winning variant.
+Could return index instead and let caller decide whether to clone.
+Would change `select_best_variant` return type from `Option<Vec<usize>>` to `Option<usize>`.
+
+### 6. `SessionKnowledge::insights()` iterator — complex cycle/skip logic
+Ring buffer iteration uses `.cycle().skip(start).take(count)` which creates iterator adapters.
+For the 64-entry ring buffer, a simple for-loop with modular index would be faster.
+Low priority — `insights()` is only used for debugging, not hot path.
+
+
