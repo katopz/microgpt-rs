@@ -16,13 +16,26 @@ use crate::speculative::{
     LeviathanVerifier, speculative_step_conditioned_with, speculative_step_rollback_with,
 };
 
+/// Benchmark category for grouping into separate graphs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BenchCategory {
+    /// Speculative decoding: accepted tok/s, μs/step
+    Speculative,
+    /// Tree/draft operations: builds/s or steps/s, μs/step
+    TreeBuild,
+    /// Infrastructure: KV cache, prefill, recall — steps/s, μs/step
+    Infrastructure,
+}
+
 /// Single benchmark result.
+#[derive(Clone)]
 pub struct BenchResult {
     pub label: String,
     pub throughput: f64,
     pub time_per_step_us: f64,
     pub avg_acceptance_len: f64,
     pub color: (u8, u8, u8),
+    pub category: BenchCategory,
 }
 
 /// Save benchmark results to numbered CSV (e.g. `bench/024_results.csv`).
@@ -212,6 +225,7 @@ fn bench_ar(
         time_per_step_us: elapsed.as_micros() as f64 / iters as f64,
         avg_acceptance_len: 1.0,
         color: (70, 130, 180),
+        category: BenchCategory::Speculative,
     }
 }
 
@@ -228,22 +242,21 @@ fn bench_dflash(
         dflash_predict_with(&mut sctx, draft_weights, draft_config, 0, 0);
     }
 
-    let mut total_draft_tokens = 0usize;
     let start = Instant::now();
     for _ in 0..iters {
         sctx.reset();
-        let steps = dflash_predict_with(&mut sctx, draft_weights, draft_config, 0, 0);
-        total_draft_tokens += steps;
+        let _steps = dflash_predict_with(&mut sctx, draft_weights, draft_config, 0, 0);
     }
     let elapsed = start.elapsed();
 
-    let tps = total_draft_tokens as f64 / elapsed.as_secs_f64();
+    let tps = iters as f64 / elapsed.as_secs_f64();
     BenchResult {
         label: "DFlash".into(),
         throughput: tps,
         time_per_step_us: elapsed.as_micros() as f64 / iters as f64,
         avg_acceptance_len: draft_config.draft_lookahead as f64,
         color: (255, 99, 71),
+        category: BenchCategory::TreeBuild,
     }
 }
 
@@ -279,6 +292,7 @@ fn bench_ddtree(
         time_per_step_us: elapsed.as_micros() as f64 / iters as f64,
         avg_acceptance_len: 0.0,
         color: (50, 205, 50),
+        category: BenchCategory::TreeBuild,
     }
 }
 
@@ -338,6 +352,7 @@ fn bench_wasm_vs_no_pruner(
             time_per_step_us: no_pruner_elapsed.as_micros() as f64 / iters as f64,
             avg_acceptance_len: 0.0,
             color: (100, 200, 100),
+            category: BenchCategory::TreeBuild,
         },
         BenchResult {
             label: format!("DDTree+WasmPruner({wasm_name})"),
@@ -345,6 +360,7 @@ fn bench_wasm_vs_no_pruner(
             time_per_step_us: wasm_elapsed.as_micros() as f64 / iters as f64,
             avg_acceptance_len: 0.0,
             color: (200, 100, 200),
+            category: BenchCategory::TreeBuild,
         },
     ]
 }
@@ -380,6 +396,7 @@ fn bench_speculative(
         time_per_step_us: elapsed.as_micros() as f64 / iters as f64,
         avg_acceptance_len: avg_accept,
         color: (255, 165, 0),
+        category: BenchCategory::Speculative,
     }
 }
 
@@ -427,6 +444,7 @@ fn bench_speculative_ar(
         time_per_step_us: elapsed.as_micros() as f64 / iters as f64,
         avg_acceptance_len: avg_accept,
         color: (255, 200, 0),
+        category: BenchCategory::Speculative,
     }
 }
 
@@ -540,6 +558,7 @@ pub fn bench_ddtree_chain_seed(
             time_per_step_us: elapsed_no_chain.as_micros() as f64 / iters as f64,
             avg_acceptance_len: total_nodes_no_chain as f64 / iters as f64,
             color: (50, 205, 50),
+            category: BenchCategory::TreeBuild,
         },
         BenchResult {
             label: "DDTree (chain-seed)".into(),
@@ -547,6 +566,7 @@ pub fn bench_ddtree_chain_seed(
             time_per_step_us: elapsed_chain.as_micros() as f64 / iters as f64,
             avg_acceptance_len: total_nodes_chain as f64 / iters as f64,
             color: (0, 200, 100),
+            category: BenchCategory::TreeBuild,
         },
     )
 }
@@ -613,6 +633,7 @@ pub fn bench_ddtree_screened(
             time_per_step_us: elapsed_noop.as_micros() as f64 / iters as f64,
             avg_acceptance_len: total_nodes_noop as f64 / iters as f64,
             color: (0, 191, 255),
+            category: BenchCategory::TreeBuild,
         },
         BenchResult {
             label: "DDTree (screened adapter)".into(),
@@ -620,6 +641,7 @@ pub fn bench_ddtree_screened(
             time_per_step_us: elapsed_adapter.as_micros() as f64 / iters as f64,
             avg_acceptance_len: total_nodes_adapter as f64 / iters as f64,
             color: (30, 144, 255),
+            category: BenchCategory::TreeBuild,
         },
     )
 }
@@ -666,6 +688,7 @@ pub fn bench_ddtree_budget_sweep(
             time_per_step_us: elapsed.as_micros() as f64 / iters as f64,
             avg_acceptance_len: total_nodes as f64 / iters as f64,
             color: (100, 149, 237),
+            category: BenchCategory::TreeBuild,
         });
 
         // Benchmark chain-seed
@@ -683,6 +706,7 @@ pub fn bench_ddtree_budget_sweep(
             time_per_step_us: elapsed.as_micros() as f64 / iters as f64,
             avg_acceptance_len: total_nodes as f64 / iters as f64,
             color: (60, 179, 113),
+            category: BenchCategory::TreeBuild,
         });
     }
 
@@ -723,6 +747,7 @@ fn bench_leviathan(
         time_per_step_us: elapsed.as_micros() as f64 / iters as f64,
         avg_acceptance_len: avg_accept,
         color: (148, 0, 211),
+        category: BenchCategory::Speculative,
     }
 }
 
@@ -773,6 +798,7 @@ fn bench_snapshot_rollback(
         time_per_step_us: elapsed_no_rb.as_micros() as f64 / iters as f64,
         avg_acceptance_len: total_no_rb as f64 / iters as f64,
         color: (180, 100, 220),
+        category: BenchCategory::Speculative,
     };
 
     // ── With rollback: speculative_step_rollback_with (zero-alloc, snapshots + restores) ──
@@ -834,6 +860,7 @@ fn bench_snapshot_rollback(
         time_per_step_us: elapsed_rb.as_micros() as f64 / iters as f64,
         avg_acceptance_len: total_rb as f64 / iters as f64,
         color: (220, 120, 180),
+        category: BenchCategory::Speculative,
     };
 
     (no_rollback, with_rollback)
@@ -887,6 +914,7 @@ fn bench_conditioned_vs_unconditioned(
         time_per_step_us: elapsed_uncond.as_micros() as f64 / iters as f64,
         avg_acceptance_len: total_uncond as f64 / iters as f64,
         color: (255, 140, 0),
+        category: BenchCategory::Speculative,
     };
 
     // ── Conditioned: target hidden state seeds draft KV cache (zero-alloc) ──
@@ -945,6 +973,7 @@ fn bench_conditioned_vs_unconditioned(
         time_per_step_us: elapsed_cond.as_micros() as f64 / iters as f64,
         avg_acceptance_len: total_cond as f64 / iters as f64,
         color: (0, 180, 180),
+        category: BenchCategory::Speculative,
     };
 
     (uncond, cond)
@@ -994,10 +1023,11 @@ fn bench_prefill_compression(
 
     let nocompress = BenchResult {
         label: "Prefill (no compress)".into(),
-        throughput: total_nocompress as f64 / elapsed_nocompress.as_secs_f64(),
+        throughput: iters as f64 / elapsed_nocompress.as_secs_f64(),
         time_per_step_us: elapsed_nocompress.as_micros() as f64 / iters as f64,
         avg_acceptance_len: total_nocompress as f64 / iters as f64,
         color: (180, 180, 180),
+        category: BenchCategory::Infrastructure,
     };
 
     // ── Compressed (keep_ratio=0.1) ──
@@ -1029,10 +1059,11 @@ fn bench_prefill_compression(
 
     let compress = BenchResult {
         label: "Prefill (compressed)".into(),
-        throughput: total_compress as f64 / elapsed_compress.as_secs_f64(),
+        throughput: iters as f64 / elapsed_compress.as_secs_f64(),
         time_per_step_us: elapsed_compress.as_micros() as f64 / iters as f64,
         avg_acceptance_len: total_compress as f64 / iters as f64,
         color: (0, 200, 100),
+        category: BenchCategory::Infrastructure,
     };
 
     (nocompress, compress)
@@ -1101,6 +1132,7 @@ pub fn bench_paged_vs_flat_cache(config: &Config) -> (BenchResult, BenchResult) 
         time_per_step_us: elapsed_flat.as_micros() as f64 / (iters as f64 * steps_per_iter),
         avg_acceptance_len: 0.0,
         color: (100, 149, 237),
+        category: BenchCategory::Infrastructure,
     };
 
     let paged_result = BenchResult {
@@ -1109,6 +1141,7 @@ pub fn bench_paged_vs_flat_cache(config: &Config) -> (BenchResult, BenchResult) 
         time_per_step_us: elapsed_paged.as_micros() as f64 / (iters as f64 * steps_per_iter),
         avg_acceptance_len: 0.0,
         color: (255, 165, 0),
+        category: BenchCategory::Infrastructure,
     };
 
     (flat_result, paged_result)
@@ -1188,6 +1221,7 @@ pub fn bench_raven_vs_flat_cache(_config: &Config) -> (BenchResult, BenchResult)
         time_per_step_us: elapsed_flat.as_micros() as f64 / (iters as f64 * steps_per_iter),
         avg_acceptance_len: 0.0,
         color: (100, 149, 237),
+        category: BenchCategory::Infrastructure,
     };
 
     let raven_br = BenchResult {
@@ -1196,6 +1230,7 @@ pub fn bench_raven_vs_flat_cache(_config: &Config) -> (BenchResult, BenchResult)
         time_per_step_us: elapsed_raven.as_micros() as f64 / (iters as f64 * steps_per_iter),
         avg_acceptance_len: 0.0,
         color: (180, 100, 220),
+        category: BenchCategory::Infrastructure,
     };
 
     (flat_br, raven_br)
@@ -1284,6 +1319,7 @@ pub fn bench_raven_recall(_config: &Config) -> BenchResult {
         time_per_step_us: elapsed.as_micros() as f64 / noise_steps as f64,
         avg_acceptance_len: recall_accuracy,
         color: (50, 205, 50),
+        category: BenchCategory::Infrastructure,
     }
 }
 

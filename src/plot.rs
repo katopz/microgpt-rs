@@ -4,7 +4,12 @@ use plotters::prelude::*;
 /// Plot benchmark results as a horizontal bar chart PNG.
 ///
 /// Each bar is colored per `BenchResult::color` with throughput + μs/step annotation.
-pub fn plot_results(results: &[BenchResult], path: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn plot_results(
+    results: &[BenchResult],
+    path: &str,
+    title: &str,
+    x_label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let n = results.len();
     if n == 0 {
         let root = BitMapBackend::new(path, (800, 200)).into_drawing_area();
@@ -38,10 +43,7 @@ pub fn plot_results(results: &[BenchResult], path: &str) -> Result<(), Box<dyn s
     let y_hi = n as f64 - 0.5;
 
     let mut chart = ChartBuilder::on(&root)
-        .caption(
-            "MicroGPT-RS Benchmark Results",
-            ("sans-serif", 22).into_font(),
-        )
+        .caption(title, ("sans-serif", 22).into_font())
         .margin(10)
         .y_label_area_size(200)
         .x_label_area_size(45)
@@ -58,7 +60,7 @@ pub fn plot_results(results: &[BenchResult], path: &str) -> Result<(), Box<dyn s
             }
         })
         .y_labels(n)
-        .x_desc("Throughput (ops/s)")
+        .x_desc(x_label)
         .x_label_style(("sans-serif", 11).into_font())
         .y_label_style(("sans-serif", 11).into_font())
         .draw()?;

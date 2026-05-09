@@ -4,7 +4,7 @@
 //! Separated from the main binary to avoid icache regression (72KB binary bloat
 //! causing 7-15% regression in unrelated DDTree benchmarks).
 
-use microgpt_rs::benchmark::BenchResult;
+use microgpt_rs::benchmark::{BenchCategory, BenchResult};
 use microgpt_rs::speculative::ppot::{
     PpotConfig, SessionKnowledge, TokenRule, identify_high_entropy_positions, ppot_resample,
     ppot_resample_different_value, ppot_resample_with_support, ppot_rescue, ppot_rescue_adaptive,
@@ -122,6 +122,7 @@ fn bench_ppot_entropy(
         time_per_step_us: elapsed.as_micros() as f64 / total_entropy_calls as f64,
         avg_acceptance_len: steps as f64,
         color: (148, 103, 189),
+        category: BenchCategory::Infrastructure,
     }
 }
 
@@ -260,6 +261,7 @@ fn bench_ppot_resample(
             time_per_step_us: elapsed_basic.as_micros() as f64 / total_samples_basic as f64,
             avg_acceptance_len: num_samples as f64,
             color: (188, 143, 143),
+            category: BenchCategory::Infrastructure,
         },
         BenchResult {
             label: "PPoT Resample (diff-value)".into(),
@@ -267,6 +269,7 @@ fn bench_ppot_resample(
             time_per_step_us: elapsed_diff.as_micros() as f64 / total_samples_diff as f64,
             avg_acceptance_len: num_samples as f64,
             color: (205, 133, 63),
+            category: BenchCategory::Infrastructure,
         },
         BenchResult {
             label: "PPoT Resample (digit)".into(),
@@ -274,6 +277,7 @@ fn bench_ppot_resample(
             time_per_step_us: elapsed_support.as_micros() as f64 / total_samples_support as f64,
             avg_acceptance_len: num_samples as f64,
             color: (210, 180, 140),
+            category: BenchCategory::Infrastructure,
         },
     )
 }
@@ -437,6 +441,7 @@ fn bench_ppot_rescue(
             time_per_step_us: elapsed_greedy.as_micros() as f64 / iters_f,
             avg_acceptance_len: 1.0, // greedy always returns 1 token
             color: (169, 169, 169),
+            category: BenchCategory::Infrastructure,
         },
         BenchResult {
             label: "PPoT Rescue (Plan 026)".into(),
@@ -444,6 +449,7 @@ fn bench_ppot_rescue(
             time_per_step_us: elapsed_ppot.as_micros() as f64 / iters_f,
             avg_acceptance_len: total_rescued_ppot as f64 / iters_f * num_samples as f64,
             color: (70, 130, 180),
+            category: BenchCategory::Infrastructure,
         },
         BenchResult {
             label: "PPoT Adaptive (Plan 027)".into(),
@@ -451,6 +457,7 @@ fn bench_ppot_rescue(
             time_per_step_us: elapsed_adaptive.as_micros() as f64 / iters_f,
             avg_acceptance_len: total_rescued_adaptive as f64 / iters_f * num_samples as f64,
             color: (100, 149, 237),
+            category: BenchCategory::Infrastructure,
         },
     )
 }
