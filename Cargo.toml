@@ -35,9 +35,10 @@ rest = ["reqwest", "tokio"]
 gpu = ["wgpu", "bytemuck", "pollster", "safetensors"]
 wasm = ["wasmtime", "wat"]
 sparse_mlp = []  # TwELL-inspired sparse MLP matmul (Plan 022)
+ppot = []  # PPoT logit-parameterized CPU resampling (Plan 026 + 027)
 router = ["wasm", "papaya"]
 embedding_router = ["router", "reqwest", "tokio"]
-full = ["sudoku", "validator", "rest", "gpu", "wasm", "router", "embedding_router"]
+full = ["sudoku", "validator", "rest", "gpu", "wasm", "router", "embedding_router", "ppot"]
 
 [[example]]
 name = "sudoku_speculative"
@@ -98,7 +99,5 @@ name = "embedding_router_demo"
 required-features = ["embedding_router"]
 
 [[example]]
-name = "bidirectional_prefill_demo"
-
-[[example]]
-name = "py2rs_hello"
+name = "ppot_bench"
+required-features = ["ppot"]

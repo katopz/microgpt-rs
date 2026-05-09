@@ -1,27 +1,28 @@
 commit,date,method,throughput,us_per_step,avg_accept_len
-a3c9ecf,2026-05-09T19:16:02,Transformer AR,747892,1.34,1.00
-a3c9ecf,2026-05-09T19:16:02,DFlash,4201637,1.90,8.00
-a3c9ecf,2026-05-09T19:16:02,DDTree Build,379608,2.63,0.00
-a3c9ecf,2026-05-09T19:16:02,Speculative (Simulated),1075133,4.65,5.00
-a3c9ecf,2026-05-09T19:16:02,Speculative (AR Draft),1534391,4.56,7.00
-a3c9ecf,2026-05-09T19:16:02,Leviathan (Algorithm 1),114494,10.30,1.18
-a3c9ecf,2026-05-09T19:16:02,Leviathan (no rollback),114358,10.31,1.18
-a3c9ecf,2026-05-09T19:16:02,Leviathan (w/ rollback),197697,5.94,1.18
-a3c9ecf,2026-05-09T19:16:02,Spec (unconditioned),1068998,4.68,5.00
-a3c9ecf,2026-05-09T19:16:02,Spec (conditioned),1143472,5.90,6.74
-a3c9ecf,2026-05-09T19:16:02,Prefill (no compress),19278100,3.32,64.00
-a3c9ecf,2026-05-09T19:16:02,Prefill (compressed),1958730,3.57,7.00
-a3c9ecf,2026-05-09T19:16:02,DDTree (no chain),372113,2.69,16.00
-a3c9ecf,2026-05-09T19:16:02,DDTree (chain-seed),398844,2.51,16.00
-a3c9ecf,2026-05-09T19:16:02,DDTree (screened R=1.0),307374,3.25,16.00
-a3c9ecf,2026-05-09T19:16:02,DDTree (screened adapter),308736,3.24,16.00
-a3c9ecf,2026-05-09T19:16:02,forward (flat),1189518,0.84,0.00
-a3c9ecf,2026-05-09T19:16:02,forward_paged,1001461,1.00,0.00
-a3c9ecf,2026-05-09T19:16:02,forward_raven (16 slots),1476696,0.68,0.00
-a3c9ecf,2026-05-09T19:16:02,raven_recall (1000 noise, slot 12=9.9→6.3 acc=63%),10169526,0.10,63.21
-a3c9ecf,2026-05-09T19:16:02,Prefill (causal seq),1143350,0.87,8.00
-a3c9ecf,2026-05-09T19:16:02,Prefill (bidirectional),1083043,0.92,8.00
-a3c9ecf,2026-05-09T19:16:02,Prefill (no LoRA),1083329,0.92,8.00
-a3c9ecf,2026-05-09T19:16:02,Prefill (w/ LoRA),891997,1.12,8.00
-a3c9ecf,2026-05-09T19:16:02,Generate (plain AR),1041103,7.68,8.00
-a3c9ecf,2026-05-09T19:16:02,Generate (prefill+LoRA),447480,17.88,8.00
+87eee98,2026-05-09T20:59:46,Transformer AR,692721,1.44,1.00
+87eee98,2026-05-09T20:59:46,DFlash,4212405,1.90,8.00
+87eee98,2026-05-09T20:59:46,DDTree Build,375299,2.66,0.00
+87eee98,2026-05-09T20:59:46,Speculative (Simulated),1067744,4.68,5.00
+87eee98,2026-05-09T20:59:46,Speculative (AR Draft),1527373,4.58,7.00
+87eee98,2026-05-09T20:59:46,Leviathan (Algorithm 1),114201,10.32,1.18
+87eee98,2026-05-09T20:59:46,Leviathan (no rollback),114056,10.34,1.18
+87eee98,2026-05-09T20:59:46,Leviathan (w/ rollback),198304,5.93,1.18
+87eee98,2026-05-09T20:59:46,Spec (unconditioned),1085078,4.61,5.00
+87eee98,2026-05-09T20:59:46,Spec (conditioned),1150977,5.86,6.74
+87eee98,2026-05-09T20:59:46,Prefill (no compress),19671925,3.25,64.00
+87eee98,2026-05-09T20:59:46,Prefill (compressed),1991125,3.52,7.00
+87eee98,2026-05-09T20:59:46,DDTree (no chain),376790,2.65,16.00
+87eee98,2026-05-09T20:59:46,DDTree (chain-seed),401373,2.49,16.00
+87eee98,2026-05-09T20:59:46,DDTree (screened R=1.0),308136,3.25,16.00
+87eee98,2026-05-09T20:59:46,DDTree (screened adapter),307424,3.25,16.00
+87eee98,2026-05-09T20:59:46,forward (flat),1181830,0.85,0.00
+87eee98,2026-05-09T20:59:46,forward_paged,1005446,0.99,0.00
+87eee98,2026-05-09T20:59:46,forward_raven (16 slots),1439496,0.69,0.00
+87eee98,2026-05-09T20:59:46,raven_recall (1000 noise, slot 12=9.9→6.3 acc=63%),10101010,0.10,63.21
+87eee98,2026-05-09T20:59:46,PPoT Entropy (H calc),21630098,0.05,8.00
+87eee98,2026-05-09T20:59:46,PPoT Resample (basic),18873771,0.05,10.00
+87eee98,2026-05-09T20:59:46,PPoT Resample (diff-value),7231699,0.14,10.00
+87eee98,2026-05-09T20:59:46,PPoT Resample (digit),12166042,0.08,10.00
+87eee98,2026-05-09T20:59:46,PPoT Greedy Fallback,532336,1.88,1.00
+87eee98,2026-05-09T20:59:46,PPoT Rescue (Plan 026),399577,2.50,10.00
+87eee98,2026-05-09T20:59:46,PPoT Adaptive (Plan 027),244670,4.09,10.00
