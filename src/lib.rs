@@ -26,3 +26,6 @@ pub mod gpu;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
+
+#[cfg(feature = "router")]
+pub mod router;

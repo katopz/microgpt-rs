@@ -144,6 +144,25 @@ pub trait SpeculativeVerifier: Send + Sync {
 
 `SimulatedVerifier` is fast (no target model). `LeviathanVerifier` is the full Algorithm 1 — mathematically proven distribution-preserving, but needs large model asymmetry to be faster than pure AR.
 
+### Prompt Router: Batch-Level Domain Routing (Plan 023)
+
+Inspired by [EMO: Pretraining Mixture of Experts for Emergent Modularity](https://arxiv.org/abs/2406.08732) — document-level routing constraints force experts to learn high-level semantic domains instead of syntax. We distill this pattern into a config-driven prompt router:
+
+1. **Classify once** — `KeywordRouter` scores the prompt against domain keywords (V1, ~80% accuracy; embedding-based V2 via anyrag is planned)
+2. **Select expert** — `ExpertRegistry` returns a `Box<dyn ScreeningPruner>` + optional LoRA path for the matched domain
+3. **Lock for generation** — the selected `ScreeningPruner` is passed to `build_dd_tree_screened()`, preventing domain drift
+
+```rust
+let router = KeywordRouter::new(config.domain.clone());
+let registry = ExpertRegistry::from_config(&config, pruner_dir);
+
+let decision = router.route("solve this sudoku puzzle");
+let expert = registry.get_expert(&decision.domain);
+// expert.pruner is locked for the entire DDTree generation
+```
+
+Domains are defined in `domains.toml` — curators add new experts without recompiling. WASM pruners are loaded and cached via `WasmPrunerCache`.
+
 ## 🧠 Deterministic Validator: Neuro-Symbolic Intercept
 
 The core idea: LLMs draft tokens from semantic probability, but can't natively enforce hard constraints. A deterministic rules engine sits between draft and verification:
@@ -611,6 +630,7 @@ cargo clippy --all-targets --all-features --quiet
 | `gpu` | `wgpu`, `bytemuck`, `pollster`, `safetensors` | wgpu context & buffers |
 | `wasm` | `wasmtime`, `wat` | WASM validator runtime (WasmPruner) |
 | `sparse_mlp` | — | TwELL-inspired sparse MLP matmul (Plan 022) |
+| `router` | `wasm` | Prompt router + expert registry (Plan 023) |
 | `full` | all above (except leviathan, always on) | Enable all features |
 
 Build with `--features <flag>` or `--all-features`.
@@ -679,6 +699,7 @@ src/
   validator/        SynPruner + partial parser ‡
   gpu/              wgpu context & buffers §
   rest/             REST module ¶
+  router/           Prompt router + expert registry (Plan 023): KeywordRouter, ExpertRegistry, WasmPrunerCache, PromptRouter trait ◊
   wasm/             WasmPruner (ConstraintPruner + ScreeningPruner), WASM runtime (abi, state, wasmtime loader, EXPORT_RELEVANCE) †
   percepta.rs       Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
                     Sudoku9x9, SymbolicValidator, StreamingSolver, SolveEvent
@@ -689,12 +710,14 @@ src/
   ‡ behind --features validator
   § behind --features gpu
   ¶ behind --features rest
+  ◊ behind --features router
   † behind --features wasm
 examples/
   raven_recall.rs        Raven RSM demo: frozen slots, O(1) scaling, memory footprint comparison
   sudoku_9x9.rs          Streaming solver with "thinking" output + hull compression stats *
   sudoku_speculative.rs  3-column DDTree comparison: Unpruned / Static-Only / Path-Aware *
   sudoku_tui.rs          Ratatui TUI: real-time grid visualization + speculative mode *
+  router_demo.rs         Prompt router demo: classify prompts, select expert bundles ◊
 tests/
   integration.rs  80 integration tests (adversarial + DFA + arithmetic + backtracking + geometry
                   + Sudoku9x9 + SymbolicValidator + StreamingSolver)
@@ -717,4 +740,5 @@ bench/
 - [Cross-Family Speculative Prefill](https://arxiv.org/abs/2603.02631) — Liu et al., ICLR 2026 (importance scoring, prompt compression)
 - [FlashPrefill](https://arxiv.org/abs/2603.06199) — Fan et al., 2026 (block-sparse drafter attention)
 - [Raven: High-Recall Sequence Modeling with Sparse Memory Routing](https://github.com/goombalab/raven) — Afzal, Bick, Xing, Cevher, Gu, 2025 (sparse Top-K slot routing, 99.4% recall at 16K context)
+- [EMO: Pretraining Mixture of Experts for Emergent Modularity](https://arxiv.org/abs/2406.08732) — Tang et al., 2024 (document-level routing → modular semantic experts)
 - [Hazy Research Megakernel](https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles) — Intelligence Per Watt methodology
