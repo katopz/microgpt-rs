@@ -1,7 +1,7 @@
 # Plan 029: Agentic Streaming Lessons from NVIDIA Dynamo
 
 > Source: [Streaming Tokens and Tools: Multi-Turn Agentic Harness Support in NVIDIA Dynamo](https://developer.nvidia.com/blog/streaming-tokens-and-tools-multi-turn-agentic-harness-support-in-nvidia-dynamo/)
-> Research: `.research/001_nvidia_dynamo_agentic_lessons.md`
+> Research: `.research/13_nvidia_dynamo_agentic_lessons.md`
 
 ## Tasks
 
