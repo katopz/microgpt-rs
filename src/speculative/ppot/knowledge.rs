@@ -57,6 +57,26 @@ pub enum ErrorKind {
     Unknown,
 }
 
+/// Maximum number of tracked positions for precomputed stats.
+/// Covers speculative lookahead (positions 0–15).
+const MAX_POSITIONS: usize = 16;
+
+/// Precomputed per-position statistics for O(1) lookups.
+///
+/// Updated on every [`record`](SessionKnowledge::record) call. When insights
+/// are evicted from the ring buffer, the corresponding counters are decremented.
+#[derive(Clone, Debug, Default)]
+struct PositionStats {
+    /// Number of accepted insights at this position.
+    accepted: usize,
+    /// Number of rejected insights at this position.
+    rejected: usize,
+    /// Per-rule success counts at this position, indexed by `TokenRule::index()`.
+    rule_success: [usize; 5],
+    /// Per-rule failure counts at this position, indexed by `TokenRule::index()`.
+    rule_fail: [usize; 5],
+}
+
 // ── Session Knowledge ──────────────────────────────────────────
 
 /// Bounded ring buffer of rejection insights for adaptive PPoT rescue.
@@ -100,6 +120,8 @@ pub struct SessionKnowledge {
     fail_count_by_rule: [usize; 5],
     /// Last rescue result: was it a success?
     last_rescue_success: Option<bool>,
+    /// Precomputed per-position statistics for O(1) lookups.
+    position_stats: [PositionStats; MAX_POSITIONS],
 }
 
 impl SessionKnowledge {
@@ -113,6 +135,7 @@ impl SessionKnowledge {
             success_count_by_rule: [0; 5],
             fail_count_by_rule: [0; 5],
             last_rescue_success: None,
+            position_stats: Default::default(),
         }
     }
 
@@ -133,17 +156,32 @@ impl SessionKnowledge {
     pub fn record(&mut self, insight: RejectionInsight) {
         let rule_idx = insight.rule.index();
         let accepted = insight.accepted;
+        let position = insight.position;
 
         // If buffer is full, evict oldest and adjust counters
         if self.count >= self.max_insights {
             if let Some(evicted) = self.insights.get(self.write_pos) {
                 let evicted_rule_idx = evicted.rule.index();
+                let evicted_position = evicted.position;
                 if evicted.accepted {
                     self.success_count_by_rule[evicted_rule_idx] =
                         self.success_count_by_rule[evicted_rule_idx].saturating_sub(1);
                 } else {
                     self.fail_count_by_rule[evicted_rule_idx] =
                         self.fail_count_by_rule[evicted_rule_idx].saturating_sub(1);
+                }
+                // Evict from position stats
+                if evicted_position < MAX_POSITIONS {
+                    let ps = &mut self.position_stats[evicted_position];
+                    if evicted.accepted {
+                        ps.accepted = ps.accepted.saturating_sub(1);
+                        ps.rule_success[evicted_rule_idx] =
+                            ps.rule_success[evicted_rule_idx].saturating_sub(1);
+                    } else {
+                        ps.rejected = ps.rejected.saturating_sub(1);
+                        ps.rule_fail[evicted_rule_idx] =
+                            ps.rule_fail[evicted_rule_idx].saturating_sub(1);
+                    }
                 }
             }
             // Overwrite at write position
@@ -162,10 +200,33 @@ impl SessionKnowledge {
             self.fail_count_by_rule[rule_idx] += 1;
         }
 
+        // Update position stats for new insight
+        if position < MAX_POSITIONS {
+            let ps = &mut self.position_stats[position];
+            if accepted {
+                ps.accepted += 1;
+                ps.rule_success[rule_idx] += 1;
+            } else {
+                ps.rejected += 1;
+                ps.rule_fail[rule_idx] += 1;
+            }
+        }
+
         // Advance write cursor
         self.write_pos = (self.write_pos + 1) % self.max_insights.max(1);
         if self.count < self.max_insights {
             self.count += 1;
+        }
+    }
+
+    /// Record a batch of rejection insights in one call.
+    ///
+    /// Thin wrapper that calls [`record`](Self::record) for each insight.
+    /// Useful when collecting insights into a buffer before recording
+    /// (avoids interleaving knowledge queries with writes).
+    pub fn record_batch(&mut self, insights: impl Iterator<Item = RejectionInsight>) {
+        for insight in insights {
+            self.record(insight);
         }
     }
 
@@ -207,22 +268,31 @@ impl SessionKnowledge {
     /// Returns the fraction of accepted insights at this position.
     /// Returns 0.0 (neutral, no priority) when no insights exist for the position.
     pub fn position_affinity(&self, position: usize) -> f32 {
-        let mut accepted = 0usize;
-        let mut total = 0usize;
-
-        for insight in &self.insights {
-            if insight.position == position {
-                total += 1;
-                if insight.accepted {
-                    accepted += 1;
+        if position < MAX_POSITIONS {
+            let stats = &self.position_stats[position];
+            let total = stats.accepted + stats.rejected;
+            if total == 0 {
+                0.0 // no data: neutral priority
+            } else {
+                stats.accepted as f32 / total as f32
+            }
+        } else {
+            // Fallback for out-of-range positions
+            let mut accepted = 0usize;
+            let mut total = 0usize;
+            for insight in &self.insights {
+                if insight.position == position {
+                    total += 1;
+                    if insight.accepted {
+                        accepted += 1;
+                    }
                 }
             }
-        }
-
-        if total == 0 {
-            0.0 // no data: neutral priority
-        } else {
-            accepted as f32 / total as f32
+            if total == 0 {
+                0.0
+            } else {
+                accepted as f32 / total as f32
+            }
         }
     }
 
@@ -243,21 +313,27 @@ impl SessionKnowledge {
         position: usize,
         min_failures: usize,
     ) -> bool {
-        let mut consecutive_fails = 0usize;
-        let mut has_success = false;
-
-        for insight in &self.insights {
-            if insight.position == position {
-                if insight.accepted {
-                    has_success = true;
-                    consecutive_fails = 0;
-                } else {
-                    consecutive_fails += 1;
+        if position < MAX_POSITIONS {
+            // When no accepted insights exist, all failures are consecutive.
+            // When any accepted insight exists, we never skip regardless.
+            let stats = &self.position_stats[position];
+            stats.accepted == 0 && stats.rejected >= min_failures
+        } else {
+            // Fallback for out-of-range positions
+            let mut consecutive_fails = 0usize;
+            let mut has_success = false;
+            for insight in &self.insights {
+                if insight.position == position {
+                    if insight.accepted {
+                        has_success = true;
+                        consecutive_fails = 0;
+                    } else {
+                        consecutive_fails += 1;
+                    }
                 }
             }
+            !has_success && consecutive_fails >= min_failures
         }
-
-        !has_success && consecutive_fails >= min_failures
     }
 
     /// Preferred rules for a position, sorted by success rate descending.
@@ -274,14 +350,22 @@ impl SessionKnowledge {
             (TokenRule::All, 0.0),
         ];
 
-        // Count successes and failures per rule at this position
-        for insight in &self.insights {
-            if insight.position == position {
-                let idx = insight.rule.index();
-                if insight.accepted {
-                    rule_stats[idx].1 += 1.0;
-                } else {
-                    rule_stats[idx].1 -= 0.1; // penalty for failure
+        if position < MAX_POSITIONS {
+            // O(1) from precomputed per-position stats
+            let stats = &self.position_stats[position];
+            for (i, entry) in rule_stats.iter_mut().enumerate() {
+                entry.1 = stats.rule_success[i] as f32 - stats.rule_fail[i] as f32 * 0.1;
+            }
+        } else {
+            // Fallback for out-of-range positions: O(n) scan
+            for insight in &self.insights {
+                if insight.position == position {
+                    let idx = insight.rule.index();
+                    if insight.accepted {
+                        rule_stats[idx].1 += 1.0;
+                    } else {
+                        rule_stats[idx].1 -= 0.1;
+                    }
                 }
             }
         }
@@ -327,6 +411,7 @@ impl SessionKnowledge {
         self.success_count_by_rule = [0; 5];
         self.fail_count_by_rule = [0; 5];
         self.last_rescue_success = None;
+        self.position_stats = Default::default();
     }
 
     /// Get an iterator over current insights (most recent first).
@@ -504,12 +589,10 @@ mod tests {
     #[test]
     fn test_knowledge_adaptive_threshold_clamped() {
         let mut k = SessionKnowledge::new(64);
-        let config = PpotConfig {
-            entropy_threshold: 0.95,
-            threshold_raise_on_success: 0.2,
-            entropy_threshold_max: 1.0,
-            ..PpotConfig::default()
-        };
+        let mut config = PpotConfig::default();
+        config.entropy_threshold = 0.95;
+        config.threshold_raise_on_success = 0.2;
+        config.entropy_threshold_max = 1.0;
 
         k.record_rescue_result(true);
         let threshold = k.adaptive_threshold(&config);
@@ -539,7 +622,8 @@ mod tests {
     #[test]
     fn test_knowledge_memory_usage() {
         let mut k = SessionKnowledge::new(64);
-        assert!(k.memory_usage() < 1024, "empty knowledge should be < 1KB");
+        // [PositionStats; 16] index adds ~1.5KB to struct size
+        assert!(k.memory_usage() < 3072, "empty knowledge should be < 3KB");
 
         for i in 0..64 {
             k.record(make_insight(i, TokenRule::Digit, i % 2 == 0));

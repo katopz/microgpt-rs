@@ -199,17 +199,19 @@ pub fn ppot_resample_different_value(
 /// If `preferred` is non-empty, those rules are tried first before cycling.
 /// Each variant uses the different-value constraint to avoid reproducing the base path.
 ///
+/// `config` provides pre-cached support sets via [`PpotConfig::with_cached_support`].
 /// `scratch` must be `>= vocab_size`.
+#[allow(clippy::too_many_arguments)]
 pub fn ppot_resample_multi_strategy(
     base_path: &[usize],
     marginals: &[&[f32]],
     positions: &[usize],
     count: usize,
     preferred: &[TokenRule],
+    config: &PpotConfig,
     scratch: &mut [f32],
     rng: &mut Rng,
 ) -> Vec<Vec<usize>> {
-    let vocab_size = marginals.first().map(|m| m.len()).unwrap_or(0);
     let mut variants = Vec::with_capacity(count);
 
     // Build strategy sequence: preferred first, then cycle through STRATEGIES
@@ -225,20 +227,18 @@ pub fn ppot_resample_multi_strategy(
             // Unrestricted: just use different-value constraint
             ppot_resample_different_value(base_path, marginals, positions, scratch, rng)
         } else {
-            // Constrained: resample within rule's support, different value
-            let support = rule.support(vocab_size);
+            // Constrained: resample within rule's cached support, different value
+            let support = config.support_for(rule);
             let mut result = base_path.to_vec();
             for &pos in positions {
                 if pos < marginals.len() && pos < result.len() {
                     let probs = marginals[pos];
                     let original = base_path[pos];
-                    // Combine support constraint with different-value:
-                    // sample from support, but prefer different from original
-                    let mut temp_scratch = vec![0.0f32; support.len().max(probs.len())];
-                    let candidate = sample_from_support(probs, &support, &mut temp_scratch, rng);
+                    // Reuse outer scratch (>= vocab_size >= support.len())
+                    let candidate = sample_from_support(probs, support, scratch, rng);
                     // If same as original, try once more (simple retry)
                     result[pos] = if candidate == original && support.len() > 1 {
-                        sample_from_support(probs, &support, &mut temp_scratch, rng)
+                        sample_from_support(probs, support, scratch, rng)
                     } else {
                         candidate
                     };
@@ -391,6 +391,7 @@ pub fn ppot_rescue_adaptive(
         &positions,
         config.num_samples,
         &preferred,
+        config,
         scratch,
         rng,
     );
@@ -399,26 +400,33 @@ pub fn ppot_rescue_adaptive(
     let mut valid_variants = Vec::new();
     let mut valid_indices = Vec::new();
 
+    // Pre-compute entropy per position (once, not per-sample-per-position)
+    let entropy_cache: Vec<f32> = positions
+        .iter()
+        .map(|&pos| super::entropy::token_entropy(marginals.get(pos).copied().unwrap_or(&[])))
+        .collect();
+
+    // Collect insights for batch recording
+    let mut insights_buf: Vec<RejectionInsight> =
+        Vec::with_capacity(variants.len() * positions.len());
+
     for (idx, variant) in variants.iter().enumerate() {
         let accepted = is_path_valid(variant, pruner);
 
-        // Record insight for each attempt
         let rule = TokenRule::STRATEGIES
             .get(idx % TokenRule::STRATEGIES.len())
             .copied()
             .unwrap_or(TokenRule::All);
 
-        for &pos in &positions {
+        for (pos_idx, &pos) in positions.iter().enumerate() {
             if pos < variant.len() {
-                let entropy =
-                    super::entropy::token_entropy(marginals.get(pos).copied().unwrap_or(&[]));
-                knowledge.record(RejectionInsight {
+                insights_buf.push(RejectionInsight {
                     position: pos,
                     rule,
                     original_token: base_path.get(pos).copied().unwrap_or(0),
                     attempted_token: variant[pos],
                     error_kind: None,
-                    entropy,
+                    entropy: entropy_cache[pos_idx],
                     accepted,
                 });
             }
@@ -429,6 +437,8 @@ pub fn ppot_rescue_adaptive(
             valid_indices.push(idx);
         }
     }
+
+    knowledge.record_batch(insights_buf.into_iter());
 
     // 6. Select best variant
     match valid_variants.len() {
@@ -652,13 +662,11 @@ mod tests {
             &[0.25, 0.25, 0.25, 0.25], // position 2
         ];
 
-        let config = PpotConfig {
-            enabled: true,
-            entropy_threshold: 0.1, // low threshold → all positions are candidates
-            num_samples: 20,
-            different_constraint: true,
-            ..PpotConfig::default()
-        };
+        let mut config = PpotConfig::default();
+        config.enabled = true;
+        config.entropy_threshold = 0.1; // low threshold → all positions are candidates
+        config.num_samples = 20;
+        config.different_constraint = true;
 
         let mut scratch = vec![0.0f32; 4];
         let result = ppot_rescue(
@@ -684,11 +692,9 @@ mod tests {
             &[0.01, 0.99], // near-deterministic
         ];
 
-        let config = PpotConfig {
-            enabled: true,
-            entropy_threshold: 2.0, // very high → no positions qualify
-            ..PpotConfig::default()
-        };
+        let mut config = PpotConfig::default();
+        config.enabled = true;
+        config.entropy_threshold = 2.0; // very high → no positions qualify
 
         let mut scratch = vec![0.0f32; 4];
         let result = ppot_rescue(
@@ -751,12 +757,10 @@ mod tests {
             &[0.25, 0.25, 0.25, 0.25],
         ];
 
-        let config = PpotConfig {
-            enabled: true,
-            entropy_threshold: 0.1,
-            num_samples: 5,
-            ..PpotConfig::default()
-        };
+        let mut config = PpotConfig::default();
+        config.enabled = true;
+        config.entropy_threshold = 0.1;
+        config.num_samples = 5;
 
         let mut scratch = vec![0.0f32; 4];
         let result = ppot_rescue(
@@ -800,6 +804,7 @@ mod tests {
             &[0.25, 0.25, 0.25, 0.25],
         ];
         let mut scratch = vec![0.0f32; 4];
+        let config = PpotConfig::default().with_cached_support(4);
 
         let variants = ppot_resample_multi_strategy(
             &base_path,
@@ -807,6 +812,7 @@ mod tests {
             &[0, 1, 2],
             5,
             &[],
+            &config,
             &mut scratch,
             &mut rng,
         );
@@ -827,6 +833,7 @@ mod tests {
             &[0.25, 0.25, 0.25, 0.25],
         ];
         let mut scratch = vec![0.0f32; 4];
+        let config = PpotConfig::default().with_cached_support(4);
 
         let preferred = vec![TokenRule::Digit, TokenRule::Arithmetic];
         let variants = ppot_resample_multi_strategy(
@@ -835,6 +842,7 @@ mod tests {
             &[0, 1, 2],
             3,
             &preferred,
+            &config,
             &mut scratch,
             &mut rng,
         );

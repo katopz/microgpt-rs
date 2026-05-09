@@ -181,6 +181,10 @@ pub struct PpotConfig {
     pub max_insights: usize,
     /// Whether adaptive rescue is enabled (requires PPoT enabled).
     pub adaptive_enabled: bool,
+
+    /// Pre-computed support sets for each TokenRule, indexed by `TokenRule::index()`.
+    /// Built once from `vocab_size`, avoids realloc per sample.
+    cached_support: Option<Box<[Vec<usize>; 5]>>,
 }
 
 impl Default for PpotConfig {
@@ -199,6 +203,7 @@ impl Default for PpotConfig {
             threshold_raise_on_success: 0.05,
             max_insights: 64,
             adaptive_enabled: true,
+            cached_support: None,
         }
     }
 }
@@ -227,6 +232,34 @@ impl PpotConfig {
     #[inline]
     pub fn clamp_threshold(&self, threshold: f32) -> f32 {
         threshold.clamp(self.entropy_threshold_min, self.entropy_threshold_max)
+    }
+
+    /// Pre-compute and cache support sets for all 5 `TokenRule` variants.
+    ///
+    /// Call once after setting `enabled = true`. Avoids `rule.support(vocab_size)`
+    /// allocating a new `Vec<usize>` on every resampling call.
+    pub fn with_cached_support(mut self, vocab_size: usize) -> Self {
+        let arr: [Vec<usize>; 5] = [
+            TokenRule::Digit.support(vocab_size),
+            TokenRule::Compare.support(vocab_size),
+            TokenRule::Arithmetic.support(vocab_size),
+            TokenRule::Augment.support(vocab_size),
+            TokenRule::All.support(vocab_size),
+        ];
+        self.cached_support = Some(Box::new(arr));
+        self
+    }
+
+    /// Return the cached support set for `rule`.
+    ///
+    /// **Panics** if [`with_cached_support`] was not called before this method.
+    /// Zero-allocation hot path — returns a slice into the pre-computed array.
+    #[inline]
+    pub fn support_for(&self, rule: TokenRule) -> &[usize] {
+        self.cached_support
+            .as_ref()
+            .expect("PpotConfig::support_for called before with_cached_support")[rule.index()]
+        .as_slice()
     }
 }
 

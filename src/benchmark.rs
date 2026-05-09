@@ -1774,9 +1774,9 @@ fn bench_ppot_rescue(
     let mut rng = Rng::new(99);
     let mut sctx = SpeculativeContext::new(draft_config);
 
-    let ppot_config = PpotConfig::for_char_level();
-    let num_samples = ppot_config.num_samples;
     let vocab_size = draft_config.vocab_size;
+    let ppot_config = PpotConfig::for_char_level().with_cached_support(vocab_size);
+    let num_samples = ppot_config.num_samples;
 
     // Pre-generate marginals for reproducibility
     sctx.reset();
