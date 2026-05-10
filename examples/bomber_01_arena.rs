@@ -14,7 +14,7 @@ use microgpt_rs::pruners::bomber::{
 
 // ── Config ─────────────────────────────────────────────────────
 
-const ROUNDS: usize = 10;
+const ROUNDS: usize = 100;
 const TICK_LIMIT: u32 = 200;
 
 // ── Main ───────────────────────────────────────────────────────
