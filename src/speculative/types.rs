@@ -81,8 +81,7 @@ pub trait ScreeningPruner: Send + Sync {
 ///
 /// Use this to pass a `ConstraintPruner` where a `ScreeningPruner` is expected.
 /// We use an explicit adapter instead of a blanket impl to avoid conflicts
-/// with types that implement `ConstraintPruner` but need a custom `ScreeningPruner`
-/// (e.g., `WasmPruner` which uses the WASM `relevance` export when available).
+/// with types that implement `ConstraintPruner` but need a custom `ScreeningPruner`.
 pub struct BinaryScreeningPruner<P>(pub P);
 
 impl<P: ConstraintPruner + Send + Sync> ScreeningPruner for BinaryScreeningPruner<P> {

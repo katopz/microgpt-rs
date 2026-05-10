@@ -255,7 +255,7 @@ Rust Docs ──┐
 GitHub ────┼──► CorpusIngester ──► TrainingFilter ──► JSONL
 Crates.io ─┘    (walk+dedup)       (syn+cargo check)    (training data)
                                                           │
-                                                    GPU LoRA Training (Plan 008 wgpu)
+                                                    LoRA Training (riir-burner → riir-gpu)
                                                           │
                                                     lora.bin
                                                           │

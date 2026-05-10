@@ -9,7 +9,7 @@ A from-scratch Rust implementation of a GPT-2 style transformer with speculative
 - CPU-first inference engine with zero-allocation hot paths
 - Speculative decoding pipeline (DDTree + DFlash + Leviathan verification)
 - Domain-specific constraint pruning (Sudoku, Rust AST via Validator)
-- GPU LoRA training via wgpu (WASM-compatible)
+- BPE tokenizer + SynPruner for Rust syntax validation
 - Sub-millisecond inference on Apple Silicon
 
 ## Current Capabilities
@@ -38,16 +38,12 @@ src/
 │   ├── dd_tree.rs            # DDTree build (best-first + chain-seed), TreeBuilder
 │   ├── dflash.rs             # DFlash predict (marginal, AR, parallel, conditioned)
 │   ├── verifier.rs           # SpeculativeVerifier trait, SimulatedVerifier, LeviathanVerifier
-│   ├── step.rs               # High-level step functions (speculative_step, rollback, conditioned, REST)
+│   ├── step.rs               # High-level step functions (speculative_step, rollback, conditioned)
 │   ├── prefill.rs            # Speculative prefill scoring + prompt compression
 │   └── sudoku_pruner.rs      # SudokuPruner (behind "sudoku" feature)
-├── rest/                     # REST bridge to anyrag (behind "rest" feature)
-│   ├── mod.rs
-│   ├── client.rs
-│   └── types.rs
-├── tokenizer/                # BPE tokenizer (behind "validator" feature, planned)
-├── validator/                # Deterministic validation pruner (behind "validator" feature, planned)
-└── gpu/                      # wgpu LoRA training (behind "gpu" feature, planned)
+├── tokenizer/                # BPE tokenizer (behind "validator" feature)
+├── validator/                # SynPruner + PartialParser (behind "validator" feature)
+└── ppot/                     # PPoT CPU resampling (behind "ppot" feature)
 ```
 
 ## Feature Flags
@@ -56,11 +52,10 @@ src/
 [features]
 default = []
 sudoku = []                         # SudokuPruner + sudoku examples
-validator = []                      # BPE tokenizer + SynPruner (planned: will add "syn" dep)
-rest = ["reqwest", "tokio"]         # REST bridge to anyrag
-training = []                       # Training mode (planned: will add "serde", "serde_json")
-gpu = []                            # wgpu LoRA training (planned: will add "wgpu", "bytemuck", "pollster", "safetensors")
-full = ["sudoku", "validator", "training", "gpu"]
+validator = ["syn", "proc-macro2"]  # BPE tokenizer + SynPruner
+sparse_mlp = []                     # TwELL-inspired sparse MLP matmul
+ppot = []                           # PPoT logit-parameterized CPU resampling
+full = ["sudoku", "validator", "sparse_mlp", "ppot"]
 ```
 
 ## Quick Start
@@ -71,6 +66,8 @@ cargo run --release                          # Run benchmark suite (includes Lev
 cargo run --example sudoku_9x9 --features sudoku               # Sudoku streaming solver
 cargo run --example sudoku_speculative --features sudoku       # DDTree pruning demo
 cargo run --example sudoku_tui --features sudoku               # TUI visualization
+cargo run --example validator_demo --features validator        # SynPruner + DDTree pipeline
+cargo run --example py2rs_hello                                 # BPE + bidirectional prefill demo
 ```
 
 ## Config Presets
@@ -117,9 +114,9 @@ cargo run --example sudoku_tui --features sudoku               # TUI visualizati
 │  └──────────────┘    └──────────────────────────────┘  │
 │                                                         │
 │  ┌──────────────┐    ┌──────────────────────────────┐  │
-│  │  Percepta     │    │        REST Bridge            │  │
-│  │  (Sudoku      │    │  (anyrag integration,         │  │
-│  │   solvers)    │    │   feature-gated)              │  │
+│  │  Percepta     │    │       Validator / BPE          │  │
+│  │  (Sudoku      │    │  (SynPruner, PartialParser,    │  │
+│  │   solvers)    │    │   BPE tokenizer)               │  │
 │  └──────────────┘    └──────────────────────────────┘  │
 │                                                         │
 └─────────────────────────────────────────────────────────┘
@@ -136,10 +133,10 @@ cargo run --example sudoku_tui --features sudoku               # TUI visualizati
 | 05 | `05_speculative_module_refactor.md` | Speculative module design |
 | 06 | `06_sudoku_tui.md` | TUI visualization |
 | 07 | `07_compiler_in_the_loop_validator.md` | Validator compiler-in-the-loop |
-| 08 | `08_wgpu_lora_training.md` | GPU LoRA training |
-| 09 | `09_rest_speculative_decoding.md` | REST speculative decoding |
-| 10 | `10_multilayer_transformer.md` | Multi-layer transformer |
-| 11 | `11_systems_optimization.md` | Systems-level optimization |
-| 12 | `12_lucebox_distill.md` | LuceBox distillation |
-| 13 | `13_zero_alloc_rayon.md` | Zero-allocation Rayon patterns |
-| 14 | `14_lucebox_optimizations.md` | LuceBox optimizations |
+| 08 | `08_lucebox_techniques.md` | LuceBox techniques |
+| 09 | — | *(GPU training docs moved to riir-ai)* |
+| 10 | `06_validator.md` | Constraint validator + SynPruner |
+| 11 | `04_performance.md` | Performance engineering |
+| 12 | `05_sudoku.md` | Sudoku solvers |
+| 13 | `02_architecture.md` | Architecture details |
+| 14 | `03_speculative_decoding.md` | Speculative decoding deep-dive |
