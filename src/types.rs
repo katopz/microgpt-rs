@@ -701,7 +701,7 @@ impl LoraAdapter {
         Ok(adapters)
     }
 
-    /// Load LoRA adapters from a WASM-compatible binary format.
+    /// Load LoRA adapters from a compact binary format.
     ///
     /// Format:
     /// ```text
@@ -720,16 +720,16 @@ impl LoraAdapter {
     /// ```
     ///
     /// Alpha defaults to `rank * 2`.
-    pub fn load_from_wasm_binary(path: &std::path::Path) -> Result<Vec<Self>, String> {
-        const WASM_MAGIC: &[u8; 4] = b"LORA";
-        const WASM_VERSION: u8 = 1;
+    pub fn load_from_bin(path: &std::path::Path) -> Result<Vec<Self>, String> {
+        const LORA_MAGIC: &[u8; 4] = b"LORA";
+        const LORA_VERSION: u8 = 1;
 
         let file_data =
-            std::fs::read(path).map_err(|e| format!("Failed to read wasm lora file: {e}"))?;
+            std::fs::read(path).map_err(|e| format!("Failed to read lora bin file: {e}"))?;
 
         // Minimum: magic(4) + version(1) + rank(2) + n_layers(2) + n_targets(2) + hash(32) = 43
         if file_data.len() < 43 {
-            return Err("File too small for wasm lora header".into());
+            return Err("File too small for lora bin header".into());
         }
 
         // Validate blake3 checksum — last 32 bytes cover everything before them
@@ -737,21 +737,21 @@ impl LoraAdapter {
         let stored_checksum = &file_data[data_len..];
         let computed = blake3::hash(&file_data[..data_len]);
         if computed.as_bytes() != stored_checksum {
-            return Err("WASM LoRA file checksum mismatch".into());
+            return Err("LoRA bin file checksum mismatch".into());
         }
 
         let mut offset = 0usize;
 
         // Magic
-        if &file_data[offset..offset + 4] != WASM_MAGIC {
-            return Err("Invalid wasm lora magic bytes".into());
+        if &file_data[offset..offset + 4] != LORA_MAGIC {
+            return Err("Invalid lora bin magic bytes".into());
         }
         offset += 4;
 
         // Version
         let version = file_data[offset];
-        if version != WASM_VERSION {
-            return Err(format!("Unsupported wasm lora version: {version}"));
+        if version != LORA_VERSION {
+            return Err(format!("Unsupported lora bin version: {version}"));
         }
         offset += 1;
 
@@ -765,7 +765,7 @@ impl LoraAdapter {
         let n_targets = read_u16_le(&file_data, &mut offset)? as usize;
 
         if n_layers == 0 || n_targets == 0 {
-            return Err("No layers or targets in wasm lora file".into());
+            return Err("No layers or targets in lora bin file".into());
         }
 
         // TARGET_IDS
@@ -837,7 +837,7 @@ impl LoraAdapter {
         }
 
         if adapters.is_empty() {
-            return Err("No adapters loaded from wasm lora file".into());
+            return Err("No adapters loaded from lora bin file".into());
         }
 
         Ok(adapters)

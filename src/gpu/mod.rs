@@ -33,7 +33,7 @@ pub use forward::{GpuActivationBuffers, GpuForwardPass, GpuWeightBuffers};
 pub use kernels::GpuPipelines;
 #[cfg(feature = "gpu")]
 pub use lora::{
-    GpuLoraBuffers, export_lora, load_lora, load_lora_from_safetensors, load_lora_from_wasm_binary,
+    GpuLoraBuffers, export_lora, load_lora, load_lora_from_bin, load_lora_from_safetensors,
 };
 #[cfg(feature = "gpu")]
 pub use loss::GpuLoss;

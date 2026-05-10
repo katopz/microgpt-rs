@@ -528,9 +528,9 @@ pub fn load_lora_from_safetensors(
     })
 }
 
-// ── WASM binary loader ────────────────────────────────────────────
+// ── Compact binary loader ─────────────────────────────────────────
 
-/// Load LoRA adapters from a WASM binary format and upload to GPU.
+/// Load LoRA adapters from a compact binary format and upload to GPU.
 ///
 /// Format:
 /// ```text
@@ -546,19 +546,19 @@ pub fn load_lora_from_safetensors(
 /// ]
 /// [BLAKE3_HASH: 32 bytes]
 /// ```
-pub fn load_lora_from_wasm_binary(
+pub fn load_lora_from_bin(
     device: &Device,
     queue: &Queue,
     path: &Path,
     alpha: f32,
 ) -> Result<GpuLoraBuffers, GpuError> {
     let file_data = std::fs::read(path)
-        .map_err(|e| GpuError::BufferError(format!("Failed to read wasm lora file: {e}")))?;
+        .map_err(|e| GpuError::BufferError(format!("Failed to read lora bin file: {e}")))?;
 
     // Minimum: magic(4) + version(1) + rank(2) + n_layers(2) + n_targets(2) + hash(32) = 43
     if file_data.len() < 43 {
         return Err(GpuError::BufferError(
-            "File too small for wasm lora header".into(),
+            "File too small for lora bin header".into(),
         ));
     }
 
@@ -568,15 +568,13 @@ pub fn load_lora_from_wasm_binary(
     let computed = blake3::hash(&file_data[..hash_offset]);
     if computed.as_bytes() != stored_hash {
         return Err(GpuError::BufferError(
-            "WASM LoRA file checksum mismatch".into(),
+            "LoRA bin file checksum mismatch".into(),
         ));
     }
 
     // Validate magic
     if &file_data[0..4] != LORA_MAGIC {
-        return Err(GpuError::BufferError(
-            "Invalid wasm lora magic bytes".into(),
-        ));
+        return Err(GpuError::BufferError("Invalid lora bin magic bytes".into()));
     }
 
     let data = &file_data[..hash_offset];
@@ -586,7 +584,7 @@ pub fn load_lora_from_wasm_binary(
     offset += 1;
     if version != 1 {
         return Err(GpuError::BufferError(format!(
-            "Unsupported wasm lora version: {version}"
+            "Unsupported lora bin version: {version}"
         )));
     }
 
