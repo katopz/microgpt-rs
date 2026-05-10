@@ -212,8 +212,21 @@ fn is_safe_action(
             !in_blast_zone(target, &future_bombs)
         }
         BomberAction::Bomb => {
-            // Must have escape route
-            has_escape_route(grid, pos, (pos.x, pos.y), DEFAULT_BLAST_RANGE)
+            // Player stands ON the bomb but moves away next tick — check escape
+            // from each adjacent cell (mirrors should_place_bomb logic).
+            [(0i32, -1), (0, 1), (-1, 0), (1, 0)]
+                .iter()
+                .any(|&(dx, dy)| {
+                    let nx = pos.x + dx;
+                    let ny = pos.y + dy;
+                    grid.is_walkable(nx, ny)
+                        && has_escape_route(
+                            grid,
+                            GridPos { x: nx, y: ny },
+                            (pos.x, pos.y),
+                            DEFAULT_BLAST_RANGE,
+                        )
+                })
         }
         BomberAction::Wait => {
             // Waiting is only safe if not in blast zone
@@ -317,6 +330,8 @@ fn heuristic_score(
 enum AiState {
     /// Walking in a direction. Pick new direction when blocked.
     Explore { dir: BomberAction },
+    /// Actively pathfinding toward a destructible wall to bomb it.
+    Hunt { target: (i32, i32) },
     /// Escaping blast zone toward nearest safe cell.
     Flee,
 }
@@ -504,6 +519,99 @@ fn should_place_bomb(grid: &ArenaGrid, pos: GridPos, bombs: &[((i32, i32), u32)]
     })
 }
 
+/// BFS: find nearest destructible wall reachable from `pos`.
+/// Prefers `PowerUpHidden` walls over plain `DestructibleWall`.
+fn find_nearest_wall(grid: &ArenaGrid, pos: GridPos) -> Option<(i32, i32)> {
+    use std::collections::{HashSet, VecDeque};
+
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+
+    queue.push_back((pos.x, pos.y));
+    visited.insert((pos.x, pos.y));
+
+    while let Some((cx, cy)) = queue.pop_front() {
+        // Check neighbors for destructible walls (prefer powerups)
+        let mut powerup_wall = None;
+        let mut normal_wall = None;
+
+        for (dx, dy) in [(0i32, -1), (0, 1), (-1, 0), (1, 0)] {
+            match grid.get(cx + dx, cy + dy) {
+                super::Cell::PowerUpHidden(_) if powerup_wall.is_none() => {
+                    powerup_wall = Some((cx + dx, cy + dy));
+                }
+                super::Cell::DestructibleWall if normal_wall.is_none() => {
+                    normal_wall = Some((cx + dx, cy + dy));
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(w) = powerup_wall {
+            return Some(w);
+        }
+        if let Some(w) = normal_wall {
+            return Some(w);
+        }
+
+        for (nx, ny) in [(cx, cy - 1), (cx, cy + 1), (cx - 1, cy), (cx + 1, cy)] {
+            if visited.insert((nx, ny)) && grid.is_walkable(nx, ny) {
+                queue.push_back((nx, ny));
+            }
+        }
+    }
+
+    None
+}
+
+/// BFS: find first step toward any walkable cell adjacent to `wall`.
+fn step_toward_wall(grid: &ArenaGrid, from: GridPos, wall: (i32, i32)) -> Option<BomberAction> {
+    let dx = (from.x - wall.0).abs();
+    let dy = (from.y - wall.1).abs();
+    if dx + dy <= 1 {
+        return None; // Already adjacent
+    }
+
+    use std::collections::{HashMap, VecDeque};
+
+    let mut queue: VecDeque<(i32, i32)> = VecDeque::new();
+    let mut parent: HashMap<(i32, i32), (i32, i32)> = HashMap::new();
+
+    queue.push_back((from.x, from.y));
+    parent.insert((from.x, from.y), (from.x, from.y));
+
+    while let Some((cx, cy)) = queue.pop_front() {
+        // Is this cell adjacent to the target wall?
+        let cdx = (cx - wall.0).abs();
+        let cdy = (cy - wall.1).abs();
+        if cdx + cdy == 1 {
+            // Trace back to first step
+            let mut step = (cx, cy);
+            while parent[&step] != (from.x, from.y) {
+                step = parent[&step];
+            }
+            let sdx = step.0 - from.x;
+            let sdy = step.1 - from.y;
+            return match (sdx, sdy) {
+                (0, -1) => Some(BomberAction::Up),
+                (0, 1) => Some(BomberAction::Down),
+                (-1, 0) => Some(BomberAction::Left),
+                (1, 0) => Some(BomberAction::Right),
+                _ => None,
+            };
+        }
+
+        for (nx, ny) in [(cx, cy - 1), (cx, cy + 1), (cx - 1, cy), (cx + 1, cy)] {
+            if !parent.contains_key(&(nx, ny)) && grid.is_walkable(nx, ny) {
+                parent.insert((nx, ny), (cx, cy));
+                queue.push_back((nx, ny));
+            }
+        }
+    }
+
+    None
+}
+
 // ── P1: Random ─────────────────────────────────────────────────
 
 /// P1: Modelless baseline — uniform random action selection.
@@ -602,15 +710,39 @@ impl BomberPlayer for GreedyPlayer {
 
         if in_danger {
             self.state = AiState::Flee;
-        } else if self.state == AiState::Flee {
-            // Was fleeing, now safe → pick explore direction
-            self.state = AiState::Explore {
-                dir: pick_explore_dir(grid, pos, None, &self.known_bombs, rng),
-            };
+        } else {
+            match self.state {
+                AiState::Flee => {
+                    // Safe now → hunt a wall or explore
+                    if let Some(wall) = find_nearest_wall(grid, pos) {
+                        self.state = AiState::Hunt { target: wall };
+                    } else {
+                        self.state = AiState::Explore {
+                            dir: pick_explore_dir(grid, pos, None, &self.known_bombs, rng),
+                        };
+                    }
+                }
+                AiState::Hunt { target } => {
+                    // Target destroyed? Find new one
+                    if !matches!(
+                        grid.get(target.0, target.1),
+                        super::Cell::DestructibleWall | super::Cell::PowerUpHidden(_)
+                    ) {
+                        if let Some(wall) = find_nearest_wall(grid, pos) {
+                            self.state = AiState::Hunt { target: wall };
+                        } else {
+                            self.state = AiState::Explore {
+                                dir: pick_explore_dir(grid, pos, None, &self.known_bombs, rng),
+                            };
+                        }
+                    }
+                }
+                AiState::Explore { .. } => {}
+            }
         }
 
-        // 20% random exploration (only when safe)
-        if !in_danger && rng.f32() < 0.2 {
+        // 20% random exploration (only when safe and not hunting)
+        if !in_danger && rng.f32() < 0.2 && !matches!(self.state, AiState::Hunt { .. }) {
             let idx = rng.usize(0..ACTION_COUNT);
             let action = index_to_action(idx);
             let target = move_target(&action, pos);
@@ -641,6 +773,27 @@ impl BomberPlayer for GreedyPlayer {
                 }
                 BomberAction::Wait
             }
+            AiState::Hunt { target } => {
+                // Adjacent to target? Bomb it
+                let adj = (pos.x - target.0).abs() + (pos.y - target.1).abs();
+                if adj == 1 && should_place_bomb(grid, pos, &self.known_bombs) {
+                    self.known_bombs.push(((pos.x, pos.y), DEFAULT_BLAST_RANGE));
+                    self.state = AiState::Flee;
+                    return BomberAction::Bomb;
+                }
+                // Walk toward target
+                match step_toward_wall(grid, pos, target) {
+                    Some(step) if !in_blast_zone(move_target(&step, pos), &self.known_bombs) => {
+                        step
+                    }
+                    _ => {
+                        // Unreachable or unsafe → explore
+                        let new_dir = pick_explore_dir(grid, pos, None, &self.known_bombs, rng);
+                        self.state = AiState::Explore { dir: new_dir };
+                        new_dir
+                    }
+                }
+            }
             AiState::Explore { dir } => {
                 // Bomb opportunity — always bomb when conditions are met
                 if should_place_bomb(grid, pos, &self.known_bombs) {
@@ -662,6 +815,11 @@ impl BomberPlayer for GreedyPlayer {
                 {
                     dir
                 } else {
+                    // Blocked → try hunt, else new direction
+                    if let Some(wall) = find_nearest_wall(grid, pos) {
+                        self.state = AiState::Hunt { target: wall };
+                        return step_toward_wall(grid, pos, wall).unwrap_or(BomberAction::Wait);
+                    }
                     let new_dir = pick_explore_dir(grid, pos, Some(dir), &self.known_bombs, rng);
                     self.state = AiState::Explore { dir: new_dir };
                     new_dir
@@ -731,10 +889,33 @@ impl BomberPlayer for ValidatorPlayer {
 
         if in_danger {
             self.state = AiState::Flee;
-        } else if self.state == AiState::Flee {
-            self.state = AiState::Explore {
-                dir: pick_explore_dir(grid, pos, None, &self.known_bombs, rng),
-            };
+        } else {
+            match self.state {
+                AiState::Flee => {
+                    if let Some(wall) = find_nearest_wall(grid, pos) {
+                        self.state = AiState::Hunt { target: wall };
+                    } else {
+                        self.state = AiState::Explore {
+                            dir: pick_explore_dir(grid, pos, None, &self.known_bombs, rng),
+                        };
+                    }
+                }
+                AiState::Hunt { target } => {
+                    if !matches!(
+                        grid.get(target.0, target.1),
+                        super::Cell::DestructibleWall | super::Cell::PowerUpHidden(_)
+                    ) {
+                        if let Some(wall) = find_nearest_wall(grid, pos) {
+                            self.state = AiState::Hunt { target: wall };
+                        } else {
+                            self.state = AiState::Explore {
+                                dir: pick_explore_dir(grid, pos, None, &self.known_bombs, rng),
+                            };
+                        }
+                    }
+                }
+                AiState::Explore { .. } => {}
+            }
         }
 
         // ── Execute: state machine picks action ──
@@ -746,6 +927,25 @@ impl BomberPlayer for ValidatorPlayer {
                     step
                 } else {
                     BomberAction::Wait
+                }
+            }
+            AiState::Hunt { target } => {
+                let adj = (pos.x - target.0).abs() + (pos.y - target.1).abs();
+                if adj == 1 && should_place_bomb(grid, pos, &self.known_bombs) {
+                    BomberAction::Bomb
+                } else {
+                    match step_toward_wall(grid, pos, target) {
+                        Some(step)
+                            if !in_blast_zone(move_target(&step, pos), &self.known_bombs) =>
+                        {
+                            step
+                        }
+                        _ => {
+                            let new_dir = pick_explore_dir(grid, pos, None, &self.known_bombs, rng);
+                            self.state = AiState::Explore { dir: new_dir };
+                            new_dir
+                        }
+                    }
                 }
             }
             AiState::Explore { dir } => {
@@ -766,10 +966,16 @@ impl BomberPlayer for ValidatorPlayer {
                     {
                         dir
                     } else {
-                        let new_dir =
-                            pick_explore_dir(grid, pos, Some(dir), &self.known_bombs, rng);
-                        self.state = AiState::Explore { dir: new_dir };
-                        new_dir
+                        // Blocked → try hunt, else new direction
+                        if let Some(wall) = find_nearest_wall(grid, pos) {
+                            self.state = AiState::Hunt { target: wall };
+                            step_toward_wall(grid, pos, wall).unwrap_or(BomberAction::Wait)
+                        } else {
+                            let new_dir =
+                                pick_explore_dir(grid, pos, Some(dir), &self.known_bombs, rng);
+                            self.state = AiState::Explore { dir: new_dir };
+                            new_dir
+                        }
                     }
                 }
             }
@@ -782,7 +988,10 @@ impl BomberPlayer for ValidatorPlayer {
                 | BomberAction::Down
                 | BomberAction::Left
                 | BomberAction::Right => {
-                    self.state = AiState::Explore { dir: action };
+                    // Preserve Hunt state during pathfinding; update dir for Explore
+                    if !matches!(self.state, AiState::Hunt { .. }) {
+                        self.state = AiState::Explore { dir: action };
+                    }
                 }
                 BomberAction::Bomb => {
                     self.known_bombs.push(((pos.x, pos.y), DEFAULT_BLAST_RANGE));
