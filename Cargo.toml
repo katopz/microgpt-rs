@@ -85,7 +85,13 @@ required-features = ["validator"]
 name = "bandit_demo"
 required-features = ["bandit"]
 
+[[example]]
+name = "bandit_ddtree_demo"
+required-features = ["bandit"]
 
+[[example]]
+name = "game_resolver_demo"
+required-features = ["bandit"]
 
 [[example]]
 name = "ppot_bench"
