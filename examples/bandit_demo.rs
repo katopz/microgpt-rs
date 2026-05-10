@@ -4,6 +4,48 @@
 //! Compares convergence speed, cumulative regret, and final Q-value accuracy.
 //!
 //! Run: `cargo run --example bandit_demo --features bandit`
+//!
+//! # ⚠️ What This Proves vs What It Doesn't
+//!
+//! This demo is a **standalone RL textbook exercise** — pure math + RNG, no LLM, no corpus.
+//! It uses `BernoulliEnv::pull(arm, rng)` (a coin flip) instead of real speculative decoding.
+//!
+//! ## ✅ What This Proves
+//!
+//! - **Trait compatibility**: `BanditPruner<P>` implements `ScreeningPruner`,
+//!   so it *can* plug into `build_dd_tree_screened()`. The glue is real.
+//! - **Bandit math is correct**: UCB1, ε-greedy, Thompson Sampling all converge
+//!   to the optimal arm. 25 unit tests in `src/pruners/bandit.rs` verify this.
+//! - **Action masking works**: `BlockedArmPruner` returning `relevance = 0.0`
+//!   → bandit score overridden → arm never pulled. The constrained demo proves this.
+//!
+//! ## ❌ What This Does NOT Prove
+//!
+//! - **Better tree quality** — would need real marginals from a draft model
+//! - **Better accept rate** — would need real verification from a target model
+//! - **Actual speedup** — would need the full speculative decoding pipeline
+//!
+//! ## Why DDTree + Speculative Decoding Is NOT Active Here
+//!
+//! The missing link is **reward signal from real verification**.
+//! The full pipeline would need:
+//!
+//! ```text
+//! 1. Draft model → marginals (log-prob distributions per position)
+//! 2. build_dd_tree_screened(marginals, &bandit_pruner) → tree
+//!    → BanditPruner.relevance(depth, token_idx, parents) scores each branch
+//!    → blended = ln(P_draft) + ln(R_bandit)
+//! 3. Target model verifies the best path
+//! 4. ACCEPTED tokens → reward = 1.0, REJECTED → reward = 0.0
+//! 5. bandit_pruner.update(accepted_token, reward)
+//! 6. Next episode: bandit learned which tokens/branches verify well
+//! ```
+//!
+//! Steps 1, 3, 4 require a **real transformer model** (draft + target).
+//! This demo replaces all of that with `BernoulliEnv::pull()` — a coin flip.
+//!
+//! **This is a proof of mechanical compatibility, not a proof of value.**
+//! The bridge exists but no traffic has crossed it yet.
 
 use microgpt_rs::pruners::{BanditEnv, BanditPruner, BanditSession, BanditStrategy, BernoulliEnv};
 use microgpt_rs::speculative::ScreeningPruner;
