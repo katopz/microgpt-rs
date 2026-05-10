@@ -340,16 +340,42 @@ fn is_reverse(action: BomberAction, prev: Option<BomberAction>) -> bool {
     )
 }
 
-/// Pick a new exploration direction. Avoids reversing when possible.
+/// Pick a new exploration direction. Avoids blast zones and reversing when possible.
 fn pick_explore_dir(
     grid: &ArenaGrid,
     pos: GridPos,
     prev_dir: Option<BomberAction>,
+    bombs: &[((i32, i32), u32)],
     rng: &mut Rng,
 ) -> BomberAction {
     use BomberAction::{Down, Left, Right, Up};
     let dirs = [Up, Down, Left, Right];
 
+    // Prefer: walkable AND not in blast zone
+    let safe: Vec<BomberAction> = dirs
+        .iter()
+        .filter(|&&d| {
+            let t = move_target(&d, pos);
+            grid.is_walkable(t.x, t.y) && !in_blast_zone(t, bombs)
+        })
+        .copied()
+        .collect();
+
+    if !safe.is_empty() {
+        let preferred: Vec<BomberAction> = safe
+            .iter()
+            .filter(|&&d| !is_reverse(d, prev_dir))
+            .copied()
+            .collect();
+        let candidates = if preferred.is_empty() {
+            &safe
+        } else {
+            &preferred
+        };
+        return candidates[rng.usize(0..candidates.len())];
+    }
+
+    // No safe direction — fall back to any walkable
     let valid: Vec<BomberAction> = dirs
         .iter()
         .filter(|&&d| {
@@ -362,20 +388,7 @@ fn pick_explore_dir(
     if valid.is_empty() {
         return BomberAction::Wait;
     }
-
-    // Prefer non-reversing
-    let preferred: Vec<BomberAction> = valid
-        .iter()
-        .filter(|&&d| !is_reverse(d, prev_dir))
-        .copied()
-        .collect();
-
-    let candidates = if preferred.is_empty() {
-        &valid
-    } else {
-        &preferred
-    };
-    candidates[rng.usize(0..candidates.len())]
+    valid[rng.usize(0..valid.len())]
 }
 
 /// BFS: find nearest cell outside any bomb blast zone.
@@ -450,6 +463,9 @@ fn next_step_toward(grid: &ArenaGrid, from: GridPos, to: (i32, i32)) -> Option<B
 }
 
 /// Check if player should place a bomb at current position.
+///
+/// The player stands ON the bomb but moves away next tick, so escape is
+/// checked from adjacent cells — not from the bomb position itself.
 fn should_place_bomb(grid: &ArenaGrid, pos: GridPos, bombs: &[((i32, i32), u32)]) -> bool {
     // Don't place if there's already a bomb here
     if bombs.iter().any(|(p, _)| p.0 == pos.x && p.1 == pos.y) {
@@ -467,7 +483,25 @@ fn should_place_bomb(grid: &ArenaGrid, pos: GridPos, bombs: &[((i32, i32), u32)]
         })
         .count();
 
-    wall_count > 0 && has_escape_route(grid, pos, (pos.x, pos.y), DEFAULT_BLAST_RANGE)
+    if wall_count == 0 {
+        return false;
+    }
+
+    // Player will move to an adjacent cell next tick (1 step used).
+    // From that cell, has_escape_route checks if safety is reachable within
+    // max_steps (3) — total 4 steps matches BOMB_FUSE_TICKS.
+    let neighbors = [(0i32, -1), (0, 1), (-1, 0), (1, 0)];
+    neighbors.iter().any(|&(dx, dy)| {
+        let nx = pos.x + dx;
+        let ny = pos.y + dy;
+        grid.is_walkable(nx, ny)
+            && has_escape_route(
+                grid,
+                GridPos { x: nx, y: ny },
+                (pos.x, pos.y),
+                DEFAULT_BLAST_RANGE,
+            )
+    })
 }
 
 // ── P1: Random ─────────────────────────────────────────────────
@@ -571,7 +605,7 @@ impl BomberPlayer for GreedyPlayer {
         } else if self.state == AiState::Flee {
             // Was fleeing, now safe → pick explore direction
             self.state = AiState::Explore {
-                dir: pick_explore_dir(grid, pos, None, rng),
+                dir: pick_explore_dir(grid, pos, None, &self.known_bombs, rng),
             };
         }
 
@@ -608,12 +642,14 @@ impl BomberPlayer for GreedyPlayer {
                 BomberAction::Wait
             }
             AiState::Explore { dir } => {
-                // Bomb opportunity
-                if should_place_bomb(grid, pos, &self.known_bombs) && rng.f32() < 0.3 {
+                // Bomb opportunity — always bomb when conditions are met
+                if should_place_bomb(grid, pos, &self.known_bombs) {
+                    self.known_bombs.push(((pos.x, pos.y), DEFAULT_BLAST_RANGE));
+                    self.state = AiState::Flee;
                     return BomberAction::Bomb;
                 }
 
-                // Continue direction or pick new one if blocked
+                // Continue direction if walkable AND safe from blasts
                 let target = move_target(&dir, pos);
                 if matches!(
                     dir,
@@ -622,10 +658,11 @@ impl BomberPlayer for GreedyPlayer {
                         | BomberAction::Left
                         | BomberAction::Right
                 ) && grid.is_walkable(target.x, target.y)
+                    && !in_blast_zone(target, &self.known_bombs)
                 {
                     dir
                 } else {
-                    let new_dir = pick_explore_dir(grid, pos, None, rng);
+                    let new_dir = pick_explore_dir(grid, pos, Some(dir), &self.known_bombs, rng);
                     self.state = AiState::Explore { dir: new_dir };
                     new_dir
                 }
@@ -696,7 +733,7 @@ impl BomberPlayer for ValidatorPlayer {
             self.state = AiState::Flee;
         } else if self.state == AiState::Flee {
             self.state = AiState::Explore {
-                dir: pick_explore_dir(grid, pos, None, rng),
+                dir: pick_explore_dir(grid, pos, None, &self.known_bombs, rng),
             };
         }
 
@@ -712,11 +749,11 @@ impl BomberPlayer for ValidatorPlayer {
                 }
             }
             AiState::Explore { dir } => {
-                // Bomb opportunity (validated below)
+                // Bomb opportunity (safety validated below)
                 if should_place_bomb(grid, pos, &self.known_bombs) {
                     BomberAction::Bomb
                 } else {
-                    // Continue direction or pick new one
+                    // Continue direction if walkable AND safe from blasts
                     let target = move_target(&dir, pos);
                     if matches!(
                         dir,
@@ -725,10 +762,12 @@ impl BomberPlayer for ValidatorPlayer {
                             | BomberAction::Left
                             | BomberAction::Right
                     ) && grid.is_walkable(target.x, target.y)
+                        && !in_blast_zone(target, &self.known_bombs)
                     {
                         dir
                     } else {
-                        let new_dir = pick_explore_dir(grid, pos, None, rng);
+                        let new_dir =
+                            pick_explore_dir(grid, pos, Some(dir), &self.known_bombs, rng);
                         self.state = AiState::Explore { dir: new_dir };
                         new_dir
                     }
@@ -738,11 +777,18 @@ impl BomberPlayer for ValidatorPlayer {
 
         // ── Safety validation ──
         if is_safe_action(&action, grid, pos, &self.known_bombs) {
-            if matches!(
-                action,
-                BomberAction::Up | BomberAction::Down | BomberAction::Left | BomberAction::Right
-            ) {
-                self.state = AiState::Explore { dir: action };
+            match action {
+                BomberAction::Up
+                | BomberAction::Down
+                | BomberAction::Left
+                | BomberAction::Right => {
+                    self.state = AiState::Explore { dir: action };
+                }
+                BomberAction::Bomb => {
+                    self.known_bombs.push(((pos.x, pos.y), DEFAULT_BLAST_RANGE));
+                    self.state = AiState::Flee;
+                }
+                BomberAction::Wait => {}
             }
             return action;
         }
