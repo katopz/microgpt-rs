@@ -1,0 +1,838 @@
+//! AI player trait and implementations for Bomberman HL Arena.
+//!
+//! Four player types representing increasing HL technology levels:
+//! - P1 (Random): no model, no learning — pure baseline
+//! - P2 (Greedy): heuristic action selection simulating LoRA marginals
+//! - P3 (Validator): heuristic + hard safety rules simulating WASM validator
+//! - P4 (Full HL): bandit-adapted selection with absorb-compress
+
+use std::any::Any;
+
+use fastrand::Rng;
+
+use super::{ArenaGrid, BomberAction, GameEvent, GridPos};
+
+// ── Constants ──────────────────────────────────────────────────
+
+const ACTION_COUNT: usize = 6;
+const DEFAULT_BLAST_RANGE: u32 = 2;
+
+const ALL_ACTIONS: [BomberAction; ACTION_COUNT] = [
+    BomberAction::Up,
+    BomberAction::Down,
+    BomberAction::Left,
+    BomberAction::Right,
+    BomberAction::Bomb,
+    BomberAction::Wait,
+];
+
+// ── Trait ──────────────────────────────────────────────────────
+
+/// AI player trait for Bomberman arena.
+///
+/// Each implementation represents a different HL technology level:
+/// - P1 (Random): no model, no learning
+/// - P2 (Model): LoRA-based action selection
+/// - P3 (Validated): LoRA + WASM validator
+/// - P4 (Full HL): LoRA + WASM + Bandit + TrialLog + AbsorbCompress
+pub trait BomberPlayer {
+    /// Select an action given the current game state.
+    fn select_action(
+        &mut self,
+        grid: &ArenaGrid,
+        pos: GridPos,
+        events: &[GameEvent],
+        rng: &mut Rng,
+    ) -> BomberAction;
+
+    /// Player display name.
+    fn name(&self) -> &str;
+
+    /// Emoji for TUI rendering.
+    fn emoji(&self) -> &str;
+
+    /// Reset internal state for a new round.
+    fn reset(&mut self);
+
+    /// Downcast support for HL player updates.
+    fn as_any(&self) -> &dyn Any;
+
+    /// Downcast support for HL player updates (mutable).
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+// ── Shared Helpers ─────────────────────────────────────────────
+
+/// Compute target position after applying a move action.
+fn move_target(action: &BomberAction, pos: GridPos) -> GridPos {
+    match action {
+        BomberAction::Up => GridPos {
+            x: pos.x,
+            y: pos.y - 1,
+        },
+        BomberAction::Down => GridPos {
+            x: pos.x,
+            y: pos.y + 1,
+        },
+        BomberAction::Left => GridPos {
+            x: pos.x - 1,
+            y: pos.y,
+        },
+        BomberAction::Right => GridPos {
+            x: pos.x + 1,
+            y: pos.y,
+        },
+        BomberAction::Bomb | BomberAction::Wait => pos,
+    }
+}
+
+/// Convert action to index 0..6.
+fn action_index(action: &BomberAction) -> usize {
+    match action {
+        BomberAction::Up => 0,
+        BomberAction::Down => 1,
+        BomberAction::Left => 2,
+        BomberAction::Right => 3,
+        BomberAction::Bomb => 4,
+        BomberAction::Wait => 5,
+    }
+}
+
+/// Convert index 0..6 to action.
+fn index_to_action(idx: usize) -> BomberAction {
+    match idx {
+        0 => BomberAction::Up,
+        1 => BomberAction::Down,
+        2 => BomberAction::Left,
+        3 => BomberAction::Right,
+        4 => BomberAction::Bomb,
+        _ => BomberAction::Wait,
+    }
+}
+
+/// Manhattan distance between two grid positions.
+#[allow(dead_code)]
+fn manhattan(a: GridPos, b: GridPos) -> i32 {
+    (a.x - b.x).abs() + (a.y - b.y).abs()
+}
+
+/// Check if position is in the blast zone of any known bomb.
+fn in_blast_zone(pos: GridPos, bombs: &[((i32, i32), u32)]) -> bool {
+    for &(bomb_pos, range) in bombs {
+        let dx = (pos.x - bomb_pos.0).abs();
+        let dy = (pos.y - bomb_pos.1).abs();
+        // Same row or same column and within range
+        if (dx == 0 && dy <= range as i32) || (dy == 0 && dx <= range as i32) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Update known bomb list from events.
+fn update_bombs(bombs: &mut Vec<((i32, i32), u32)>, events: &[GameEvent]) {
+    for event in events {
+        match event {
+            GameEvent::BombPlaced { pos, .. } => {
+                if !bombs.iter().any(|(p, _)| *p == *pos) {
+                    bombs.push((*pos, DEFAULT_BLAST_RANGE));
+                }
+            }
+            GameEvent::BombExploded { pos, .. } => {
+                bombs.retain(|(p, _)| *p != *pos);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Check if player has an escape route after placing a bomb at `bomb_pos`.
+/// BFS from `player_pos` — must reach a cell outside the blast zone within `blast_range + 1` steps.
+fn has_escape_route(
+    grid: &ArenaGrid,
+    player_pos: GridPos,
+    bomb_pos: (i32, i32),
+    blast_range: u32,
+) -> bool {
+    use std::collections::{HashSet, VecDeque};
+
+    let max_steps = blast_range as i32 + 1;
+    let mut visited: HashSet<(i32, i32)> = HashSet::new();
+    let mut queue: VecDeque<((i32, i32), i32)> = VecDeque::new();
+
+    // Don't start ON the bomb — that's instant death
+    if player_pos.x == bomb_pos.0 && player_pos.y == bomb_pos.1 {
+        return false;
+    }
+
+    queue.push_back(((player_pos.x, player_pos.y), 0));
+    visited.insert((player_pos.x, player_pos.y));
+
+    while let Some(((cx, cy), steps)) = queue.pop_front() {
+        if steps > max_steps {
+            continue;
+        }
+
+        // Is this cell safe (outside blast zone)?
+        let dx = (cx - bomb_pos.0).abs();
+        let dy = (cy - bomb_pos.1).abs();
+        let in_blast =
+            (dx == 0 && dy <= blast_range as i32) || (dy == 0 && dx <= blast_range as i32);
+        if !in_blast {
+            return true;
+        }
+
+        // Expand neighbors
+        for (nx, ny) in [(cx, cy - 1), (cx, cy + 1), (cx - 1, cy), (cx + 1, cy)] {
+            if visited.insert((nx, ny)) && grid.is_walkable(nx, ny) {
+                queue.push_back(((nx, ny), steps + 1));
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if an action is safe given the current state.
+fn is_safe_action(
+    action: &BomberAction,
+    grid: &ArenaGrid,
+    pos: GridPos,
+    bombs: &[((i32, i32), u32)],
+) -> bool {
+    match action {
+        BomberAction::Up | BomberAction::Down | BomberAction::Left | BomberAction::Right => {
+            let target = move_target(action, pos);
+            if !grid.is_walkable(target.x, target.y) {
+                return false;
+            }
+            // Don't walk into blast zone
+            let mut future_bombs = bombs.to_vec();
+            update_bombs(&mut future_bombs, &[]);
+            !in_blast_zone(target, &future_bombs)
+        }
+        BomberAction::Bomb => {
+            // Must have escape route
+            has_escape_route(grid, pos, (pos.x, pos.y), DEFAULT_BLAST_RANGE)
+        }
+        BomberAction::Wait => {
+            // Waiting is only safe if not in blast zone
+            !in_blast_zone(pos, bombs)
+        }
+    }
+}
+
+/// Heuristic score for an action (used by Greedy, Validator, HL players).
+fn heuristic_score(
+    action: &BomberAction,
+    grid: &ArenaGrid,
+    pos: GridPos,
+    bombs: &[((i32, i32), u32)],
+) -> f32 {
+    let target = move_target(action, pos);
+
+    match action {
+        BomberAction::Up | BomberAction::Down | BomberAction::Left | BomberAction::Right => {
+            // Walking into wall — invalid
+            if !grid.is_walkable(target.x, target.y) {
+                return -1.0;
+            }
+
+            // Walking into blast zone — very bad
+            if in_blast_zone(target, bombs) {
+                return -0.8;
+            }
+
+            let mut score = 0.1f32;
+
+            // Moving away from blast zone when in danger
+            if in_blast_zone(pos, bombs) && !in_blast_zone(target, bombs) {
+                score += 0.8;
+            }
+
+            // Moving toward powerup
+            if matches!(grid.get(target.x, target.y), super::Cell::PowerUpHidden(_)) {
+                score += 0.6;
+            }
+
+            // Moving toward center (explore heuristic)
+            let center = 6i32;
+            let dist_before = (pos.x - center).abs() + (pos.y - center).abs();
+            let dist_after = (target.x - center).abs() + (target.y - center).abs();
+            if dist_after < dist_before {
+                score += 0.2;
+            }
+
+            score
+        }
+        BomberAction::Bomb => {
+            // Need escape route
+            if !has_escape_route(grid, pos, (pos.x, pos.y), DEFAULT_BLAST_RANGE) {
+                return -0.9;
+            }
+
+            // Placing bomb near destructible walls is good
+            let mut score = 0.2f32;
+            for (dx, dy) in [(0i32, -1), (0, 1), (-1, 0), (1, 0)] {
+                let cx = pos.x + dx;
+                let cy = pos.y + dy;
+                match grid.get(cx, cy) {
+                    super::Cell::DestructibleWall => score += 0.15,
+                    super::Cell::PowerUpHidden(_) => score += 0.2,
+                    _ => {}
+                }
+            }
+
+            score
+        }
+        BomberAction::Wait => {
+            // Waiting is generally bad (opportunity cost)
+            if in_blast_zone(pos, bombs) {
+                -0.5 // Waiting in blast zone is terrible
+            } else {
+                -0.1
+            }
+        }
+    }
+}
+
+// ── P1: Random ─────────────────────────────────────────────────
+
+/// P1: Modelless baseline — uniform random action selection.
+///
+/// No learning. No memory. No model. Pure baseline.
+/// Avoids walking into walls (up to 3 re-rolls, then Wait).
+pub struct RandomPlayer {
+    _id: u8,
+}
+
+impl RandomPlayer {
+    pub fn new(id: u8) -> Self {
+        Self { _id: id }
+    }
+}
+
+impl BomberPlayer for RandomPlayer {
+    fn select_action(
+        &mut self,
+        grid: &ArenaGrid,
+        pos: GridPos,
+        _events: &[GameEvent],
+        rng: &mut Rng,
+    ) -> BomberAction {
+        // Try random actions, avoid walls (3 attempts)
+        for _ in 0..3 {
+            let idx = rng.usize(0..ACTION_COUNT);
+            let action = index_to_action(idx);
+            let target = move_target(&action, pos);
+            if action == BomberAction::Bomb || action == BomberAction::Wait {
+                return action;
+            }
+            if grid.is_walkable(target.x, target.y) {
+                return action;
+            }
+        }
+        BomberAction::Wait
+    }
+
+    fn name(&self) -> &str {
+        "Random"
+    }
+
+    fn emoji(&self) -> &str {
+        "🐰"
+    }
+
+    fn reset(&mut self) {}
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+// ── P2: Greedy (Model proxy) ──────────────────────────────────
+
+/// P2: Model-based player — heuristic action selection simulating LoRA marginals.
+///
+/// Uses simple heuristics to approximate what a trained model would learn:
+/// - Dodge when in blast zone
+/// - Place bomb near destructible walls
+/// - Collect powerups when safe
+/// - Move toward center otherwise
+///
+/// 20% random exploration to avoid predictability.
+pub struct GreedyPlayer {
+    _id: u8,
+}
+
+impl GreedyPlayer {
+    pub fn new(id: u8) -> Self {
+        Self { _id: id }
+    }
+}
+
+impl BomberPlayer for GreedyPlayer {
+    fn select_action(
+        &mut self,
+        grid: &ArenaGrid,
+        pos: GridPos,
+        events: &[GameEvent],
+        rng: &mut Rng,
+    ) -> BomberAction {
+        // 20% random exploration
+        if rng.f32() < 0.2 {
+            let idx = rng.usize(0..ACTION_COUNT);
+            let action = index_to_action(idx);
+            let target = move_target(&action, pos);
+            if action == BomberAction::Bomb
+                || action == BomberAction::Wait
+                || grid.is_walkable(target.x, target.y)
+            {
+                return action;
+            }
+        }
+
+        // Score all actions, pick best
+        let mut bombs = Vec::new();
+        update_bombs(&mut bombs, events);
+
+        let mut best_action = BomberAction::Wait;
+        let mut best_score = f32::NEG_INFINITY;
+
+        for action in &ALL_ACTIONS {
+            let score = heuristic_score(action, grid, pos, &bombs);
+            if score > best_score {
+                best_score = score;
+                best_action = *action;
+            }
+        }
+
+        best_action
+    }
+
+    fn name(&self) -> &str {
+        "Greedy"
+    }
+
+    fn emoji(&self) -> &str {
+        "🐱"
+    }
+
+    fn reset(&mut self) {}
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+// ── P3: Validator ──────────────────────────────────────────────
+
+/// P3: Model + Validator — heuristic selection with safety validation.
+///
+/// Same heuristic base as P2 but adds hard safety rules:
+/// - Never walk into active blast zones
+/// - Never walk into walls
+/// - Never place bomb without escape route
+/// - Never stay in blast zone when escape is possible
+pub struct ValidatorPlayer {
+    _id: u8,
+    known_bombs: Vec<((i32, i32), u32)>,
+}
+
+impl ValidatorPlayer {
+    pub fn new(id: u8) -> Self {
+        Self {
+            _id: id,
+            known_bombs: Vec::new(),
+        }
+    }
+}
+
+impl BomberPlayer for ValidatorPlayer {
+    fn select_action(
+        &mut self,
+        grid: &ArenaGrid,
+        pos: GridPos,
+        events: &[GameEvent],
+        rng: &mut Rng,
+    ) -> BomberAction {
+        update_bombs(&mut self.known_bombs, events);
+
+        // Partition actions into safe and unsafe
+        let mut safe_actions: Vec<(BomberAction, f32)> = Vec::new();
+        let mut unsafe_actions: Vec<BomberAction> = Vec::new();
+
+        for action in &ALL_ACTIONS {
+            if is_safe_action(action, grid, pos, &self.known_bombs) {
+                let score = heuristic_score(action, grid, pos, &self.known_bombs);
+                safe_actions.push((*action, score));
+            } else {
+                unsafe_actions.push(*action);
+            }
+        }
+
+        // If we have safe actions, pick best among them
+        if !safe_actions.is_empty() {
+            safe_actions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            return safe_actions[0].0;
+        }
+
+        // All actions unsafe — pick least bad (Wait if possible, otherwise random)
+        if unsafe_actions.contains(&BomberAction::Wait) {
+            return BomberAction::Wait;
+        }
+
+        let idx = rng.usize(0..unsafe_actions.len());
+        unsafe_actions[idx]
+    }
+
+    fn name(&self) -> &str {
+        "Validator"
+    }
+
+    fn emoji(&self) -> &str {
+        "🐶"
+    }
+
+    fn reset(&mut self) {
+        self.known_bombs.clear();
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+// ── P4: Full HL ────────────────────────────────────────────────
+
+/// P4: Full HL — bandit-adapted action selection with absorb-compress.
+///
+/// Same base as P3 but uses a simple bandit over the 6 actions to adapt
+/// relevance scores based on observed outcomes. Compresses stable low-Q
+/// arms into hard blocks over time.
+pub struct HLPlayer {
+    _id: u8,
+    known_bombs: Vec<((i32, i32), u32)>,
+    q_values: [f32; ACTION_COUNT],
+    visits: [u32; ACTION_COUNT],
+    total_pulls: u32,
+    compressed: [bool; ACTION_COUNT],
+    round_actions: Vec<BomberAction>,
+}
+
+impl HLPlayer {
+    pub fn new(id: u8) -> Self {
+        Self {
+            _id: id,
+            known_bombs: Vec::new(),
+            q_values: [0.0; ACTION_COUNT],
+            visits: [0; ACTION_COUNT],
+            total_pulls: 0,
+            compressed: [false; ACTION_COUNT],
+            round_actions: Vec::new(),
+        }
+    }
+
+    /// Update bandit Q-values based on round outcome.
+    ///
+    /// Distributes reward across ALL actions taken this round (not just the last).
+    /// This prevents misattribution where only the final action gets blamed for death.
+    pub fn update_outcome(
+        &mut self,
+        survived: bool,
+        killed_opponent: bool,
+        collected_powerups: u32,
+    ) {
+        if self.round_actions.is_empty() {
+            return;
+        }
+
+        // Base reward shaping
+        let base_reward = if survived { 1.0 } else { -1.0 }
+            + if killed_opponent { 0.5 } else { 0.0 }
+            + collected_powerups as f32 * 0.2;
+
+        // Count action frequency for proportional update
+        let mut action_counts = [0u32; ACTION_COUNT];
+        for action in &self.round_actions {
+            action_counts[action_index(action)] += 1;
+        }
+
+        // Update Q-values for each unique action taken this round
+        for (idx, &count) in action_counts.iter().enumerate() {
+            if count == 0 {
+                continue;
+            }
+            // Weight reward by how often this action was taken
+            let proportion = count as f32 / self.round_actions.len() as f32;
+            let reward = base_reward * proportion;
+
+            self.visits[idx] += 1;
+            self.total_pulls += 1;
+            let n = self.visits[idx] as f32;
+            self.q_values[idx] += (reward - self.q_values[idx]) / n;
+        }
+    }
+
+    /// Run absorb-compress cycle. Returns newly compressed arm indices.
+    pub fn compress_cycle(&mut self) -> Vec<usize> {
+        let min_visits = 20u32;
+        let threshold = 0.1f32;
+        let mut newly_compressed = Vec::new();
+
+        for i in 0..ACTION_COUNT {
+            if self.compressed[i] {
+                continue;
+            }
+            if self.visits[i] >= min_visits && self.q_values[i] < threshold {
+                self.compressed[i] = true;
+                newly_compressed.push(i);
+            }
+        }
+
+        newly_compressed
+    }
+
+    /// Generate a compression report string.
+    pub fn compress_report(&self) -> String {
+        let compressed_count = self.compressed.iter().filter(|&&c| c).count();
+        let compressed_names: Vec<String> = self
+            .compressed
+            .iter()
+            .enumerate()
+            .filter(|&(_, &c)| c)
+            .map(|(i, _)| format!("{}({:.2})", index_to_action(i), self.q_values[i]))
+            .collect();
+
+        format!(
+            "Pulls={} Compressed={}/{} [{}] Q=[{}]",
+            self.total_pulls,
+            compressed_count,
+            ACTION_COUNT,
+            compressed_names.join(","),
+            self.q_values
+                .iter()
+                .enumerate()
+                .map(|(i, q)| format!("{}:{:.2}", index_to_action(i), q))
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
+    }
+}
+
+impl BomberPlayer for HLPlayer {
+    fn select_action(
+        &mut self,
+        grid: &ArenaGrid,
+        pos: GridPos,
+        events: &[GameEvent],
+        rng: &mut Rng,
+    ) -> BomberAction {
+        update_bombs(&mut self.known_bombs, events);
+
+        // Compute blended scores: 60% heuristic + 40% bandit Q-value
+        let mut scores: [(BomberAction, f32); ACTION_COUNT] = ALL_ACTIONS.map(|a| (a, 0.0));
+
+        for (i, action) in ALL_ACTIONS.iter().enumerate() {
+            // Skip compressed (hard-blocked) arms
+            if self.compressed[i] {
+                scores[i] = (*action, f32::NEG_INFINITY);
+                continue;
+            }
+
+            let h = heuristic_score(action, grid, pos, &self.known_bombs);
+
+            // Domain hard block (walking into wall) overrides everything
+            if h <= -1.0 {
+                scores[i] = (*action, h);
+                continue;
+            }
+
+            // Safety validation — penalize unsafe actions
+            let safe = is_safe_action(action, grid, pos, &self.known_bombs);
+            let safety_bonus = if safe { 0.0 } else { -0.5 };
+
+            // Bandit Q-value component (default 0.0 for unvisited arms)
+            let bandit_q = if self.visits[i] > 0 {
+                self.q_values[i]
+            } else {
+                0.0
+            };
+
+            // Blend: 60% heuristic + 40% bandit + safety
+            let blended = h * 0.6 + bandit_q * 0.4 + safety_bonus;
+            scores[i] = (*action, blended);
+        }
+
+        // ε-greedy: 10% explore, 90% exploit
+        if rng.f32() < 0.1 {
+            // Pick a random non-compressed action
+            let valid: Vec<usize> = (0..ACTION_COUNT)
+                .filter(|&i| !self.compressed[i] && scores[i].1 > f32::NEG_INFINITY)
+                .collect();
+            if !valid.is_empty() {
+                let pick = valid[rng.usize(0..valid.len())];
+                let action = scores[pick].0;
+                self.round_actions.push(action);
+                return action;
+            }
+        }
+
+        // Pick best action
+        let best = scores
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(a, _)| *a)
+            .unwrap_or(BomberAction::Wait);
+
+        self.round_actions.push(best);
+        best
+    }
+
+    fn name(&self) -> &str {
+        "HL"
+    }
+
+    fn emoji(&self) -> &str {
+        "🐵"
+    }
+
+    fn reset(&mut self) {
+        self.known_bombs.clear();
+        self.round_actions.clear();
+        // NOTE: Q-values, visits, compressed persist across rounds (bandit memory)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+// ── Factory ────────────────────────────────────────────────────
+
+/// Create the 4 player instances for a tournament.
+pub fn create_players() -> Vec<Box<dyn BomberPlayer>> {
+    vec![
+        Box::new(RandomPlayer::new(0)),
+        Box::new(GreedyPlayer::new(1)),
+        Box::new(ValidatorPlayer::new(2)),
+        Box::new(HLPlayer::new(3)),
+    ]
+}
+
+// ── Tests ──────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_grid() -> ArenaGrid {
+        ArenaGrid::generate(42)
+    }
+
+    #[test]
+    fn test_random_player_valid_actions() {
+        let mut player = RandomPlayer::new(0);
+        let grid = empty_grid();
+        let mut rng = Rng::with_seed(42);
+        let pos = GridPos { x: 1, y: 1 }; // Spawn position — always walkable
+
+        for _ in 0..50 {
+            let action = player.select_action(&grid, pos, &[], &mut rng);
+            // Should never walk into a wall
+            if action != BomberAction::Bomb && action != BomberAction::Wait {
+                let target = move_target(&action, pos);
+                assert!(
+                    grid.is_walkable(target.x, target.y),
+                    "RandomPlayer walked into wall at ({},{})",
+                    target.x,
+                    target.y,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_greedy_player_prefers_safety() {
+        let mut player = GreedyPlayer::new(1);
+        let grid = empty_grid();
+        let mut rng = Rng::with_seed(42);
+        let pos = GridPos { x: 3, y: 3 };
+
+        // Without bombs, should prefer valid moves
+        let action = player.select_action(&grid, pos, &[], &mut rng);
+        if action != BomberAction::Bomb && action != BomberAction::Wait {
+            let target = move_target(&action, pos);
+            assert!(grid.is_walkable(target.x, target.y));
+        }
+    }
+
+    #[test]
+    fn test_validator_player_rejects_unsafe() {
+        let mut player = ValidatorPlayer::new(2);
+        let grid = empty_grid();
+        let mut rng = Rng::with_seed(42);
+        let pos = GridPos { x: 3, y: 3 };
+
+        // With a bomb aimed at us, should avoid blast zone
+        let events = vec![GameEvent::BombPlaced {
+            player: 0,
+            pos: (3, 1),
+        }];
+        player.known_bombs = vec![((3, 1), 2)];
+
+        let action = player.select_action(&grid, pos, &events, &mut rng);
+        // Should not move into blast zone (3,1 has range 2, so (3,3) is in blast)
+        // The player at (3,3) is in blast zone — should try to escape
+        if action != BomberAction::Bomb && action != BomberAction::Wait {
+            let target = move_target(&action, pos);
+            // Moving out of blast zone is preferred
+            assert!(
+                target.x != 3 || target.y < 1 || target.y > 3,
+                "Validator should escape blast zone, moved to ({},{})",
+                target.x,
+                target.y,
+            );
+        }
+    }
+
+    #[test]
+    fn test_hl_player_adapts() {
+        let mut player = HLPlayer::new(3);
+        let grid = empty_grid();
+        let mut rng = Rng::with_seed(42);
+        let pos = GridPos { x: 3, y: 3 };
+
+        // Simulate several rounds with good outcomes for Up
+        for _ in 0..25 {
+            player.round_actions.clear();
+            // Push Up as the only action for this round
+            player.round_actions.push(BomberAction::Up);
+            player.update_outcome(true, false, 0);
+        }
+
+        // Q-value for Up should be positive
+        let up_idx = action_index(&BomberAction::Up);
+        assert!(
+            player.q_values[up_idx] > 0.0,
+            "HL should learn Up is good, Q={}",
+            player.q_values[up_idx],
+        );
+    }
+}
