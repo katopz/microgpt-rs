@@ -48,6 +48,8 @@ fn main() {
                 reader_lora: None,
                 writer_lora: None,
                 native_pruner: Some("sudoku".into()),
+                truncation: None,
+                reasoning_retention: None,
             },
             DomainConfig {
                 name: "pathfinding".into(),
@@ -64,6 +66,8 @@ fn main() {
                 reader_lora: None,
                 writer_lora: None,
                 native_pruner: Some("tactical".into()),
+                truncation: None,
+                reasoning_retention: None,
             },
             DomainConfig {
                 name: "rust_code".into(),
@@ -81,6 +85,8 @@ fn main() {
                 reader_lora: None,
                 writer_lora: None,
                 native_pruner: None,
+                truncation: None,
+                reasoning_retention: None,
             },
             DomainConfig {
                 name: "py2rs".into(),
@@ -96,6 +102,8 @@ fn main() {
                 reader_lora: None,
                 writer_lora: None,
                 native_pruner: None,
+                truncation: None,
+                reasoning_retention: None,
             },
             DomainConfig {
                 name: "general".into(),
@@ -105,6 +113,8 @@ fn main() {
                 reader_lora: None,
                 writer_lora: None,
                 native_pruner: Some("no_pruner".into()),
+                truncation: None,
+                reasoning_retention: None,
             },
         ],
     };
