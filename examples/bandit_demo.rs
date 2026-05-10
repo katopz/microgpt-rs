@@ -269,9 +269,11 @@ fn print_ascii_regret_plot(results: &[(String, Vec<f32>, Vec<f32>)]) {
     let mut grid = vec![vec![' '; width]; height];
 
     // Y-axis labels
+    #[allow(clippy::needless_range_loop)]
     for row in 0..height {
         let val = max_regret * (1.0 - row as f32 / (height - 1) as f32);
         print!("{:>7.1} │", val);
+        #[allow(clippy::needless_range_loop)]
         for col in 0..width {
             let episode = (col as f32 / (width - 1) as f32 * (EPISODES - 1) as f32) as usize;
             for (si, (_, regret_curve, _)) in results.iter().enumerate() {
@@ -352,6 +354,7 @@ fn print_constrained_section() {
     println!();
     println!("  Arm | True p | Q-value | Visits | Relevance | Status");
     println!("  ----|--------|---------|--------|-----------|-------");
+    #[allow(clippy::needless_range_loop)]
     for arm in 0..probs.len() {
         let q = pruner.q_values()[arm];
         let v = pruner.visits()[arm];
