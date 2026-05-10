@@ -12,6 +12,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 syn = { version = "2", features = ["full", "parsing"], optional = true }
 proc-macro2 = { version = "1", optional = true }
+bevy_ecs = { version = "0.15", optional = true }  # Standalone ECS (Plan 033)
 toml = "0.8"
 
 [dev-dependencies]
@@ -25,11 +26,12 @@ validator = ["syn", "proc-macro2"]
 sparse_mlp = []  # TwELL-inspired sparse MLP matmul (Plan 022)
 ppot = []  # PPoT logit-parameterized CPU resampling (Plan 026 + 027)
 bandit = []  # Multi-armed bandit adaptive ScreeningPruner (Plan 030)
+bomber = ["bevy_ecs", "bandit"]  # Bomberman HL Arena (Plan 033)
 rest = []  # REST API client via reqwest + tokio runtime (planned)
 embedding_router = []  # Semantic embedding retrieval from anyrag (Plan 024)
 gpu = []  # GPU compute via wgpu, safetensors model loading (planned)
 leviathan = []  # LeviathanVerifier real p/q rejection sampling (Algorithm 1)
-full = ["sudoku", "validator", "ppot", "bandit", "rest", "embedding_router", "gpu", "leviathan"]
+full = ["sudoku", "validator", "ppot", "bandit", "bomber", "rest", "embedding_router", "gpu", "leviathan"]
 
 # ── Bandit (RL / Game Theory) ─────────────────────────────────
 
@@ -70,6 +72,20 @@ required-features = ["bandit"]
 [[example]]
 name = "hl_02_hotswap"
 required-features = ["bandit"]
+
+# ── Bomberman HL Arena ────────────────────────────────────────
+
+[[example]]
+name = "bomber_01_arena"
+required-features = ["bomber"]
+
+[[example]]
+name = "bomber_02_tui"
+required-features = ["bomber"]
+
+[[example]]
+name = "bomber_03_hl_proof"
+required-features = ["bomber"]
 
 # ── Blue Bear ──────────────────────────────────────────────────
 

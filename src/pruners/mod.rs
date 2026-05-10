@@ -15,6 +15,9 @@ pub use map_generator::{GeneratedDungeon, GeneratedMap, MapGenerator};
 pub use pathfinder::{Target, enumerate_targets, find_distance, find_path, reachable_positions};
 pub use tactical_pruner::{GameState, TacticalPruner};
 
+#[cfg(feature = "bomber")]
+pub mod bomber;
+
 #[cfg(feature = "sudoku")]
 pub mod sudoku_pruner;
 
@@ -53,3 +56,10 @@ pub use regression::{GoldenTrace, RegressionResult, RegressionSuite, ReplayRewar
 
 #[cfg(feature = "bandit")]
 pub use trial_log::{TrialLog, TrialRecord, TrialSummary};
+
+#[cfg(feature = "bomber")]
+pub use bomber::{
+    ArenaGrid, BomberAction, BomberPlayer, GameEvent, GreedyPlayer, GridPos, HLPlayer,
+    PlayerEntities, RandomPlayer, ScoreBoard, TickCounter, ValidatorPlayer, init_world, run_tick,
+    spawn_players,
+};
