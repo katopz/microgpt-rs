@@ -94,5 +94,17 @@ name = "game_resolver_demo"
 required-features = ["bandit"]
 
 [[example]]
+name = "ai_director_demo"
+required-features = ["bandit"]
+
+[[example]]
+name = "combat_bandit_demo"
+required-features = ["bandit"]
+
+[[example]]
+name = "rps_nash_demo"
+required-features = ["bandit"]
+
+[[example]]
 name = "ppot_bench"
 required-features = ["ppot"]
