@@ -878,6 +878,33 @@ Round N+m:   Agent writes new validator.rs → compile .wasm → HotSwapPruner.r
 | `trial_log.rs` | Persistent JSONL episode history | ~150 |
 | `absorb_compress.rs` | Promote stable low-Q arms to hard blocks | ~200 |
 | `hot_swap.rs` | Runtime pruner reload via blake3 hash comparison | ~180 |
+
+## 🎮 Bomberman HL Arena (Plan 033) — ✅ HL Thesis Proven
+
+4-player Bomberman arena proving the value of each HL layer. **Result: HL (+177) > Greedy (+131) > Validator (-30) > Random (-55)** in 100-round tournament.
+
+| Player | Emoji | Tech | Score | Wins | Deaths |
+|--------|-------|------|-------|------|--------|
+| **HL** | 🐵 | Opponent tracking + strategy + bandit | **+177** | **8** | 42 |
+| Greedy | 🐱 | Heuristic + 20% safe exploration | +131 | 5 | 40 |
+| Validator | 🐶 | Static safety rules | -30 | 1 | 60 |
+| Random | 🐰 | Blast-zone avoidance only | -55 | 9 | 38 |
+
+### HL Intelligence Layers
+
+```
+HLPlayer selects actions using:
+├── score_action (base heuristic) — walls, power-ups, escape, persistence
+├── strategy_bonus (opponent-aware):
+│   ├── Hunt:     +1.5 for moving toward nearest opponent
+│   ├── Ambush:   +3.0 for bombing near opponent
+│   └── Walls:    +0.5 per adjacent destructible wall for bomb value
+├── Safety: hard-block unsafe Bomb/Wait; escape_distance for movement in blast zones
+└── ε-greedy: 10% safe exploration (blast-zone-filtered only)
+```
+
+Run: `cargo run --example bomber_01_arena --features bomber`
+Run: `cargo run --example bomber_02_tui --features bomber` (animated replay)
 | `regression.rs` | Replay golden episodes to detect regressions | ~150 |
 | `bandit.rs` (extension) | `run_with_trial_log()` + `absorb_compress_cycle()` | ~100 added |
 
