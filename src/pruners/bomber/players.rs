@@ -235,248 +235,6 @@ fn is_safe_action(
     }
 }
 
-/// Heuristic score for an action (used by Greedy, Validator, HL players).
-fn heuristic_score(
-    action: &BomberAction,
-    grid: &ArenaGrid,
-    pos: GridPos,
-    bombs: &[((i32, i32), u32)],
-    last_dir: Option<BomberAction>,
-) -> f32 {
-    let target = move_target(action, pos);
-
-    match action {
-        BomberAction::Up | BomberAction::Down | BomberAction::Left | BomberAction::Right => {
-            // Walking into wall — invalid
-            if !grid.is_walkable(target.x, target.y) {
-                return -1.0;
-            }
-
-            // Walking into blast zone — very bad
-            if in_blast_zone(target, bombs) {
-                return -0.8;
-            }
-
-            let mut score = 0.1f32;
-
-            // Penalize reversing — prefer direction persistence
-            if let Some(last) = last_dir
-                && matches!(
-                    (*action, last),
-                    (BomberAction::Up, BomberAction::Down)
-                        | (BomberAction::Down, BomberAction::Up)
-                        | (BomberAction::Left, BomberAction::Right)
-                        | (BomberAction::Right, BomberAction::Left)
-                )
-            {
-                score -= 0.3;
-            }
-
-            // Moving away from blast zone when in danger
-            if in_blast_zone(pos, bombs) && !in_blast_zone(target, bombs) {
-                score += 0.8;
-            }
-
-            // Moving toward powerup
-            if matches!(grid.get(target.x, target.y), super::Cell::PowerUpHidden(_)) {
-                score += 0.6;
-            }
-
-            // Moving toward center (explore heuristic)
-            let center = 6i32;
-            let dist_before = (pos.x - center).abs() + (pos.y - center).abs();
-            let dist_after = (target.x - center).abs() + (target.y - center).abs();
-            if dist_after < dist_before {
-                score += 0.2;
-            }
-
-            score
-        }
-        BomberAction::Bomb => {
-            // Need escape route
-            if !has_escape_route(grid, pos, (pos.x, pos.y), DEFAULT_BLAST_RANGE) {
-                return -0.9;
-            }
-
-            // Placing bomb near destructible walls is good
-            let mut score = 0.2f32;
-            for (dx, dy) in [(0i32, -1), (0, 1), (-1, 0), (1, 0)] {
-                let cx = pos.x + dx;
-                let cy = pos.y + dy;
-                match grid.get(cx, cy) {
-                    super::Cell::DestructibleWall => score += 0.15,
-                    super::Cell::PowerUpHidden(_) => score += 0.2,
-                    _ => {}
-                }
-            }
-
-            score
-        }
-        BomberAction::Wait => {
-            // Waiting is generally bad (opportunity cost)
-            if in_blast_zone(pos, bombs) {
-                -0.5 // Waiting in blast zone is terrible
-            } else {
-                -0.1
-            }
-        }
-    }
-}
-
-// ── AI State Machine ────────────────────────────────────────────
-
-/// AI behavior state for purposeful movement.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum AiState {
-    /// Walking in a direction. Pick new direction when blocked.
-    Explore { dir: BomberAction },
-    /// Actively pathfinding toward a destructible wall to bomb it.
-    Hunt { target: (i32, i32) },
-    /// Escaping blast zone toward nearest safe cell.
-    Flee,
-}
-
-impl Default for AiState {
-    fn default() -> Self {
-        AiState::Explore {
-            dir: BomberAction::Wait,
-        }
-    }
-}
-
-/// Check if `action` would reverse `prev` direction.
-fn is_reverse(action: BomberAction, prev: Option<BomberAction>) -> bool {
-    matches!(
-        (action, prev),
-        (BomberAction::Up, Some(BomberAction::Down))
-            | (BomberAction::Down, Some(BomberAction::Up))
-            | (BomberAction::Left, Some(BomberAction::Right))
-            | (BomberAction::Right, Some(BomberAction::Left))
-    )
-}
-
-/// Pick a new exploration direction. Avoids blast zones and reversing when possible.
-fn pick_explore_dir(
-    grid: &ArenaGrid,
-    pos: GridPos,
-    prev_dir: Option<BomberAction>,
-    bombs: &[((i32, i32), u32)],
-    rng: &mut Rng,
-) -> BomberAction {
-    use BomberAction::{Down, Left, Right, Up};
-    let dirs = [Up, Down, Left, Right];
-
-    // Prefer: walkable AND not in blast zone
-    let safe: Vec<BomberAction> = dirs
-        .iter()
-        .filter(|&&d| {
-            let t = move_target(&d, pos);
-            grid.is_walkable(t.x, t.y) && !in_blast_zone(t, bombs)
-        })
-        .copied()
-        .collect();
-
-    if !safe.is_empty() {
-        let preferred: Vec<BomberAction> = safe
-            .iter()
-            .filter(|&&d| !is_reverse(d, prev_dir))
-            .copied()
-            .collect();
-        let candidates = if preferred.is_empty() {
-            &safe
-        } else {
-            &preferred
-        };
-        return candidates[rng.usize(0..candidates.len())];
-    }
-
-    // No safe direction — fall back to any walkable
-    let valid: Vec<BomberAction> = dirs
-        .iter()
-        .filter(|&&d| {
-            let t = move_target(&d, pos);
-            grid.is_walkable(t.x, t.y)
-        })
-        .copied()
-        .collect();
-
-    if valid.is_empty() {
-        return BomberAction::Wait;
-    }
-    valid[rng.usize(0..valid.len())]
-}
-
-/// BFS: find nearest cell outside any bomb blast zone.
-fn find_safe_cell(
-    grid: &ArenaGrid,
-    pos: GridPos,
-    bombs: &[((i32, i32), u32)],
-) -> Option<(i32, i32)> {
-    use std::collections::{HashSet, VecDeque};
-
-    let mut visited = HashSet::new();
-    let mut queue = VecDeque::new();
-
-    queue.push_back((pos.x, pos.y));
-    visited.insert((pos.x, pos.y));
-
-    while let Some((cx, cy)) = queue.pop_front() {
-        if !in_blast_zone(GridPos { x: cx, y: cy }, bombs) {
-            return Some((cx, cy));
-        }
-        for (nx, ny) in [(cx, cy - 1), (cx, cy + 1), (cx - 1, cy), (cx + 1, cy)] {
-            if visited.insert((nx, ny)) && grid.is_walkable(nx, ny) {
-                queue.push_back((nx, ny));
-            }
-        }
-    }
-
-    None
-}
-
-/// BFS: find first step from `from` toward `to`.
-fn next_step_toward(grid: &ArenaGrid, from: GridPos, to: (i32, i32)) -> Option<BomberAction> {
-    if from.x == to.0 && from.y == to.1 {
-        return None;
-    }
-
-    use std::collections::{HashMap, VecDeque};
-
-    let mut queue: VecDeque<(i32, i32)> = VecDeque::new();
-    let mut parent: HashMap<(i32, i32), (i32, i32)> = HashMap::new();
-
-    queue.push_back((from.x, from.y));
-    parent.insert((from.x, from.y), (from.x, from.y));
-
-    while let Some((cx, cy)) = queue.pop_front() {
-        if cx == to.0 && cy == to.1 {
-            // Trace back to first step
-            let mut step = (cx, cy);
-            while parent[&step] != (from.x, from.y) {
-                step = parent[&step];
-            }
-            let dx = step.0 - from.x;
-            let dy = step.1 - from.y;
-            return match (dx, dy) {
-                (0, -1) => Some(BomberAction::Up),
-                (0, 1) => Some(BomberAction::Down),
-                (-1, 0) => Some(BomberAction::Left),
-                (1, 0) => Some(BomberAction::Right),
-                _ => None,
-            };
-        }
-
-        for (nx, ny) in [(cx, cy - 1), (cx, cy + 1), (cx - 1, cy), (cx + 1, cy)] {
-            if !parent.contains_key(&(nx, ny)) && grid.is_walkable(nx, ny) {
-                parent.insert((nx, ny), (cx, cy));
-                queue.push_back((nx, ny));
-            }
-        }
-    }
-
-    None
-}
-
 /// Check if player should place a bomb at current position.
 ///
 /// The player stands ON the bomb but moves away next tick, so escape is
@@ -519,97 +277,126 @@ fn should_place_bomb(grid: &ArenaGrid, pos: GridPos, bombs: &[((i32, i32), u32)]
     })
 }
 
-/// BFS: find nearest destructible wall reachable from `pos`.
-/// Prefers `PowerUpHidden` walls over plain `DestructibleWall`.
-fn find_nearest_wall(grid: &ArenaGrid, pos: GridPos) -> Option<(i32, i32)> {
-    use std::collections::{HashSet, VecDeque};
+// ── Policy Scoring ─────────────────────────────────────────────
 
-    let mut visited = HashSet::new();
-    let mut queue = VecDeque::new();
+/// True if action reverses the previous direction.
+fn is_reverse(action: BomberAction, prev: Option<BomberAction>) -> bool {
+    matches!(
+        (action, prev),
+        (BomberAction::Up, Some(BomberAction::Down))
+            | (BomberAction::Down, Some(BomberAction::Up))
+            | (BomberAction::Left, Some(BomberAction::Right))
+            | (BomberAction::Right, Some(BomberAction::Left))
+    )
+}
 
-    queue.push_back((pos.x, pos.y));
-    visited.insert((pos.x, pos.y));
-
-    while let Some((cx, cy)) = queue.pop_front() {
-        // Check neighbors for destructible walls (prefer powerups)
-        let mut powerup_wall = None;
-        let mut normal_wall = None;
-
-        for (dx, dy) in [(0i32, -1), (0, 1), (-1, 0), (1, 0)] {
-            match grid.get(cx + dx, cy + dy) {
-                super::Cell::PowerUpHidden(_) if powerup_wall.is_none() => {
-                    powerup_wall = Some((cx + dx, cy + dy));
-                }
-                super::Cell::DestructibleWall if normal_wall.is_none() => {
-                    normal_wall = Some((cx + dx, cy + dy));
-                }
+/// Count destructible walls within manhattan range.
+fn wall_density(grid: &ArenaGrid, pos: GridPos, range: i32) -> i32 {
+    let mut count = 0;
+    for dy in -range..=range {
+        for dx in -range..=range {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            match grid.get(pos.x + dx, pos.y + dy) {
+                super::Cell::DestructibleWall | super::Cell::PowerUpHidden(_) => count += 1,
                 _ => {}
             }
         }
-
-        if let Some(w) = powerup_wall {
-            return Some(w);
-        }
-        if let Some(w) = normal_wall {
-            return Some(w);
-        }
-
-        for (nx, ny) in [(cx, cy - 1), (cx, cy + 1), (cx - 1, cy), (cx + 1, cy)] {
-            if visited.insert((nx, ny)) && grid.is_walkable(nx, ny) {
-                queue.push_back((nx, ny));
-            }
-        }
     }
-
-    None
+    count
 }
 
-/// BFS: find first step toward any walkable cell adjacent to `wall`.
-fn step_toward_wall(grid: &ArenaGrid, from: GridPos, wall: (i32, i32)) -> Option<BomberAction> {
-    let dx = (from.x - wall.0).abs();
-    let dy = (from.y - wall.1).abs();
-    if dx + dy <= 1 {
-        return None; // Already adjacent
-    }
+/// True if any cell adjacent to pos is a destructible wall.
+fn has_adjacent_wall(grid: &ArenaGrid, pos: GridPos) -> bool {
+    [(0i32, -1), (0, 1), (-1, 0), (1, 0)]
+        .iter()
+        .any(|&(dx, dy)| {
+            matches!(
+                grid.get(pos.x + dx, pos.y + dy),
+                super::Cell::DestructibleWall | super::Cell::PowerUpHidden(_)
+            )
+        })
+}
 
-    use std::collections::{HashMap, VecDeque};
+/// Policy-based action scoring with clear priorities.
+///
+/// Policies (highest priority first):
+///   Unsafe  → -∞     (wall, no escape bomb)
+///   Flee    → +10.0  (escaping blast zone)
+///   Bomb    → +5.0   (near destructible wall + escape route)
+///   Hunt    → +0..2  (moving toward destructible walls)
+///   Persist → -1.0   (penalize reversing direction)
+///   Explore → +0.2   (slight center bias)
+fn score_action(
+    action: &BomberAction,
+    grid: &ArenaGrid,
+    pos: GridPos,
+    bombs: &[((i32, i32), u32)],
+    last_dir: Option<BomberAction>,
+) -> f32 {
+    use BomberAction::{Down, Left, Right, Up};
 
-    let mut queue: VecDeque<(i32, i32)> = VecDeque::new();
-    let mut parent: HashMap<(i32, i32), (i32, i32)> = HashMap::new();
+    match action {
+        Up | Down | Left | Right => {
+            let target = move_target(action, pos);
 
-    queue.push_back((from.x, from.y));
-    parent.insert((from.x, from.y), (from.x, from.y));
-
-    while let Some((cx, cy)) = queue.pop_front() {
-        // Is this cell adjacent to the target wall?
-        let cdx = (cx - wall.0).abs();
-        let cdy = (cy - wall.1).abs();
-        if cdx + cdy == 1 {
-            // Trace back to first step
-            let mut step = (cx, cy);
-            while parent[&step] != (from.x, from.y) {
-                step = parent[&step];
+            // Hard constraint: unwalkable
+            if !grid.is_walkable(target.x, target.y) {
+                return f32::NEG_INFINITY;
             }
-            let sdx = step.0 - from.x;
-            let sdy = step.1 - from.y;
-            return match (sdx, sdy) {
-                (0, -1) => Some(BomberAction::Up),
-                (0, 1) => Some(BomberAction::Down),
-                (-1, 0) => Some(BomberAction::Left),
-                (1, 0) => Some(BomberAction::Right),
-                _ => None,
-            };
-        }
 
-        for (nx, ny) in [(cx, cy - 1), (cx, cy + 1), (cx - 1, cy), (cx + 1, cy)] {
-            if !parent.contains_key(&(nx, ny)) && grid.is_walkable(nx, ny) {
-                parent.insert((nx, ny), (cx, cy));
-                queue.push_back((nx, ny));
+            // Hard constraint: blast zone
+            if in_blast_zone(target, bombs) {
+                return -10.0;
+            }
+
+            let mut score = 0.0;
+
+            // Flee: escaping blast zone is top priority
+            if in_blast_zone(pos, bombs) && !in_blast_zone(target, bombs) {
+                score += 10.0;
+            }
+
+            // Hunt: move toward areas with more destructible walls
+            let current_walls = wall_density(grid, pos, 3);
+            let target_walls = wall_density(grid, target, 3);
+            score += (target_walls - current_walls) as f32 * 0.3;
+
+            // Bonus: target cell is adjacent to destructible wall (bomb position)
+            if has_adjacent_wall(grid, target) {
+                score += 1.0;
+            }
+
+            // Persist: penalize reversing
+            if is_reverse(*action, last_dir) {
+                score -= 1.0;
+            }
+
+            // Explore: slight center bias
+            let center = 6i32;
+            let dist_before = (pos.x - center).abs() + (pos.y - center).abs();
+            let dist_after = (target.x - center).abs() + (target.y - center).abs();
+            if dist_after < dist_before {
+                score += 0.2;
+            }
+
+            score
+        }
+        BomberAction::Bomb => {
+            if !should_place_bomb(grid, pos, bombs) {
+                return f32::NEG_INFINITY;
+            }
+            5.0 // Bomb is good when valid
+        }
+        BomberAction::Wait => {
+            if in_blast_zone(pos, bombs) {
+                -10.0
+            } else {
+                -1.0
             }
         }
     }
-
-    None
 }
 
 // ── P1: Random ─────────────────────────────────────────────────
@@ -670,27 +457,24 @@ impl BomberPlayer for RandomPlayer {
     }
 }
 
-// ── P2: Greedy (Model proxy) ──────────────────────────────────
+// ── P2: Greedy ─────────────────────────────────────────────────
 
-/// P2: Model-based player — state machine for purposeful movement.
+/// P2: Model-based — policy scoring with exploration.
 ///
-/// Uses a state machine (Explore/Flee) for committed, non-oscillating movement:
-/// - Explore: walk in a direction until blocked, bomb near destructible walls
-/// - Flee: BFS pathfind to nearest safe cell when in blast zone
-///
-/// 20% random exploration to avoid predictability.
+/// Scores all actions using clear policy priorities (flee > bomb > hunt > explore)
+/// and picks the best. Adds 20% random exploration to discover new strategies.
 pub struct GreedyPlayer {
     _id: u8,
-    state: AiState,
     known_bombs: Vec<((i32, i32), u32)>,
+    last_dir: Option<BomberAction>,
 }
 
 impl GreedyPlayer {
     pub fn new(id: u8) -> Self {
         Self {
             _id: id,
-            state: AiState::default(),
             known_bombs: Vec::new(),
+            last_dir: None,
         }
     }
 }
@@ -705,44 +489,8 @@ impl BomberPlayer for GreedyPlayer {
     ) -> BomberAction {
         update_bombs(&mut self.known_bombs, events);
 
-        // ── Evaluate: transition state if needed ──
-        let in_danger = in_blast_zone(pos, &self.known_bombs);
-
-        if in_danger {
-            self.state = AiState::Flee;
-        } else {
-            match self.state {
-                AiState::Flee => {
-                    // Safe now → hunt a wall or explore
-                    if let Some(wall) = find_nearest_wall(grid, pos) {
-                        self.state = AiState::Hunt { target: wall };
-                    } else {
-                        self.state = AiState::Explore {
-                            dir: pick_explore_dir(grid, pos, None, &self.known_bombs, rng),
-                        };
-                    }
-                }
-                AiState::Hunt { target } => {
-                    // Target destroyed? Find new one
-                    if !matches!(
-                        grid.get(target.0, target.1),
-                        super::Cell::DestructibleWall | super::Cell::PowerUpHidden(_)
-                    ) {
-                        if let Some(wall) = find_nearest_wall(grid, pos) {
-                            self.state = AiState::Hunt { target: wall };
-                        } else {
-                            self.state = AiState::Explore {
-                                dir: pick_explore_dir(grid, pos, None, &self.known_bombs, rng),
-                            };
-                        }
-                    }
-                }
-                AiState::Explore { .. } => {}
-            }
-        }
-
-        // 20% random exploration (only when safe and not hunting)
-        if !in_danger && rng.f32() < 0.2 && !matches!(self.state, AiState::Hunt { .. }) {
+        // 20% random exploration
+        if rng.f32() < 0.2 {
             let idx = rng.usize(0..ACTION_COUNT);
             let action = index_to_action(idx);
             let target = move_target(&action, pos);
@@ -757,75 +505,39 @@ impl BomberPlayer for GreedyPlayer {
                         | BomberAction::Left
                         | BomberAction::Right
                 ) {
-                    self.state = AiState::Explore { dir: action };
+                    self.last_dir = Some(action);
                 }
                 return action;
             }
         }
 
-        // ── Execute current state ──
-        match self.state {
-            AiState::Flee => {
-                if let Some(safe) = find_safe_cell(grid, pos, &self.known_bombs)
-                    && let Some(step) = next_step_toward(grid, pos, safe)
-                {
-                    return step;
-                }
-                BomberAction::Wait
-            }
-            AiState::Hunt { target } => {
-                // Adjacent to target? Bomb it
-                let adj = (pos.x - target.0).abs() + (pos.y - target.1).abs();
-                if adj == 1 && should_place_bomb(grid, pos, &self.known_bombs) {
-                    self.known_bombs.push(((pos.x, pos.y), DEFAULT_BLAST_RANGE));
-                    self.state = AiState::Flee;
-                    return BomberAction::Bomb;
-                }
-                // Walk toward target
-                match step_toward_wall(grid, pos, target) {
-                    Some(step) if !in_blast_zone(move_target(&step, pos), &self.known_bombs) => {
-                        step
-                    }
-                    _ => {
-                        // Unreachable or unsafe → explore
-                        let new_dir = pick_explore_dir(grid, pos, None, &self.known_bombs, rng);
-                        self.state = AiState::Explore { dir: new_dir };
-                        new_dir
-                    }
-                }
-            }
-            AiState::Explore { dir } => {
-                // Bomb opportunity — always bomb when conditions are met
-                if should_place_bomb(grid, pos, &self.known_bombs) {
-                    self.known_bombs.push(((pos.x, pos.y), DEFAULT_BLAST_RANGE));
-                    self.state = AiState::Flee;
-                    return BomberAction::Bomb;
-                }
+        // Policy: score all actions, pick best
+        let best = ALL_ACTIONS
+            .iter()
+            .max_by(|a, b| {
+                score_action(a, grid, pos, &self.known_bombs, self.last_dir)
+                    .partial_cmp(&score_action(
+                        b,
+                        grid,
+                        pos,
+                        &self.known_bombs,
+                        self.last_dir,
+                    ))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .copied()
+            .unwrap_or(BomberAction::Wait);
 
-                // Continue direction if walkable AND safe from blasts
-                let target = move_target(&dir, pos);
-                if matches!(
-                    dir,
-                    BomberAction::Up
-                        | BomberAction::Down
-                        | BomberAction::Left
-                        | BomberAction::Right
-                ) && grid.is_walkable(target.x, target.y)
-                    && !in_blast_zone(target, &self.known_bombs)
-                {
-                    dir
-                } else {
-                    // Blocked → try hunt, else new direction
-                    if let Some(wall) = find_nearest_wall(grid, pos) {
-                        self.state = AiState::Hunt { target: wall };
-                        return step_toward_wall(grid, pos, wall).unwrap_or(BomberAction::Wait);
-                    }
-                    let new_dir = pick_explore_dir(grid, pos, Some(dir), &self.known_bombs, rng);
-                    self.state = AiState::Explore { dir: new_dir };
-                    new_dir
-                }
-            }
+        if matches!(
+            best,
+            BomberAction::Up | BomberAction::Down | BomberAction::Left | BomberAction::Right
+        ) {
+            self.last_dir = Some(best);
         }
+        if best == BomberAction::Bomb {
+            self.known_bombs.push(((pos.x, pos.y), DEFAULT_BLAST_RANGE));
+        }
+        best
     }
 
     fn name(&self) -> &str {
@@ -837,8 +549,8 @@ impl BomberPlayer for GreedyPlayer {
     }
 
     fn reset(&mut self) {
-        self.state = AiState::default();
         self.known_bombs.clear();
+        self.last_dir = None;
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -852,16 +564,15 @@ impl BomberPlayer for GreedyPlayer {
 
 // ── P3: Validator ──────────────────────────────────────────────
 
-/// P3: Model + Validator — state machine with safety validation.
+/// P3: Model + Validator — policy scoring with safety validation.
 ///
-/// Same state machine as P2 (Explore/Flee) but adds a safety validation layer:
-/// - State machine picks action, then validates against hard safety rules
-/// - Falls back to heuristic scoring if state machine action is unsafe
-/// - Never walk into active blast zones, walls, or place bomb without escape route
+/// Same policy scoring as P2 but adds a hard safety filter:
+/// - Only considers actions that pass `is_safe_action`
+/// - Never walks into active blast zones, walls, or places bomb without escape
 pub struct ValidatorPlayer {
     _id: u8,
     known_bombs: Vec<((i32, i32), u32)>,
-    state: AiState,
+    last_dir: Option<BomberAction>,
 }
 
 impl ValidatorPlayer {
@@ -869,7 +580,7 @@ impl ValidatorPlayer {
         Self {
             _id: id,
             known_bombs: Vec::new(),
-            state: AiState::default(),
+            last_dir: None,
         }
     }
 }
@@ -880,150 +591,35 @@ impl BomberPlayer for ValidatorPlayer {
         grid: &ArenaGrid,
         pos: GridPos,
         events: &[GameEvent],
-        rng: &mut Rng,
+        _rng: &mut Rng,
     ) -> BomberAction {
         update_bombs(&mut self.known_bombs, events);
 
-        // ── Evaluate: transition state if needed ──
-        let in_danger = in_blast_zone(pos, &self.known_bombs);
+        // Score all SAFE actions, pick best
+        let mut best = BomberAction::Wait;
+        let mut best_score = f32::NEG_INFINITY;
 
-        if in_danger {
-            self.state = AiState::Flee;
-        } else {
-            match self.state {
-                AiState::Flee => {
-                    if let Some(wall) = find_nearest_wall(grid, pos) {
-                        self.state = AiState::Hunt { target: wall };
-                    } else {
-                        self.state = AiState::Explore {
-                            dir: pick_explore_dir(grid, pos, None, &self.known_bombs, rng),
-                        };
-                    }
-                }
-                AiState::Hunt { target } => {
-                    if !matches!(
-                        grid.get(target.0, target.1),
-                        super::Cell::DestructibleWall | super::Cell::PowerUpHidden(_)
-                    ) {
-                        if let Some(wall) = find_nearest_wall(grid, pos) {
-                            self.state = AiState::Hunt { target: wall };
-                        } else {
-                            self.state = AiState::Explore {
-                                dir: pick_explore_dir(grid, pos, None, &self.known_bombs, rng),
-                            };
-                        }
-                    }
-                }
-                AiState::Explore { .. } => {}
+        for action in &ALL_ACTIONS {
+            if !is_safe_action(action, grid, pos, &self.known_bombs) {
+                continue;
+            }
+            let score = score_action(action, grid, pos, &self.known_bombs, self.last_dir);
+            if score > best_score {
+                best_score = score;
+                best = *action;
             }
         }
 
-        // ── Execute: state machine picks action ──
-        let action = match self.state {
-            AiState::Flee => {
-                if let Some(safe) = find_safe_cell(grid, pos, &self.known_bombs)
-                    && let Some(step) = next_step_toward(grid, pos, safe)
-                {
-                    step
-                } else {
-                    BomberAction::Wait
-                }
-            }
-            AiState::Hunt { target } => {
-                let adj = (pos.x - target.0).abs() + (pos.y - target.1).abs();
-                if adj == 1 && should_place_bomb(grid, pos, &self.known_bombs) {
-                    BomberAction::Bomb
-                } else {
-                    match step_toward_wall(grid, pos, target) {
-                        Some(step)
-                            if !in_blast_zone(move_target(&step, pos), &self.known_bombs) =>
-                        {
-                            step
-                        }
-                        _ => {
-                            let new_dir = pick_explore_dir(grid, pos, None, &self.known_bombs, rng);
-                            self.state = AiState::Explore { dir: new_dir };
-                            new_dir
-                        }
-                    }
-                }
-            }
-            AiState::Explore { dir } => {
-                // Bomb opportunity (safety validated below)
-                if should_place_bomb(grid, pos, &self.known_bombs) {
-                    BomberAction::Bomb
-                } else {
-                    // Continue direction if walkable AND safe from blasts
-                    let target = move_target(&dir, pos);
-                    if matches!(
-                        dir,
-                        BomberAction::Up
-                            | BomberAction::Down
-                            | BomberAction::Left
-                            | BomberAction::Right
-                    ) && grid.is_walkable(target.x, target.y)
-                        && !in_blast_zone(target, &self.known_bombs)
-                    {
-                        dir
-                    } else {
-                        // Blocked → try hunt, else new direction
-                        if let Some(wall) = find_nearest_wall(grid, pos) {
-                            self.state = AiState::Hunt { target: wall };
-                            step_toward_wall(grid, pos, wall).unwrap_or(BomberAction::Wait)
-                        } else {
-                            let new_dir =
-                                pick_explore_dir(grid, pos, Some(dir), &self.known_bombs, rng);
-                            self.state = AiState::Explore { dir: new_dir };
-                            new_dir
-                        }
-                    }
-                }
-            }
-        };
-
-        // ── Safety validation ──
-        if is_safe_action(&action, grid, pos, &self.known_bombs) {
-            match action {
-                BomberAction::Up
-                | BomberAction::Down
-                | BomberAction::Left
-                | BomberAction::Right => {
-                    // Preserve Hunt state during pathfinding; update dir for Explore
-                    if !matches!(self.state, AiState::Hunt { .. }) {
-                        self.state = AiState::Explore { dir: action };
-                    }
-                }
-                BomberAction::Bomb => {
-                    self.known_bombs.push(((pos.x, pos.y), DEFAULT_BLAST_RANGE));
-                    self.state = AiState::Flee;
-                }
-                BomberAction::Wait => {}
-            }
-            return action;
+        if matches!(
+            best,
+            BomberAction::Up | BomberAction::Down | BomberAction::Left | BomberAction::Right
+        ) {
+            self.last_dir = Some(best);
         }
-
-        // Fallback: pick best safe action via heuristic
-        let mut safe_actions: Vec<(BomberAction, f32)> = Vec::new();
-        for a in &ALL_ACTIONS {
-            if is_safe_action(a, grid, pos, &self.known_bombs) {
-                let score = heuristic_score(a, grid, pos, &self.known_bombs, None);
-                safe_actions.push((*a, score));
-            }
+        if best == BomberAction::Bomb {
+            self.known_bombs.push(((pos.x, pos.y), DEFAULT_BLAST_RANGE));
         }
-
-        if !safe_actions.is_empty() {
-            safe_actions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let chosen = safe_actions[0].0;
-            if matches!(
-                chosen,
-                BomberAction::Up | BomberAction::Down | BomberAction::Left | BomberAction::Right
-            ) {
-                self.state = AiState::Explore { dir: chosen };
-            }
-            return chosen;
-        }
-
-        BomberAction::Wait
+        best
     }
 
     fn name(&self) -> &str {
@@ -1036,7 +632,7 @@ impl BomberPlayer for ValidatorPlayer {
 
     fn reset(&mut self) {
         self.known_bombs.clear();
-        self.state = AiState::default();
+        self.last_dir = None;
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1050,11 +646,13 @@ impl BomberPlayer for ValidatorPlayer {
 
 // ── P4: Full HL ────────────────────────────────────────────────
 
-/// P4: Full HL — bandit-adapted action selection with absorb-compress.
+/// P4: Full HL — bandit-adapted policy with absorb-compress.
 ///
-/// Same base as P3 but uses a simple bandit over the 6 actions to adapt
-/// relevance scores based on observed outcomes. Compresses stable low-Q
-/// arms into hard blocks over time.
+/// Blends policy scoring (60%) with bandit Q-values (40%) and adds:
+/// - ε-greedy exploration (10%)
+/// - Safety validation layer
+/// - Absorb-compress: prunes consistently bad actions
+/// - Trial logging for outcome attribution
 pub struct HLPlayer {
     _id: u8,
     known_bombs: Vec<((i32, i32), u32)>,
@@ -1177,7 +775,7 @@ impl BomberPlayer for HLPlayer {
     ) -> BomberAction {
         update_bombs(&mut self.known_bombs, events);
 
-        // Compute blended scores: 60% heuristic + 40% bandit Q-value
+        // Compute blended scores: 60% policy + 40% bandit Q-value
         let mut scores: [(BomberAction, f32); ACTION_COUNT] = ALL_ACTIONS.map(|a| (a, 0.0));
 
         for (i, action) in ALL_ACTIONS.iter().enumerate() {
@@ -1187,10 +785,10 @@ impl BomberPlayer for HLPlayer {
                 continue;
             }
 
-            let h = heuristic_score(action, grid, pos, &self.known_bombs, self.last_dir);
+            let h = score_action(action, grid, pos, &self.known_bombs, self.last_dir);
 
-            // Domain hard block (walking into wall) overrides everything
-            if h <= -1.0 {
+            // Domain hard block (unwalkable, unsafe bomb) overrides everything
+            if h == f32::NEG_INFINITY {
                 scores[i] = (*action, h);
                 continue;
             }
@@ -1206,7 +804,7 @@ impl BomberPlayer for HLPlayer {
                 0.0
             };
 
-            // Blend: 60% heuristic + 40% bandit + safety
+            // Blend: 60% policy + 40% bandit + safety
             let blended = h * 0.6 + bandit_q * 0.4 + safety_bonus;
             scores[i] = (*action, blended);
         }

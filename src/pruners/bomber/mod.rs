@@ -24,7 +24,7 @@ pub const BOMB_FUSE_TICKS: u32 = 4;
 pub const DEFAULT_BLAST_RANGE: u32 = 2;
 pub const DEFAULT_MAX_BOMBS: u8 = 1;
 pub const DEFAULT_SPEED: u8 = 1;
-pub const TICK_LIMIT: u32 = 200;
+pub const TICK_LIMIT: u32 = 500;
 pub const DESTRUCTIBLE_FILL: f32 = 0.40;
 pub const SPAWN_POSITIONS: [(i32, i32); 4] = [(1, 1), (11, 1), (1, 11), (11, 11)];
 
@@ -199,7 +199,9 @@ pub struct ScoreBoard {
 
 impl ScoreBoard {
     pub fn add(&mut self, player: u8, points: i32) {
-        if let 0..=3 = player { self.scores[player as usize] += points }
+        if let 0..=3 = player {
+            self.scores[player as usize] += points
+        }
     }
 }
 

@@ -89,7 +89,7 @@ fn record_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng)
     let mut snapshots = Vec::new();
     let mut all_events: Vec<GameEvent> = Vec::new();
 
-    for _ in 0..200 {
+    for _ in 0..microgpt_rs::pruners::bomber::TICK_LIMIT {
         // Snapshot current state
         let snap = capture_snapshot(&mut world, &all_events);
         snapshots.push(snap);
