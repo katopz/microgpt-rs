@@ -250,6 +250,8 @@ mod tests {
             reader_lora: None,
             writer_lora: None,
             native_pruner: Some("no_pruner".into()),
+            truncation: None,
+            reasoning_retention: None,
         }
     }
 
@@ -285,6 +287,8 @@ mod tests {
                 reader_lora: None,
                 writer_lora: None,
                 native_pruner: Some("no_pruner".into()),
+                truncation: None,
+                reasoning_retention: None,
             },
         ]);
         let registry = ExpertRegistry::from_config(&config, Path::new("."));
@@ -306,6 +310,8 @@ mod tests {
                 reader_lora: None,
                 writer_lora: None,
                 native_pruner: Some("no_pruner".into()),
+                truncation: None,
+                reasoning_retention: None,
             },
         ]);
         let registry = ExpertRegistry::from_config(&config, Path::new("/pruners"));
@@ -329,6 +335,8 @@ mod tests {
                 reader_lora: None,
                 writer_lora: None,
                 native_pruner: None,
+                truncation: None,
+                reasoning_retention: None,
             },
         ]);
         let registry = ExpertRegistry::from_config(&config, Path::new("/no/such/dir"));
@@ -365,6 +373,8 @@ mod tests {
                 reader_lora: None,
                 writer_lora: None,
                 native_pruner: None,
+                truncation: None,
+                reasoning_retention: None,
             },
         ]);
         let registry = ExpertRegistry::from_config(&config, Path::new("."));

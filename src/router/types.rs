@@ -60,6 +60,44 @@ pub struct ExpertBundle {
 // Config types (loaded from TOML)
 // ---------------------------------------------------------------------------
 
+// ── Truncation & Reasoning Policy (Plan 029, Dynamo Lessons 5 + 6) ──
+
+/// Truncation policy for context window management per domain.
+///
+/// NVIDIA Dynamo showed `tokens` mode (10K tokens) vs `bytes` mode (10K bytes)
+/// cuts off ASCII coding output much earlier. Different domains need different policies.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct TruncationPolicy {
+    /// Truncation mode: count by tokens or by bytes.
+    pub mode: TruncationMode,
+    /// Maximum count before truncation kicks in.
+    pub limit: usize,
+}
+
+/// How to count content for truncation.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TruncationMode {
+    /// Truncate by number of tokens (accurate, requires tokenizer).
+    Tokens,
+    /// Truncate by byte count (fast, may cut multi-byte chars).
+    Bytes,
+}
+
+/// Reasoning retention policy for multi-turn agentic sessions.
+///
+/// Dynamo found that reasoning retention is not one-size-fits-all:
+/// - Some models intentionally drop prior reasoning (DeepSeek-R1)
+/// - Agentic turns with tools: reasoning must stay attached to tool calls
+/// - `truncate_history_thinking=true` saves context but removes reasoning behind prior tool calls
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ReasoningRetention {
+    /// Whether to preserve reasoning tokens from previous turns.
+    pub preserve: bool,
+    /// Maximum reasoning tokens to retain per turn (0 = unlimited).
+    pub max_per_turn: usize,
+}
+
 /// A single domain definition loaded from `domains.toml`.
 ///
 /// ```toml
@@ -98,6 +136,14 @@ pub struct DomainConfig {
     /// Name of a built-in native pruner: `"sudoku"`, `"tactical"`, `"no_pruner"`.
     #[serde(default)]
     pub native_pruner: Option<String>,
+    /// Truncation policy for context window management.
+    /// Controls how conversation history is trimmed when approaching context limits.
+    #[serde(default)]
+    pub truncation: Option<TruncationPolicy>,
+    /// Reasoning retention policy for multi-turn agentic sessions.
+    /// Controls whether prior reasoning tokens are preserved in subsequent turns.
+    #[serde(default)]
+    pub reasoning_retention: Option<ReasoningRetention>,
 }
 
 /// Top-level router configuration loaded from `domains.toml`.
@@ -230,4 +276,81 @@ pub struct EmbeddingExpertBundle {
     pub lora_path: Option<PathBuf>,
     /// Loaded LoRA pair for modality switching (Plan 025).
     pub lora_pair: LoraPair,
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncation_mode_tokens_deserialize() {
+        let toml = "mode = \"tokens\"\nlimit = 10000";
+        let policy: TruncationPolicy = toml::from_str(toml).unwrap();
+        assert_eq!(policy.mode, TruncationMode::Tokens);
+        assert_eq!(policy.limit, 10000);
+    }
+
+    #[test]
+    fn test_truncation_mode_bytes_deserialize() {
+        let toml = "mode = \"bytes\"\nlimit = 10240";
+        let policy: TruncationPolicy = toml::from_str(toml).unwrap();
+        assert_eq!(policy.mode, TruncationMode::Bytes);
+        assert_eq!(policy.limit, 10240);
+    }
+
+    #[test]
+    fn test_reasoning_retention_deserialize() {
+        let toml = "preserve = true\nmax_per_turn = 500";
+        let retention: ReasoningRetention = toml::from_str(toml).unwrap();
+        assert!(retention.preserve);
+        assert_eq!(retention.max_per_turn, 500);
+    }
+
+    #[test]
+    fn test_domain_config_with_truncation() {
+        let toml_str = r#"
+name = "test_domain"
+keywords = ["test"]
+truncation = { mode = "tokens", limit = 5000 }
+"#;
+        let config: DomainConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.name, "test_domain");
+        assert!(config.truncation.is_some());
+        let t = config.truncation.unwrap();
+        assert_eq!(t.mode, TruncationMode::Tokens);
+        assert_eq!(t.limit, 5000);
+    }
+
+    #[test]
+    fn test_domain_config_without_truncation() {
+        let toml_str = r#"
+name = "general"
+keywords = []
+"#;
+        let config: DomainConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.truncation.is_none());
+        assert!(config.reasoning_retention.is_none());
+    }
+
+    #[test]
+    fn test_full_router_config_with_truncation() {
+        let toml_str = r#"
+[[domain]]
+name = "rust_code"
+keywords = ["rust"]
+truncation = { mode = "tokens", limit = 10000 }
+
+[[domain]]
+name = "general"
+keywords = []
+"#;
+        let config: RouterConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.domain.len(), 2);
+        assert!(config.domain[0].truncation.is_some());
+        assert!(config.domain[1].truncation.is_none());
+    }
 }
