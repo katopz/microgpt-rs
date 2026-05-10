@@ -33,6 +33,8 @@
 
 use std::fmt;
 
+use super::absorb_compress::AbsorbCompress;
+use super::trial_log::{TrialLog, TrialRecord};
 use crate::speculative::types::ScreeningPruner;
 use crate::types::Rng;
 
@@ -728,6 +730,115 @@ impl<E: BanditEnv> BanditSession<E> {
         });
 
         (events, result)
+    }
+
+    /// Run the bandit session with trial log persistence.
+    ///
+    /// Same as [`run`](Self::run) but appends each episode's record to `trial_log`.
+    /// The `config` string is attached to every record for later analysis.
+    pub fn run_with_trial_log(
+        mut self,
+        episodes: usize,
+        rng: &mut Rng,
+        trial_log: &mut TrialLog,
+        config: &str,
+    ) -> (Vec<BanditEvent>, BanditResult) {
+        let mut events = Vec::with_capacity(episodes + 1);
+        let optimal_arm = self.env.optimal_arm();
+        let optimal_reward = self.env.optimal_reward();
+
+        for episode in 0..episodes {
+            let arm = self.select_arm(rng);
+            let reward = self.env.pull(arm, rng);
+            let q_before = self.stats.q_value(arm);
+
+            events.push(BanditEvent::Pull {
+                episode,
+                arm,
+                reward,
+                q_value: q_before,
+            });
+
+            self.stats.update(arm, reward);
+            self.cumulative_reward += reward;
+            self.cumulative_regret += optimal_reward - self.env.expected_reward(arm);
+
+            self.decay_epsilon();
+
+            // Persist to trial log
+            let record = TrialRecord {
+                episode,
+                arm,
+                reward,
+                q_value: self.stats.q_value(arm),
+                cumulative_reward: self.cumulative_reward,
+                cumulative_regret: self.cumulative_regret,
+                config: config.to_string(),
+                note: String::new(),
+            };
+            if let Err(e) = trial_log.append(&record) {
+                eprintln!("trial_log write error at episode {episode}: {e}");
+            }
+
+            events.push(BanditEvent::EpisodeComplete {
+                episode,
+                arm,
+                reward,
+                cumulative_reward: self.cumulative_reward,
+                cumulative_regret: self.cumulative_regret,
+            });
+        }
+
+        let best_arm = self.stats.best_arm();
+        let result = BanditResult {
+            total_episodes: episodes,
+            total_reward: self.cumulative_reward,
+            total_regret: self.cumulative_regret,
+            best_arm,
+            optimal_arm,
+            q_values: self.stats.q_values.to_vec(),
+            visits: self.stats.visits.to_vec(),
+        };
+
+        events.push(BanditEvent::SessionComplete {
+            total_episodes: episodes,
+            total_reward: self.cumulative_reward,
+            total_regret: self.cumulative_regret,
+            best_arm,
+            optimal_arm,
+        });
+
+        let _ = trial_log.flush();
+        (events, result)
+    }
+}
+
+// ── AbsorbCompress Integration ──────────────────────────────────
+
+impl<P: ScreeningPruner + AbsorbCompress> BanditPruner<P> {
+    /// Feed a new (arm, reward) observation to the absorb-compress layer.
+    ///
+    /// Call after [`update`](Self::update) to keep compression tracking in sync
+    /// with bandit Q-values.
+    pub fn absorb(&mut self, arm: usize, reward: f32) {
+        self.inner.absorb(arm, reward);
+    }
+
+    /// Check if compression threshold is met, then promote low-Q arms to hard blocks.
+    ///
+    /// Returns indices of newly promoted arms (may be empty).
+    /// Call periodically (e.g., every 100 episodes) after absorb-feeding.
+    pub fn compress_cycle(&mut self) -> Vec<usize> {
+        if self.inner.should_compress() {
+            self.inner.compress()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Arms already promoted to hard constraints by the absorb-compress cycle.
+    pub fn compressed_arms(&self) -> &[usize] {
+        self.inner.compressed_arms()
     }
 }
 

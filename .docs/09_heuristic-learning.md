@@ -1,5 +1,7 @@
 # microgpt-rs: Heuristic Learning
 
+> **Status (Plan 032):** TrialLog, AbsorbCompress, HotSwapPruner, and RegressionSuite are implemented behind `--features bandit`. See examples `hl_01_trial_log` and `hl_02_hotswap`.
+
 ## What is Heuristic Learning?
 
 Heuristic Learning (HL) is a paradigm where **software systems evolve through code updates** rather than neural network weight updates. A coding agent reads feedback (test failures, environment rewards, logs, replays) and directly edits policies, validators, tests, and memory — no backpropagation required.

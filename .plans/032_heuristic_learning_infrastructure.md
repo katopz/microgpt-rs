@@ -34,7 +34,7 @@ Round N+m:   Agent writes new validator.rs → compile .wasm → HotSwapPruner.r
 
 ## Tasks
 
-- [ ] **Task 1: TrialLog** (`src/pruners/trial_log.rs`)
+- [x] **Task 1: TrialLog** (`src/pruners/trial_log.rs`)
   - Struct `TrialRecord { episode, arm, reward, q_value, cumulative_reward, cumulative_regret, config: String, note: String }`
   - `TrialLog::new(path)` — create/append to JSONL file
   - `TrialLog::append(&mut self, record: &TrialRecord)` — serialize and write one line
@@ -44,7 +44,7 @@ Round N+m:   Agent writes new validator.rs → compile .wasm → HotSwapPruner.r
   - Tests: roundtrip write+read, summary aggregation, empty log edge case
   - ~150 lines
 
-- [ ] **Task 2: AbsorbCompress** (`src/pruners/absorb_compress.rs`)
+- [x] **Task 2: AbsorbCompress** (`src/pruners/absorb_compress.rs`)
   - Trait `AbsorbCompress: ScreeningPruner`
   - `fn absorb(&mut self, arm: usize, reward: f32)` — feed new observation
   - `fn compress(&mut self) -> Vec<usize>` — promote stable low-Q arms to hard blocks, returns promoted arm indices
@@ -55,7 +55,7 @@ Round N+m:   Agent writes new validator.rs → compile .wasm → HotSwapPruner.r
   - Tests: no compress under threshold, compress fires at threshold, compressed arms blocked, double-compress idempotent
   - ~200 lines
 
-- [ ] **Task 3: HotSwapPruner** (`src/pruners/hot_swap.rs`)
+- [x] **Task 3: HotSwapPruner** (`src/pruners/hot_swap.rs`)
   - Struct `HotSwapPruner { current: WasmPruner, wasm_path: PathBuf, version: u64 }`
   - `HotSwapPruner::new(wasm_path: &Path) -> Result<Self>` — load initial .wasm
   - `HotSwapPruner::reload(&mut self) -> Result<bool>` — reload .wasm from disk, returns true if changed (blake3 hash comparison)
@@ -66,7 +66,7 @@ Round N+m:   Agent writes new validator.rs → compile .wasm → HotSwapPruner.r
   - ~180 lines
   - Note: requires `wasm` feature flag (same as WasmPruner)
 
-- [ ] **Task 4: RegressionSuite** (`src/pruners/regression.rs`)
+- [x] **Task 4: RegressionSuite** (`src/pruners/regression.rs`)
   - Struct `GoldenTrace { label: String, actions: Vec<usize>, expected_reward: f32, expected_survival: bool }`
   - Struct `RegressionSuite { traces: Vec<GoldenTrace>, tolerance: f32 }`
   - `RegressionSuite::from_trials(path: &Path, top_n: usize) -> Result<Self>` — extract top-N episodes from TrialLog as golden traces
@@ -76,14 +76,14 @@ Round N+m:   Agent writes new validator.rs → compile .wasm → HotSwapPruner.r
   - Tests: all-pass suite, tolerance boundary, empty suite
   - ~150 lines
 
-- [ ] **Task 5: Integration — BanditPruner + TrialLog + AbsorbCompress** (`src/pruners/bandit.rs` extension)
+- [x] **Task 5: Integration — BanditPruner + TrialLog + AbsorbCompress** (`src/pruners/bandit.rs` extension)
   - Add `BanditPruner::run_with_trial_log()` method that wraps `BanditSession::run()` but also appends to `TrialLog`
   - Add `BanditPruner::absorb_compress_cycle()` that checks `should_compress()` and calls `compress()` after each episode batch
   - Wire `AbsorbCompress` as a trait bound option for `BanditPruner<P>` where `P: ScreeningPruner + AbsorbCompress`
   - Tests: trial log has correct episode count after run, compress triggers at threshold, compressed arms reflected in Q-values
   - ~100 lines added to existing bandit.rs
 
-- [ ] **Task 6: HL Demo** (`examples/hl_01_trial_log.rs`)
+- [x] **Task 6: HL Demo** (`examples/hl_01_trial_log.rs`)
   - Uses `BernoulliEnv` (5 arms, one optimal) with `BanditSession`
   - Runs 1000 episodes with `TrialLog` persisting to `/tmp/hl_trial_log.jsonl`
   - After every 100 episodes, runs `AbsorbCompress::compress()`
@@ -91,7 +91,7 @@ Round N+m:   Agent writes new validator.rs → compile .wasm → HotSwapPruner.r
   - Proves: trial persistence works, absorb-compress promotes bad arms to hard blocks
   - ~200 lines
 
-- [ ] **Task 7: HotSwap Demo** (`examples/hl_02_hotswap.rs`)
+- [x] **Task 7: HotSwap Demo** (`examples/hl_02_hotswap.rs`)
   - Loads a WASM validator via `HotSwapPruner`
   - Runs 100 episodes with `BanditPruner<HotSwapPruner>` + `TrialLog`
   - Simulates "agent writes new .wasm": copies a different validator to the path
@@ -101,14 +101,14 @@ Round N+m:   Agent writes new validator.rs → compile .wasm → HotSwapPruner.r
   - ~250 lines
   - Requires `wasm` feature
 
-- [ ] **Task 8: Benchmark — Absorb-Compress Overhead** (`tests/bench_absorb_compress.rs`)
+- [x] **Task 8: Benchmark — Absorb-Compress Overhead** (`tests/bench_absorb_compress.rs`)
   - Benchmark `BanditPruner::relevance()` with and without `AbsorbCompress`
   - Benchmark `TrialLog::append()` throughput (writes per second)
   - Benchmark `HotSwapPruner::reload()` latency (blake3 hash + wasm load)
   - Target: absorb-compress adds <5% overhead to relevance(), trial log sustains >100K writes/sec, hotswap reload <10ms
   - ~150 lines
 
-- [ ] **Task 9: Update docs**
+- [x] **Task 9: Update docs**
   - Update `microgpt-rs/README.md` with HL section
   - Update `.docs/09_heuristic_learning.md` (Plan 033 dependency)
   - Update `src/pruners/mod.rs` with new module exports

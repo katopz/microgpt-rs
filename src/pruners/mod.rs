@@ -22,10 +22,34 @@ pub mod sudoku_pruner;
 pub use sudoku_pruner::SudokuPruner;
 
 #[cfg(feature = "bandit")]
+pub mod absorb_compress;
+
+#[cfg(feature = "bandit")]
 pub mod bandit;
+
+#[cfg(feature = "bandit")]
+pub mod hot_swap;
+
+#[cfg(feature = "bandit")]
+pub mod regression;
+
+#[cfg(feature = "bandit")]
+pub mod trial_log;
+
+#[cfg(feature = "bandit")]
+pub use absorb_compress::{AbsorbCompress, AbsorbCompressLayer, CompressConfig};
 
 #[cfg(feature = "bandit")]
 pub use bandit::{
     BanditEnv, BanditEvent, BanditPruner, BanditResult, BanditSession, BanditStats, BanditStrategy,
     BernoulliEnv, GaussianEnv,
 };
+
+#[cfg(feature = "bandit")]
+pub use hot_swap::HotSwapPruner;
+
+#[cfg(feature = "bandit")]
+pub use regression::{GoldenTrace, RegressionResult, RegressionSuite, ReplayReward};
+
+#[cfg(feature = "bandit")]
+pub use trial_log::{TrialLog, TrialRecord, TrialSummary};

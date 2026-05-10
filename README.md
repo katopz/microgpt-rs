@@ -855,6 +855,116 @@ Uses `GameActionScreener` (native Rust game action validator) as inner pruner fo
 Run: `cargo run --example bandit_02_ddtree --features bandit`
 Run: `cargo run --example bandit_06_resolver --features bandit`
 
+## 🧠 Heuristic Learning Infrastructure (Plan 032)
+
+Adds the missing infrastructure for Heuristic Learning (HL) — trial persistence, absorb-compress cycle, hot-swap pruner, and regression suite. This enables the Bomberman arena (Plan 033) and future coding-agent-driven validator evolution.
+
+### The HL Loop
+
+```
+Episode N:   BanditPruner selects arm → environment runs → reward → TrialLog.append()
+             ...
+Episode N+k: AbsorbCompress checks: arm 3 has Q=0.02 over 500 visits → promote to hard block
+             → BanditPruner delegates to BlockedArmPruner for arm 3
+             ...
+Round N+m:   Agent writes new validator.rs → compile .wasm → HotSwapPruner.reload()
+             → RegressionSuite.replay_golden() → all pass → keep new .wasm
+```
+
+### Module Structure
+
+| Module | Purpose | Lines |
+|--------|---------|-------|
+| `trial_log.rs` | Persistent JSONL episode history | ~150 |
+| `absorb_compress.rs` | Promote stable low-Q arms to hard blocks | ~200 |
+| `hot_swap.rs` | Runtime pruner reload via blake3 hash comparison | ~180 |
+| `regression.rs` | Replay golden episodes to detect regressions | ~150 |
+| `bandit.rs` (extension) | `run_with_trial_log()` + `absorb_compress_cycle()` | ~100 added |
+
+### Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    HL Infrastructure                      │
+│                                                          │
+│  ┌─────────────┐    ┌──────────────┐    ┌────────────┐  │
+│  │  TrialLog   │    │ AbsorbCompress│   │ Regression │  │
+│  │  (JSONL)    │    │ (Q→hard block)│   │ Suite      │  │
+│  │             │    │              │    │ (golden)   │  │
+│  │ append()    │◄───│ absorb()     │    │ replay()   │  │
+│  │ summary()   │    │ compress()   │    │ from_trials│  │
+│  └──────┬──────┘    └──────┬───────┘    └─────┬──────┘  │
+│         │                  │                   │          │
+│         ▼                  ▼                   ▼          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │              BanditPruner<P>                      │    │
+│  │  P = ScreeningPruner + AbsorbCompress             │    │
+│  │  relevance() = domain_score × bandit_bonus        │    │
+│  │  update() → TrialLog.append()                     │    │
+│  │  compress() → promote low-Q to hard blocks        │    │
+│  └──────────────────────┬───────────────────────────┘    │
+│                          │                                │
+│                          ▼                                │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │           HotSwapPruner (optional)                │    │
+│  │  Wraps any ScreeningPruner with runtime reload    │    │
+│  │  reload() → blake3 check → new pruner instance    │    │
+│  └──────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Trial Log Demo (1000 episodes, seed=42)
+
+5-armed Bernoulli bandit with absorb-compress. Arms 0 and 4 (worst) get compressed at episode 400, arm 1 at episode 500.
+
+```
+Initial Q-values: [0.000, 0.000, 0.000, 0.000, 0.000]
+...
+📦 Episode  400: Compressed arms [0, 4] (hard-blocked)
+📦 Episode  500: Compressed arms [1] (hard-blocked)
+...
+Final Q-values: [0.133 ✗, 0.067 ✗, 0.829, 0.408, 0.133 ✗]
+Best arm: 2 (optimal: 2)
+Avg reward: 0.776  Avg regret: 0.047
+Compressed arms: [0, 4, 1]
+```
+
+Run: `cargo run --example hl_01_trial_log --features bandit`
+
+### Hot-Swap Demo (200 episodes, seed=42)
+
+Runtime pruner reload at episode 100, regression suite verification.
+
+```
+Phase 1 (relevance=0.5): avg_reward=0.590
+🔄 Episode 100: Agent writes new pruner (relevance 0.5 → 0.9)
+Phase 2 (relevance=0.9): avg_reward=0.665
+HotSwap version: 1 → 2 (reload detected file change)
+Regression Suite: 10/10 traces passed ✅
+```
+
+Run: `cargo run --example hl_02_hotswap --features bandit`
+
+### Benchmark Results
+
+| Component | Metric | Result |
+|-----------|--------|--------|
+| AbsorbCompress `absorb()` | Overhead vs baseline | -35% (faster due to simpler state) |
+| AbsorbCompress `relevance()` | Overhead vs NoScreeningPruner | +53% (HashSet lookup per call) |
+| AbsorbCompress `compress()` | Per-call latency | ~35µs |
+| TrialLog `append()` | Throughput | >100K writes/sec |
+| HotSwapPruner `reload()` | Per-reload latency | <10ms (blake3 + file read) |
+
+Run: `cargo test --features bandit bench_absorb_compress -- --nocapture`
+
+### Key Design Decisions
+
+1. **TrialLog is append-only JSONL** — durable, simple, grep-able, no lock contention
+2. **AbsorbCompress is a trait** — `BanditPruner<P>` where `P: ScreeningPruner + AbsorbCompress` gets `compress_cycle()` for free
+3. **HotSwapPruner is generic over `ScreeningPruner`** — works with any pruner type, not just WASM
+4. **RegressionSuite uses `ReplayReward` trait** — decoupled from specific pruner/env types
+5. **Feature-gated** (`bandit`) — zero impact when disabled
+
 ## 🛠️ Getting Started
 
 ### Prerequisites
@@ -907,6 +1017,7 @@ cargo clippy --all-targets --all-features --quiet
 | `validator` | `syn`, `proc-macro2` | SynPruner + partial parser |
 | `sparse_mlp` | — | TwELL-inspired sparse MLP matmul (Plan 022) |
 | `ppot` | — | PPoT logit-parameterized CPU resampling + adaptive rescue (Plans 026 + 027) |
+| `bandit` | — | Multi-armed bandit + HL infrastructure: TrialLog, AbsorbCompress, HotSwapPruner, RegressionSuite (Plans 030–032) |
 | `full` | all above | Enable all features |
 
 Build with `--features <flag>` or `--all-features`.
@@ -936,6 +1047,11 @@ src/
       knowledge.rs  RejectionInsight, SessionKnowledge (ring buffer, adaptive threshold)
       rank.rs       rank_by_consistency, select_best_variant (self-consistency ranking)
     sudoku_pruner.rs  SudokuPruner (path-aware, cross-depth conflict detection) *
+    bandit.rs         BanditPruner, BanditSession, BanditEnv, BernoulliEnv, GaussianEnv, BanditStrategy, BanditStats ♭
+    trial_log.rs      TrialLog, TrialRecord, TrialSummary (JSONL episode persistence) ♭
+    absorb_compress.rs AbsorbCompress trait, AbsorbCompressLayer, CompressConfig (Q→hard block) ♭
+    hot_swap.rs       HotSwapPruner (runtime reload via blake3 hash) ♭
+    regression.rs     RegressionSuite, GoldenTrace, RegressionResult, ReplayReward ♭
   tokenizer/        BPE tokenizer (encode/decode/train, Config::bpe())
   validator/        SynPruner + partial parser ‡
   percepta.rs       Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
@@ -946,6 +1062,7 @@ src/
   ∘ behind --features sparse_mlp
   ○ behind --features ppot
   ‡ behind --features validator
+  ♭ behind --features bandit
 examples/
   raven_recall.rs        Raven RSM demo: frozen slots, O(1) scaling, memory footprint comparison
   sudoku_9x9.rs          Streaming solver with "thinking" output + hull compression stats *

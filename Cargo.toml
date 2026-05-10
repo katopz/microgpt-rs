@@ -61,6 +61,16 @@ required-features = ["bandit"]
 name = "bandit_07_director"
 required-features = ["bandit"]
 
+# ── Heuristic Learning ────────────────────────────────────────
+
+[[example]]
+name = "hl_01_trial_log"
+required-features = ["bandit"]
+
+[[example]]
+name = "hl_02_hotswap"
+required-features = ["bandit"]
+
 # ── Blue Bear ──────────────────────────────────────────────────
 
 [[example]]
