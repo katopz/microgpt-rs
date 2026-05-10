@@ -80,6 +80,113 @@ impl SearchResultItem {
     }
 }
 
+// ── Agent Hints (Plan 029, Dynamo Lesson 6) ──────────────────────
+
+/// Per-request hints that signal intent to the speculative decoding pipeline.
+///
+/// Inspired by NVIDIA Dynamo's `nvext.agent_hints`: a session waiting on user
+/// reply has different latency requirements than one running a background tool chain.
+///
+/// Passed via REST request header (`X-Agent-Hints`) or JSON body, forwarded to
+/// `SpeculativeContext` for speculative behavior tuning.
+#[derive(Debug, Clone, Default)]
+pub struct AgentHints {
+    /// Latency sensitivity: 0.0 = background/batch, 1.0 = interactive/real-time.
+    /// High sensitivity → more aggressive speculative lookahead, lower draft budget.
+    pub latency_sensitivity: f32,
+    /// Enable speculative prefill (prompt compression) for this request.
+    pub speculative_prefill: bool,
+    /// Scheduling priority (0-255). Higher = scheduled sooner.
+    pub priority: u8,
+}
+
+impl AgentHints {
+    /// Create hints for an interactive (user-facing) request.
+    pub fn interactive() -> Self {
+        Self {
+            latency_sensitivity: 1.0,
+            speculative_prefill: true,
+            priority: 128,
+        }
+    }
+
+    /// Create hints for a background (batch/tool-chain) request.
+    pub fn background() -> Self {
+        Self {
+            latency_sensitivity: 0.0,
+            speculative_prefill: false,
+            priority: 0,
+        }
+    }
+
+    /// Parse hints from a header value string.
+    /// Format: `latency=0.8;prefill=true;priority=64`
+    /// Unknown keys are ignored. Missing keys get defaults.
+    pub fn from_header(value: &str) -> Self {
+        let mut hints = Self::default();
+        for part in value.split(';') {
+            let part = part.trim();
+            if let Some((key, val)) = part.split_once('=') {
+                match key.trim() {
+                    "latency" => {
+                        if let Ok(v) = val.trim().parse::<f32>() {
+                            hints.latency_sensitivity = v.clamp(0.0, 1.0);
+                        }
+                    }
+                    "prefill" => {
+                        hints.speculative_prefill = val.trim().eq_ignore_ascii_case("true");
+                    }
+                    "priority" => {
+                        if let Ok(v) = val.trim().parse::<u8>() {
+                            hints.priority = v;
+                        }
+                    }
+                    _ => {} // ignore unknown keys
+                }
+            }
+        }
+        hints
+    }
+}
+
+// ── Tokenize Endpoint (Plan 029, Dynamo Lesson 7) ────────────────
+
+/// Request body for `/v1/tokenize` endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TokenizeRequest {
+    /// The text to tokenize.
+    pub text: String,
+    /// If true, return token strings in addition to IDs.
+    #[serde(default)]
+    pub include_tokens: bool,
+}
+
+/// Response from `/v1/tokenize` endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TokenizeResponse {
+    /// Token IDs produced by the tokenizer.
+    pub token_ids: Vec<usize>,
+    /// Token strings (only present if `include_tokens` was true).
+    #[serde(default)]
+    pub tokens: Vec<String>,
+    /// Total number of tokens.
+    pub count: usize,
+}
+
+/// Request body for `/v1/detokenize` endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DetokenizeRequest {
+    /// Token IDs to decode back to text.
+    pub token_ids: Vec<usize>,
+}
+
+/// Response from `/v1/detokenize` endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DetokenizeResponse {
+    /// Decoded text string.
+    pub text: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +252,105 @@ mod tests {
             score: 0.95,
         };
         assert_eq!(result.extract_token_sequence(), Some(vec![42]));
+    }
+
+    // ── AgentHints Tests (Plan 029) ──────────────────────────────
+
+    #[test]
+    fn test_agent_hints_default() {
+        let hints = AgentHints::default();
+        assert_eq!(hints.latency_sensitivity, 0.0);
+        assert!(!hints.speculative_prefill);
+        assert_eq!(hints.priority, 0);
+    }
+
+    #[test]
+    fn test_agent_hints_interactive() {
+        let hints = AgentHints::interactive();
+        assert_eq!(hints.latency_sensitivity, 1.0);
+        assert!(hints.speculative_prefill);
+        assert!(hints.priority > 0);
+    }
+
+    #[test]
+    fn test_agent_hints_background() {
+        let hints = AgentHints::background();
+        assert_eq!(hints.latency_sensitivity, 0.0);
+        assert!(!hints.speculative_prefill);
+        assert_eq!(hints.priority, 0);
+    }
+
+    #[test]
+    fn test_agent_hints_from_header_full() {
+        let hints = AgentHints::from_header("latency=0.8;prefill=true;priority=64");
+        assert!((hints.latency_sensitivity - 0.8).abs() < 1e-6);
+        assert!(hints.speculative_prefill);
+        assert_eq!(hints.priority, 64);
+    }
+
+    #[test]
+    fn test_agent_hints_from_header_partial() {
+        let hints = AgentHints::from_header("latency=0.5");
+        assert!((hints.latency_sensitivity - 0.5).abs() < 1e-6);
+        assert!(!hints.speculative_prefill); // default
+        assert_eq!(hints.priority, 0); // default
+    }
+
+    #[test]
+    fn test_agent_hints_from_header_empty() {
+        let hints = AgentHints::from_header("");
+        assert_eq!(hints.latency_sensitivity, 0.0);
+    }
+
+    #[test]
+    fn test_agent_hints_from_header_clamps_latency() {
+        let hints = AgentHints::from_header("latency=2.0");
+        assert!((hints.latency_sensitivity - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_agent_hints_from_header_ignores_unknown() {
+        let hints = AgentHints::from_header("unknown=foo;latency=0.3");
+        assert!((hints.latency_sensitivity - 0.3).abs() < 1e-6);
+    }
+
+    // ── Tokenize Types Tests (Plan 029) ──────────────────────────
+
+    #[test]
+    fn test_tokenize_request_serialization() {
+        let req = TokenizeRequest {
+            text: "hello world".into(),
+            include_tokens: true,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("hello world"));
+        assert!(json.contains("include_tokens"));
+    }
+
+    #[test]
+    fn test_tokenize_response_count() {
+        let resp = TokenizeResponse {
+            token_ids: vec![1, 2, 3],
+            tokens: vec!["a".into(), "b".into(), "c".into()],
+            count: 3,
+        };
+        assert_eq!(resp.count, resp.token_ids.len());
+    }
+
+    #[test]
+    fn test_detokenize_request_serialization() {
+        let req = DetokenizeRequest {
+            token_ids: vec![1, 2, 3],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("token_ids"));
+    }
+
+    #[test]
+    fn test_detokenize_response_text() {
+        let resp = DetokenizeResponse {
+            text: "hello world".into(),
+        };
+        assert_eq!(resp.text, "hello world");
     }
 }

@@ -17,4 +17,7 @@ pub mod client;
 pub mod types;
 
 pub use client::{RestClient, RestError, RetrievalResult};
-pub use types::{SearchRequest, SearchResponse, SearchResultItem};
+pub use types::{
+    AgentHints, DetokenizeRequest, DetokenizeResponse, SearchRequest, SearchResponse,
+    SearchResultItem, TokenizeRequest, TokenizeResponse,
+};
