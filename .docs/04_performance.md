@@ -124,4 +124,4 @@ pub struct PagedKVCache {
 | Cache tiling for attention | block_size=16 already fits L1 |
 | SIMD intrinsics | Stable Rust lacks `std::simd`; revisit when n_embd ≥ 256 |
 | f16/bf16 weights | Would halve memory bandwidth but requires `half` crate; sketched for future |
-| GPU compute in inference | CPU-only for inference; GPU training lives in riir-ai |
+| GPU compute in inference | CPU-only for inference; GPU training is out of scope |
