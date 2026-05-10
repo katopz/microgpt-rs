@@ -233,6 +233,7 @@ fn process_explosions(world: &mut World, queue: Vec<PendingExplosion>) -> Vec<(i
 
     for (kind, (x, y)) in powerups_revealed {
         world.spawn((PowerUp { kind }, GridPos { x, y }));
+        world.send_event(GameEvent::PowerUpRevealed { pos: (x, y), kind });
     }
 
     for be in bombs_to_despawn {
@@ -389,7 +390,12 @@ fn collect_powerups(world: &mut World) {
         }
     }
 
+    // Track already-despawned entities to prevent double-despawn when
+    // two players land on the same power-up cell in the same tick.
+    let mut collected_entities: HashSet<bevy_ecs::entity::Entity> = HashSet::new();
+
     for (player_entity, pu_entity, kind) in to_collect {
+        // Apply power-up effect to player
         match kind {
             PowerUpKind::BombUp => {
                 if let Some(mut c) = world.get_mut::<BombCount>(player_entity) {
@@ -411,8 +417,20 @@ fn collect_powerups(world: &mut World) {
             .get::<Player>(player_entity)
             .map(|p| p.id)
             .unwrap_or(0);
-        world.send_event(GameEvent::PowerUpCollected { player: pid, kind });
-        world.entity_mut(pu_entity).despawn();
+
+        // Only first player to reach this entity emits event and despawns
+        if collected_entities.insert(pu_entity) {
+            let pu_pos = world
+                .get::<GridPos>(pu_entity)
+                .map(|g| (g.x, g.y))
+                .unwrap_or((0, 0));
+            world.send_event(GameEvent::PowerUpCollected {
+                player: pid,
+                kind,
+                pos: pu_pos,
+            });
+            world.entity_mut(pu_entity).despawn();
+        }
     }
 }
 

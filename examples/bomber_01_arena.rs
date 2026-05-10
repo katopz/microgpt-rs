@@ -191,7 +191,7 @@ fn run_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng) ->
                     }
                 }
             }
-            GameEvent::PowerUpCollected { player, kind: _ } => {
+            GameEvent::PowerUpCollected { player, .. } => {
                 scores[*player as usize] += 1;
                 powerups.push((*player, 1));
             }

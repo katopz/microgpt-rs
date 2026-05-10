@@ -196,6 +196,23 @@ fn update_bombs(bombs: &mut Vec<((i32, i32), u32)>, events: &[GameEvent]) {
     }
 }
 
+/// Update known power-up list from events (revealed/collected).
+fn update_powerups(powerups: &mut Vec<(i32, i32)>, events: &[GameEvent]) {
+    for event in events {
+        match event {
+            GameEvent::PowerUpRevealed { pos, .. } => {
+                if !powerups.contains(pos) {
+                    powerups.push(*pos);
+                }
+            }
+            GameEvent::PowerUpCollected { pos, .. } => {
+                powerups.retain(|p| *p != *pos);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Check if player has an escape route after placing a bomb at `new_bomb_pos`.
 /// BFS from `player_pos` — must reach a cell outside ALL blast zones within
 /// `blast_range + 1` steps. Accounts for bomb entities blocking movement.
@@ -426,6 +443,7 @@ fn escape_distance(
 ///   Unsafe  → -∞     (wall, blast zone with no escape)
 ///   Flee    → +5..10 (escaping blast zone via shortest path)
 ///   Bomb    → +5.0   (near destructible wall + escape route)
+///   Collect → +2..3  (moving toward / standing on revealed power-ups)
 ///   Hunt    → +0..2  (moving toward destructible walls)
 ///   Persist → -1.0   (penalize reversing direction)
 ///   Explore → +0.2   (slight center bias)
@@ -434,6 +452,7 @@ fn score_action(
     grid: &ArenaGrid,
     pos: GridPos,
     bombs: &[((i32, i32), u32)],
+    powerups: &[(i32, i32)],
     last_dir: Option<BomberAction>,
 ) -> f32 {
     use BomberAction::{Down, Left, Right, Up};
@@ -473,6 +492,25 @@ fn score_action(
             // Flee: escaping blast zone is top priority
             if in_blast_zone(pos, grid, bombs) {
                 score += 10.0;
+            }
+
+            // Collect: move toward nearby revealed power-ups (high priority)
+            if !powerups.is_empty() {
+                let current_min = powerups
+                    .iter()
+                    .map(|&(px, py)| (pos.x - px).abs() + (pos.y - py).abs())
+                    .min()
+                    .unwrap_or(i32::MAX);
+                let target_min = powerups
+                    .iter()
+                    .map(|&(px, py)| (target.x - px).abs() + (target.y - py).abs())
+                    .min()
+                    .unwrap_or(i32::MAX);
+                if target_min == 0 {
+                    score += 3.0; // Standing on power-up — instant collect
+                } else if target_min < current_min {
+                    score += 2.0; // Moving toward nearest power-up
+                }
             }
 
             // Hunt: move toward areas with more destructible walls
@@ -583,6 +621,7 @@ impl BomberPlayer for RandomPlayer {
 pub struct GreedyPlayer {
     _id: u8,
     known_bombs: Vec<((i32, i32), u32)>,
+    known_powerups: Vec<(i32, i32)>,
     last_dir: Option<BomberAction>,
 }
 
@@ -591,6 +630,7 @@ impl GreedyPlayer {
         Self {
             _id: id,
             known_bombs: Vec::new(),
+            known_powerups: Vec::new(),
             last_dir: None,
         }
     }
@@ -605,6 +645,7 @@ impl BomberPlayer for GreedyPlayer {
         rng: &mut Rng,
     ) -> BomberAction {
         update_bombs(&mut self.known_bombs, events);
+        update_powerups(&mut self.known_powerups, events);
 
         // 20% random exploration — only safe movement, never random bomb
         if rng.f32() < 0.2 {
@@ -632,15 +673,23 @@ impl BomberPlayer for GreedyPlayer {
         let best = ALL_ACTIONS
             .iter()
             .max_by(|a, b| {
-                score_action(a, grid, pos, &self.known_bombs, self.last_dir)
-                    .partial_cmp(&score_action(
-                        b,
-                        grid,
-                        pos,
-                        &self.known_bombs,
-                        self.last_dir,
-                    ))
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                score_action(
+                    a,
+                    grid,
+                    pos,
+                    &self.known_bombs,
+                    &self.known_powerups,
+                    self.last_dir,
+                )
+                .partial_cmp(&score_action(
+                    b,
+                    grid,
+                    pos,
+                    &self.known_bombs,
+                    &self.known_powerups,
+                    self.last_dir,
+                ))
+                .unwrap_or(std::cmp::Ordering::Equal)
             })
             .copied()
             .unwrap_or(BomberAction::Wait);
@@ -667,6 +716,7 @@ impl BomberPlayer for GreedyPlayer {
 
     fn reset(&mut self) {
         self.known_bombs.clear();
+        self.known_powerups.clear();
         self.last_dir = None;
     }
 
@@ -689,6 +739,7 @@ impl BomberPlayer for GreedyPlayer {
 pub struct ValidatorPlayer {
     _id: u8,
     known_bombs: Vec<((i32, i32), u32)>,
+    known_powerups: Vec<(i32, i32)>,
     last_dir: Option<BomberAction>,
 }
 
@@ -697,6 +748,7 @@ impl ValidatorPlayer {
         Self {
             _id: id,
             known_bombs: Vec::new(),
+            known_powerups: Vec::new(),
             last_dir: None,
         }
     }
@@ -711,6 +763,7 @@ impl BomberPlayer for ValidatorPlayer {
         _rng: &mut Rng,
     ) -> BomberAction {
         update_bombs(&mut self.known_bombs, events);
+        update_powerups(&mut self.known_powerups, events);
 
         // Score all SAFE actions, pick best
         let mut best = BomberAction::Wait;
@@ -720,7 +773,14 @@ impl BomberPlayer for ValidatorPlayer {
             if !is_safe_action(action, grid, pos, &self.known_bombs) {
                 continue;
             }
-            let score = score_action(action, grid, pos, &self.known_bombs, self.last_dir);
+            let score = score_action(
+                action,
+                grid,
+                pos,
+                &self.known_bombs,
+                &self.known_powerups,
+                self.last_dir,
+            );
             if score > best_score {
                 best_score = score;
                 best = *action;
@@ -749,6 +809,7 @@ impl BomberPlayer for ValidatorPlayer {
 
     fn reset(&mut self) {
         self.known_bombs.clear();
+        self.known_powerups.clear();
         self.last_dir = None;
     }
 
@@ -773,6 +834,7 @@ impl BomberPlayer for ValidatorPlayer {
 pub struct HLPlayer {
     _id: u8,
     known_bombs: Vec<((i32, i32), u32)>,
+    known_powerups: Vec<(i32, i32)>,
     q_values: [f32; ACTION_COUNT],
     visits: [u32; ACTION_COUNT],
     total_pulls: u32,
@@ -786,6 +848,7 @@ impl HLPlayer {
         Self {
             _id: id,
             known_bombs: Vec::new(),
+            known_powerups: Vec::new(),
             q_values: [0.0; ACTION_COUNT],
             visits: [0; ACTION_COUNT],
             total_pulls: 0,
@@ -891,6 +954,7 @@ impl BomberPlayer for HLPlayer {
         rng: &mut Rng,
     ) -> BomberAction {
         update_bombs(&mut self.known_bombs, events);
+        update_powerups(&mut self.known_powerups, events);
 
         // Compute blended scores: 60% policy + 40% bandit Q-value
         let mut scores: [(BomberAction, f32); ACTION_COUNT] = ALL_ACTIONS.map(|a| (a, 0.0));
@@ -902,7 +966,14 @@ impl BomberPlayer for HLPlayer {
                 continue;
             }
 
-            let h = score_action(action, grid, pos, &self.known_bombs, self.last_dir);
+            let h = score_action(
+                action,
+                grid,
+                pos,
+                &self.known_bombs,
+                &self.known_powerups,
+                self.last_dir,
+            );
 
             // Domain hard block (unwalkable, unsafe bomb) overrides everything
             if h == f32::NEG_INFINITY {
@@ -976,6 +1047,7 @@ impl BomberPlayer for HLPlayer {
 
     fn reset(&mut self) {
         self.known_bombs.clear();
+        self.known_powerups.clear();
         self.round_actions.clear();
         self.last_dir = None;
         // NOTE: Q-values, visits, compressed persist across rounds (bandit memory)

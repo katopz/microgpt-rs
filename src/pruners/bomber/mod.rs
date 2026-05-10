@@ -234,6 +234,11 @@ pub enum GameEvent {
     PowerUpCollected {
         player: u8,
         kind: PowerUpKind,
+        pos: (i32, i32),
+    },
+    PowerUpRevealed {
+        pos: (i32, i32),
+        kind: PowerUpKind,
     },
     WallDestroyed {
         pos: (i32, i32),
