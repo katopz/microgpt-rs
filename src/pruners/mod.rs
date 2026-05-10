@@ -20,3 +20,12 @@ pub mod sudoku_pruner;
 
 #[cfg(feature = "sudoku")]
 pub use sudoku_pruner::SudokuPruner;
+
+#[cfg(feature = "bandit")]
+pub mod bandit;
+
+#[cfg(feature = "bandit")]
+pub use bandit::{
+    BanditEnv, BanditEvent, BanditPruner, BanditResult, BanditSession, BanditStats, BanditStrategy,
+    BernoulliEnv, GaussianEnv,
+};

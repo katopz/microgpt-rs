@@ -49,6 +49,20 @@ Constraint validator pipeline demonstrating syntax-aware token pruning:
 cargo run --example validator_demo --features validator
 ```
 
+## bandit_demo
+
+Multi-armed bandit strategy comparison demonstrating adaptive `ScreeningPruner`:
+- **UCB1** — deterministic, O(log N) regret bound
+- **ε-greedy with decay** — simple annealing exploration
+- **Thompson Sampling** — Bayesian posterior sampling
+- 5-armed Bernoulli bandit with regret/reward comparison
+- ASCII regret growth plot
+- **Constrained bandit** — `BanditPruner` wrapping domain `ScreeningPruner` with action masking (blocked arms get relevance 0.0, never explored even if highest reward)
+
+```bash
+cargo run --example bandit_demo --features bandit
+```
+
 ## Feature Flags
 
 | Flag | Gates |
@@ -56,6 +70,7 @@ cargo run --example validator_demo --features validator
 | `sudoku` | `SudokuPruner`, sudoku examples, sudoku-specific tests |
 | `leviathan` | `LeviathanVerifier`, real p/q rejection sampling (Algorithm 1) |
 | `validator` | `SynPruner`, `syn`-based syntax validation, validator examples |
+| `bandit` | `BanditPruner`, `BernoulliEnv`, `GaussianEnv`, bandit examples |
 | `rest` | REST API client via `reqwest` + `tokio` runtime |
 | `gpu` | GPU compute via `wgpu`, `safetensors` model loading |
 | `full` | All of the above |

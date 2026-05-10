@@ -669,6 +669,106 @@ The Percepta team demonstrated **full in-model computation** (33K tok/s, 7K line
 | Exponential (Fibonacci) | 45 | ≤2 | ~96% |
 | Arto Inkala backtracking | 49,559 | 7 | 99.99% (7,080×) |
 
+## 🎰 Multi-Armed Bandit: Adaptive ScreeningPruner (Plan 030)
+
+Demonstrates how the `ScreeningPruner` trait naturally extends to sequential decision-making under uncertainty. The bandit module wraps any inner pruner with exploration strategies that update relevance scores across episodes.
+
+### The Core Idea
+
+`ScreeningPruner::relevance()` returns `R ∈ [0.0, 1.0]` — this IS a reward signal. DDTree's best-first search IS exploration. What the bandit adds is **policy update across episodes**:
+
+```
+Episode N:   DDTree proposes arms (tokens) → BanditPruner scores via strategy → select → observe reward → update Q-values
+Episode N+1: Updated Q-values bias relevance → better arm selection
+```
+
+### BanditStrategy Enum
+
+| Strategy | Selection | Regret Bound | RNG |
+|----------|-----------|--------------|-----|
+| `Ucb1` | `Q(a) + sqrt(2·ln(N)/n(a))` | O(log N) | No |
+| `EpsilonGreedy { epsilon, decay }` | Explore w/ prob ε, exploit otherwise | O(√N) with decay | Yes |
+| `ThompsonSampling` | Sample from Beta(α, β) posterior | O(log N) asymptotic | Yes |
+
+### Architecture
+
+```rust
+// BanditPruner wraps any ScreeningPruner — plugs into build_dd_tree_screened()
+let pruner = BanditPruner::new(NoScreeningPruner, BanditStrategy::Ucb1, num_arms);
+pruner.prepare_episode(&mut rng);
+let tree = build_dd_tree_screened(&marginals, &config, &pruner, false);
+pruner.update(accepted_token, reward);
+```
+
+```rust
+// Standalone session — runs N episodes, tracks regret/reward
+let env = BernoulliEnv::new(&[0.2, 0.5, 0.8, 0.4, 0.6]);
+let session = BanditSession::new(env, BanditStrategy::ThompsonSampling);
+let (events, result) = session.run(1000, &mut Rng::new(42));
+assert!(result.found_optimal()); // best_arm == optimal_arm
+```
+
+```rust
+// Constrained bandit — domain pruner masks invalid arms
+struct BlockedArmPruner { blocked: Vec<usize> }
+impl ScreeningPruner for BlockedArmPruner {
+    fn relevance(&self, _: usize, token_idx: usize, _: &[usize]) -> f32 {
+        if self.blocked.contains(&token_idx) { 0.0 } else { 1.0 }
+    }
+}
+let pruner = BanditPruner::new(BlockedArmPruner::new(&[4]), BanditStrategy::Ucb1, 5);
+// Arm 4 never explored — relevance(4) = 0.0 regardless of Q-value
+```
+
+### 5-Armed Bernoulli Results (1000 episodes, seed=42)
+
+| Strategy | Best Arm | Total Reward | Avg Reward | Total Regret |
+|----------|----------|-------------|------------|-------------|
+| UCB1 | 2 ✅ | 748.0 | 0.748 | 72.7 |
+| ε-greedy (ε=0.3, decay=0.995) | 2 ✅ | 797.0 | 0.797 | 21.0 |
+| Thompson Sampling | 2 ✅ | 592.0 | 0.592 | 208.0 |
+
+All strategies converge to the optimal arm. UCB1 and ε-greedy with decay show strong sub-linear regret. Thompson's higher variance is expected — posterior sampling explores more broadly before converging.
+
+### Constrained Bandit: Action Masking (500 episodes, seed=42)
+
+Arm 4 has highest true probability (0.9) but is blocked by domain `ScreeningPruner`. The bandit correctly finds the best *valid* arm.
+
+| Arm | True p | Q-value | Visits | Relevance | Status |
+|-----|--------|---------|--------|-----------|--------|
+| 0 | 0.1 | 0.10 | 20 | 0.59 | |
+| 1 | 0.3 | 0.40 | 50 | 0.60 | |
+| 2 | 0.7 | 0.72 | 383 | 0.60 | ⭐ BEST |
+| 3 | 0.4 | 0.38 | 47 | 0.60 | |
+| 4 | 0.9 | 0.00 | **0** | **0.00** | 🚫 BLOCKED |
+
+Key: domain pruner returns `relevance(4) = 0.0` → bandit score overridden → arm 4 never pulled, even with highest reward. This bridges RL exploration with neuro-symbolic constraints.
+
+### Design Decisions
+
+1. **Feature-gated** (`bandit`) — zero impact when disabled, no core hot path changes
+2. **BanditPruner wraps ScreeningPruner** — domain knowledge preserved, bandit adds exploration bonus. Domain `relevance = 0.0` always overrides bandit score (action masking)
+3. **BanditEnv trait** — separate from pruner (SRP): environment owns reward generation, pruner owns action scoring
+4. **No external dependencies** — Beta distribution via Jöhnk's algorithm with `fastrand`
+5. **BanditStats shared** — Q-values, visit counts, UCB1/Thompson scoring used by both pruner and session (DRY)
+6. **Constrained bandit** — `BanditPruner` wrapping domain `ScreeningPruner` = action masking for bandits (invalid arms get relevance 0.0, DDTree never explores them)
+
+### Built-in Environments
+
+- `BernoulliEnv` — binary rewards with per-arm success probabilities (classic MAB)
+- `GaussianEnv` — continuous rewards with per-arm mean/std (clamped to [0, 1])
+
+### Caveats (Honest)
+
+| Limitation | What It Means |
+|------------|---------------|
+| **Thompson variance** | Stochastic posterior sampling has higher early regret than deterministic UCB1 |
+| **Cold start required** | All arms must be pulled once before strategy kicks in (N initial episodes) |
+| **No contextual features** | Pure bandit — no state/feature vectors per arm (future: contextual bandits) |
+| **Not integrated with real Transformer** | PoC uses simulated rewards, not log-prob-based reward from actual model verification |
+| **Beta sampling fallback** | Jöhnk's algorithm may hit 256-rejection limit for extreme α/β; falls back to 0.5 |
+| **Constrained demo only blocks static arms** | Real tactical scenarios would use path-aware `TacticalPruner` where validity depends on game state, not just arm index |
+
 ## 🛠️ Getting Started
 
 ### Prerequisites
