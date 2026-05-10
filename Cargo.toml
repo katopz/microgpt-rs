@@ -106,5 +106,9 @@ name = "rps_nash_demo"
 required-features = ["bandit"]
 
 [[example]]
+name = "slot_bandit_demo"
+required-features = ["bandit"]
+
+[[example]]
 name = "ppot_bench"
 required-features = ["ppot"]

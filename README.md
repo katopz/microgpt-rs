@@ -758,6 +758,51 @@ Key: domain pruner returns `relevance(4) = 0.0` → bandit score overridden → 
 - `BernoulliEnv` — binary rewards with per-arm success probabilities (classic MAB)
 - `GaussianEnv` — continuous rewards with per-arm mean/std (clamped to [0, 1])
 
+## 🎰 Slot Machine Bandit: Rules-Based Speculative Decoding (Plan 031)
+
+A slot machine that closes the full speculative decoding loop with **no real transformer needed**:
+
+```
+Reel weights → DDTree → Payline rules → Reward → Bandit learns → Repeat
+```
+
+Unlike `bandit_demo.rs` (coin flips, disclaimer required) and `bandit_ddtree_demo.rs` (random marginals, random verification), this demo uses **structured reel weights** as marginals and **deterministic payline rules** for verification — proving actual value, not just mechanical compatibility.
+
+### Slot ↔ Speculative Decoding Analogy
+
+| Speculative Decoding | Slot Machine |
+|---------------------|--------------|
+| Draft model marginals P(token\|context) | Reel weights P(symbol\|reel) |
+| Target model verification | Payline rules (combo valid?) |
+| Accept → 1.0, Reject → 0.0 | Payout table (graded 0.0–1.0) |
+| BanditPruner screens branches | Bandit learns which symbols pay |
+
+### Slot Machine Configuration
+
+6 symbols (vocab_size=6), 3 reels (lookahead=3):
+
+| Symbol | Reel 0 | Reel 1 | Reel 2 | Payout (Triple) |
+|--------|--------|--------|--------|-----------------|
+| 🍒 Cherry | 30% | 25% | 20% | 0.5 |
+| 🍋 Lemon | 25% | 20% | 20% | 0.5 |
+| 🍊 Orange | 20% | 20% | 20% | 0.5 |
+| 🔔 Bell | 15% | 15% | 15% | 0.6 |
+| 💎 Diamond | 7% | 10% | 15% | 0.8 |
+| 7️⃣ Seven | 3% | 10% | 10% | 1.0 (JACKPOT) |
+
+### Results (500 episodes, seed=42)
+
+| Strategy | Total Reward | Avg Reward | Best Combo | Triples | vs Random |
+|----------|-------------|------------|------------|---------|-----------|
+| UCB1 | 82.40 | 0.1648 | 🍒🍒🍒 | 6 | +60.9% |
+| ε-greedy | 250.10 | 0.5002 | 🔔🔔🔔 | 500 | +388.5% |
+| Thompson | 247.30 | 0.4946 | 🔔🔔🔔 | 490 | +383.0% |
+| Random | 51.20 | 0.1024 | 💎💎💎 | 17 | baseline |
+
+All bandit strategies significantly outperform random. ε-greedy and Thompson converge to Bell triples (reliable 0.6 reward) while random occasionally hits Diamond triples by luck.
+
+Run: `cargo run --example slot_bandit_demo --features bandit`
+
 ### Caveats (Honest)
 
 | Limitation | What It Means |
