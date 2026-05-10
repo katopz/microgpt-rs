@@ -18,14 +18,14 @@ The primary integration point is **post-DDTree rescue**: when speculative decodi
 
 ## Tasks
 
-- [ ] **Task 1: TokenRule enum and support sets** (`src/speculative/ppot/types.rs`)
+- [x] **Task 1: TokenRule enum and support sets** (`src/speculative/ppot/types.rs`)
   - Define `TokenRule` enum: `Digit`, `Compare`, `Arithmetic`, `Augment`, `All`
   - Each variant maps to a `fn support(&self, vocab_size: usize) -> Vec<usize>` returning token IDs in its support
   - `TokenRule::All` returns `0..vocab_size` (unrestricted resampling)
   - Support sets are computed once from tokenizer vocabulary, cached in `PpotConfig`
   - Unit tests for each rule's support set completeness
 
-- [ ] **Task 2: Per-position entropy calculation** (`src/speculative/ppot/entropy.rs`)
+- [x] **Task 2: Per-position entropy calculation** (`src/speculative/ppot/entropy.rs`)
   - `fn token_entropy(probs: &[f32]) -> f32` — Shannon entropy `H = -Σ p*log(p)`
   - `fn identify_high_entropy_positions(marginals: &[&[f32]], threshold: f32) -> Vec<usize>` — returns positions where `H(i) > threshold`
   - `fn identify_positions_by_rule(marginals: &[&[f32]], rule: TokenRule, threshold: f32) -> Vec<usize>` — filters by both entropy and rule support
@@ -33,7 +33,7 @@ The primary integration point is **post-DDTree rescue**: when speculative decodi
   - Zero-alloc variant: `identify_positions_into(marginals, threshold, &mut Vec<usize>)`
   - Unit tests: zero entropy for deterministic distribution, high entropy for uniform
 
-- [ ] **Task 3: PPoT resample core** (`src/speculative/ppot/resample.rs`)
+- [x] **Task 3: PPoT resample core** (`src/speculative/ppot/resample.rs`)
   - `fn ppot_resample(marginals: &[&[f32]], positions: &[usize], rng: &mut Rng) -> Vec<usize>` — resample only specified positions, keep rest from base path
   - `fn ppot_resample_with_support(marginals: &[&[f32]], positions: &[usize], support: &[Vec<usize>], rng: &mut Rng) -> Vec<usize>` — resample within rule-specific support
   - `fn ppot_resample_different_value(marginals: &[&[f32]], positions: &[usize], original: &[usize], rng: &mut Rng) -> Vec<usize>` — conditioned on not reproducing original
@@ -41,34 +41,34 @@ The primary integration point is **post-DDTree rescue**: when speculative decodi
   - Different-value constraint via existing `sample_residual_distribution_into` with delta `q`
   - Unit tests for each variant
 
-- [ ] **Task 4: PPoT module structure** (`src/speculative/ppot/mod.rs`)
+- [x] **Task 4: PPoT module structure** (`src/speculative/ppot/mod.rs`)
   - Public API: `ppot_rescue()`, `ppot_augment_tree()`
   - Re-export `TokenRule`, entropy functions, resample functions
   - `PpotConfig` struct: `entropy_threshold: f32`, `num_samples: usize`, `rule: TokenRule`, `different_constraint: bool`
   - Wire into `src/speculative/mod.rs` with `#[cfg(feature = "ppot")]` feature gate
 
-- [ ] **Task 5: Post-DDTree rescue integration** (`src/speculative/step.rs`)
+- [x] **Task 5: Post-DDTree rescue integration** (`src/speculative/step.rs`)
   - Add `ppot_rescue()` function called after DDTree verification fails
   - Pipeline: extract marginals → identify high-entropy positions → resample m paths → screen each through `ScreeningPruner` → return first valid
   - Falls back to greedy only if PPoT rescue also fails
   - Feature-gated behind `ppot` feature flag (opt-in, no default overhead)
   - Integration test: rescue finds valid path when DDTree rejects all
 
-- [ ] **Task 6: Config extensions** (`src/types.rs`)
+- [x] **Task 6: Config extensions** (`src/types.rs`)
   - `pub ppot_entropy_threshold: f32` — default `0.5`
   - `pub ppot_num_samples: usize` — default `10`
   - `pub ppot_rule: String` — default `"all"`, one of `digit|compare|arithmetic|augment|all`
   - `pub ppot_enabled: bool` — default `false` (must opt-in)
   - Parse from existing config file format, backward compatible (missing fields use defaults)
 
-- [ ] **Task 7: Benchmarks** (`src/benchmark.rs`)
+- [x] **Task 7: Benchmarks** (`src/benchmark.rs`)
   - Benchmark: entropy calculation overhead (should be <1% of DFlash time)
   - Benchmark: PPoT resample throughput (samples/ms on CPU)
   - Benchmark: end-to-end speculative decoding with PPoT rescue vs without
   - Before/after acceptance rate comparison
   - Add to benchmark output with `ppot` feature flag
 
-- [ ] **Task 8: Update README and module docs**
+- [x] **Task 8: Update README and module docs**
   - Add `PPoT: Logit-Parameterized CPU Resampling (Plan 026)` section to architecture
   - Update Project Structure with `src/speculative/ppot/` directory
   - Update feature flags section with `ppot`

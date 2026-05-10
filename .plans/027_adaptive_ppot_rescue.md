@@ -24,10 +24,10 @@ TRT proves three things we can apply at token level:
 
 ## Prerequisites
 
-- [ ] Plan 026 fully implemented and merged
-- [ ] PPoT rescue benchmarks recorded as baseline (Task 7 from Plan 026)
-- [ ] `ppot` feature flag working in `Cargo.toml`
-- [ ] All Plan 026 tests passing
+- [x] Plan 026 fully implemented and merged
+- [x] PPoT rescue benchmarks recorded as baseline (Task 7 from Plan 026)
+- [x] `ppot` feature flag working in `Cargo.toml`
+- [x] All Plan 026 tests passing
 
 ---
 
