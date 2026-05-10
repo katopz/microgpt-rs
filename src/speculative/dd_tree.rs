@@ -45,6 +45,25 @@ pub fn extract_parent_tokens_into(
 /// Returns tree nodes ordered by score (best first).
 ///
 /// Equivalent to `build_dd_tree_pruned` with `NoPruner` and `chain_seed=false`.
+///
+/// # Branch Ordering Preserves Reasoning Sequence (Plan 029)
+///
+/// Each DDTree branch stores tokens in `parent_path` as an **ordered sequence**,
+/// preserving the exact order the draft model produced them. This is critical for
+/// agentic inference where reasoning and tool calls must remain interleaved:
+///
+/// ```text
+/// CORRECT (DDTree preserves this):
+///   reasoning_0 → tool_call_0 → reasoning_1 → tool_call_1
+///
+/// WRONG (would lose sequence meaning):
+///   reasoning_0 → reasoning_1 → tool_call_0 → tool_call_1
+/// ```
+///
+/// NVIDIA Dynamo found that grouping reasoning separate from tool calls increased
+/// TTFT 1.9× (322ms vs 167ms on B200) because the target model couldn't associate
+/// each tool call with its preceding reasoning. Our `extract_parent_tokens()` and
+/// `extract_parent_tokens_into()` maintain this ordering per branch.
 pub fn build_dd_tree(marginals: &[&[f32]], config: &crate::types::Config) -> Vec<TreeNode> {
     build_dd_tree_pruned(marginals, config, &NoPruner, false)
 }

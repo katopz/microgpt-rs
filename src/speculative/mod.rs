@@ -27,8 +27,8 @@ pub use sampling::{
 };
 pub use step::{speculative_step, speculative_step_verifier};
 pub use types::{
-    BinaryScreeningPruner, ConstraintPruner, DDTreeBranchCache, DraftResult, NoPruner,
-    NoScreeningPruner, ScreeningPruner, SpeculativeContext, TreeNode,
+    BinaryScreeningPruner, ConstraintPruner, DDTreeBranchCache, DraftEvent, DraftResult, NoPruner,
+    NoScreeningPruner, RejectionReason, ScreeningPruner, SpeculativeContext, TreeNode,
 };
 pub use verifier::{SimulatedVerifier, SpeculativeVerifier};
 

@@ -46,6 +46,27 @@ impl ConstraintPruner for NoPruner {
 ///
 /// This subsumes [`ConstraintPruner`] as the special case `R ∈ {0.0, 1.0}`.
 /// A blanket impl provides automatic upgrade from any `ConstraintPruner`.
+///
+/// # Ownership Boundary with ConstraintPruner (Plan 029, Task 7)
+///
+/// Single parser ownership: `ConstraintPruner` and `ScreeningPruner` make
+/// **independent** decisions and must not compete for the same judgment:
+///
+/// - **`ConstraintPruner`** = hard structural validity (syntax, brackets, keywords).
+///   Returns `bool`. Owns the decision: "is this token *syntactically* legal here?"
+///
+/// - **`ScreeningPruner`** = graded semantic relevance (domain fit, topic match).
+///   Returns `f32` in `[0.0, 1.0]`. Owns the decision: "is this token *semantically*
+///   relevant to the current domain?"
+///
+/// - **`BinaryScreeningPruner` adapter** = bridge only, zero additional logic.
+///   Converts `ConstraintPruner::is_valid()` → `{0.0, 1.0}` relevance.
+///
+/// Both may prune the same token for different reasons — that's fine.
+/// Both must NOT claim ownership of the same decision type — that's a bug.
+///
+/// NVIDIA Dynamo's lesson: competing parser layers caused silent malformation.
+/// Explicit ownership boundaries prevent this class of error.
 pub trait ScreeningPruner: Send + Sync {
     /// Returns the absolute relevance of taking this token given the path.
     ///
@@ -321,6 +342,71 @@ impl DDTreeBranchCache {
     }
 }
 
+// ── Draft Event Streaming (Plan 029, Dynamo Lesson 2) ────────────
+
+/// Reason a drafted branch was rejected during verification.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RejectionReason {
+    /// Token probability below acceptance threshold.
+    LowProbability,
+    /// Constraint pruner rejected this branch.
+    ConstraintViolation,
+    /// Screening relevance score too low.
+    LowRelevance { score: f32 },
+    /// Branch diverged from target model's preference.
+    DivergedFromTarget,
+}
+
+/// Streaming event emitted during speculative decoding steps.
+///
+/// Generalizes `SolveEvent` (Sudoku-specific) into a domain-agnostic event system
+/// for real-time monitoring, REST streaming, and TUI display.
+///
+/// Inspired by NVIDIA Dynamo's `tool_call_dispatch` side channel —
+/// events fire as soon as structurally complete, not when the entire step finishes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DraftEvent {
+    /// Draft model is proposing candidates at this position.
+    Drafting {
+        /// Position in the token sequence.
+        pos: usize,
+        /// Number of candidate branches being explored.
+        candidates: usize,
+    },
+    /// Pruning phase completed — some branches removed.
+    Pruned {
+        /// Position where pruning occurred.
+        pos: usize,
+        /// Branches that survived pruning.
+        kept: usize,
+        /// Branches removed by pruner.
+        rejected: usize,
+    },
+    /// Target model verified accepted tokens.
+    Verified {
+        /// Position of the accepted span.
+        pos: usize,
+        /// Number of tokens accepted in this verification.
+        accepted: usize,
+        /// Whether a bonus token was produced (accepted all + 1).
+        bonus: bool,
+    },
+    /// A specific branch was rejected with a reason.
+    BranchRejected {
+        /// Position where rejection occurred.
+        pos: usize,
+        /// Why the branch was rejected.
+        reason: RejectionReason,
+    },
+    /// A complete speculative step finished.
+    StepComplete {
+        /// Total tokens accepted in this step.
+        tokens_accepted: usize,
+        /// Wall-clock time for this step in microseconds.
+        latency_us: u64,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,5 +655,87 @@ mod tests {
         for (i, &l) in logits2.iter().enumerate() {
             assert!(l.is_finite(), "branch2 logit {i} should be finite: {l}");
         }
+    }
+
+    // ── DraftEvent Tests (Plan 029) ─────────────────────────────────
+
+    #[test]
+    fn test_draft_event_drafting() {
+        let event = DraftEvent::Drafting {
+            pos: 0,
+            candidates: 5,
+        };
+        assert!(matches!(
+            event,
+            DraftEvent::Drafting {
+                pos: 0,
+                candidates: 5
+            }
+        ));
+    }
+
+    #[test]
+    fn test_draft_event_pruned() {
+        let event = DraftEvent::Pruned {
+            pos: 3,
+            kept: 4,
+            rejected: 2,
+        };
+        if let DraftEvent::Pruned { kept, rejected, .. } = event {
+            assert_eq!(kept, 4);
+            assert_eq!(rejected, 2);
+        }
+    }
+
+    #[test]
+    fn test_draft_event_verified_with_bonus() {
+        let event = DraftEvent::Verified {
+            pos: 1,
+            accepted: 3,
+            bonus: true,
+        };
+        assert!(matches!(event, DraftEvent::Verified { bonus: true, .. }));
+    }
+
+    #[test]
+    fn test_draft_event_branch_rejected() {
+        let event = DraftEvent::BranchRejected {
+            pos: 2,
+            reason: RejectionReason::LowRelevance { score: 0.15 },
+        };
+        if let DraftEvent::BranchRejected {
+            reason: RejectionReason::LowRelevance { score },
+            ..
+        } = event
+        {
+            assert!((score - 0.15).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_draft_event_step_complete() {
+        let event = DraftEvent::StepComplete {
+            tokens_accepted: 5,
+            latency_us: 120,
+        };
+        if let DraftEvent::StepComplete {
+            tokens_accepted,
+            latency_us,
+        } = event
+        {
+            assert_eq!(tokens_accepted, 5);
+            assert_eq!(latency_us, 120);
+        }
+    }
+
+    #[test]
+    fn test_rejection_reason_variants() {
+        let reasons = [
+            RejectionReason::LowProbability,
+            RejectionReason::ConstraintViolation,
+            RejectionReason::LowRelevance { score: 0.0 },
+            RejectionReason::DivergedFromTarget,
+        ];
+        assert_eq!(reasons.len(), 4);
     }
 }
