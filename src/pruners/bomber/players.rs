@@ -214,7 +214,39 @@ fn update_powerups(powerups: &mut Vec<(i32, i32)>, events: &[GameEvent]) {
                 }
             }
             GameEvent::PowerUpCollected { pos, .. } => {
-                powerups.retain(|p| *p != *pos);
+                powerups.retain(|p| p != pos);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Track opponent positions from PlayerMoved and BombPlaced events.
+fn update_opponents(opponents: &mut Vec<(u8, (i32, i32))>, events: &[GameEvent], my_id: u8) {
+    for event in events {
+        match event {
+            GameEvent::PlayerMoved { player, to, .. } => {
+                if *player == my_id {
+                    continue;
+                }
+                if let Some(entry) = opponents.iter_mut().find(|(p, _)| *p == *player) {
+                    entry.1 = *to;
+                } else {
+                    opponents.push((*player, *to));
+                }
+            }
+            GameEvent::BombPlaced { player, pos } => {
+                if *player == my_id {
+                    continue;
+                }
+                if let Some(entry) = opponents.iter_mut().find(|(p, _)| *p == *player) {
+                    entry.1 = *pos;
+                } else {
+                    opponents.push((*player, *pos));
+                }
+            }
+            GameEvent::PlayerKilled { victim, .. } => {
+                opponents.retain(|(p, _)| *p != *victim);
             }
             _ => {}
         }
@@ -890,6 +922,7 @@ pub struct HLPlayer {
     _id: u8,
     known_bombs: Vec<KnownBomb>,
     known_powerups: Vec<(i32, i32)>,
+    known_opponents: Vec<(u8, (i32, i32))>,
     q_values: [f32; ACTION_COUNT],
     visits: [u32; ACTION_COUNT],
     total_pulls: u32,
@@ -904,6 +937,7 @@ impl HLPlayer {
             _id: id,
             known_bombs: Vec::new(),
             known_powerups: Vec::new(),
+            known_opponents: Vec::new(),
             q_values: [0.0; ACTION_COUNT],
             visits: [0; ACTION_COUNT],
             total_pulls: 0,
@@ -932,21 +966,25 @@ impl HLPlayer {
             + if killed_opponent { 0.5 } else { 0.0 }
             + collected_powerups as f32 * 0.2;
 
-        // Count action frequency for proportional update
-        let mut action_counts = [0u32; ACTION_COUNT];
-        for action in &self.round_actions {
-            action_counts[action_index(action)] += 1;
+        // Decay-based credit assignment: recent actions get more weight
+        let total = self.round_actions.len();
+        let mut action_rewards = [0.0f32; ACTION_COUNT];
+        let mut action_weights = [0.0f32; ACTION_COUNT];
+
+        for (i, action) in self.round_actions.iter().enumerate() {
+            // Exponential decay: later actions get exponentially more credit
+            let recency = 0.5_f32.powi((total - 1 - i) as i32);
+            let idx = action_index(action);
+            action_rewards[idx] += base_reward * recency;
+            action_weights[idx] += recency;
         }
 
-        // Update Q-values for each unique action taken this round
-        for (idx, &count) in action_counts.iter().enumerate() {
-            if count == 0 {
+        // Update Q-values with weighted rewards
+        for idx in 0..ACTION_COUNT {
+            if action_weights[idx] == 0.0 {
                 continue;
             }
-            // Weight reward by how often this action was taken
-            let proportion = count as f32 / self.round_actions.len() as f32;
-            let reward = base_reward * proportion;
-
+            let reward = action_rewards[idx] / action_weights[idx];
             self.visits[idx] += 1;
             self.total_pulls += 1;
             let n = self.visits[idx] as f32;
@@ -1010,8 +1048,23 @@ impl BomberPlayer for HLPlayer {
     ) -> BomberAction {
         update_bombs(&mut self.known_bombs, events);
         update_powerups(&mut self.known_powerups, events);
+        update_opponents(&mut self.known_opponents, events, self._id);
 
-        // Compute blended scores: 60% policy + 40% bandit Q-value
+        let bomb_positions: std::collections::HashSet<(i32, i32)> =
+            self.known_bombs.iter().map(|(p, _, _)| *p).collect();
+
+        // Find nearest opponent for hunting
+        let nearest_opponent = self
+            .known_opponents
+            .iter()
+            .filter(|(_, op)| {
+                // Only consider opponents that are reachable (not on unwalkable cells)
+                grid.is_walkable(op.0, op.1)
+            })
+            .min_by_key(|(_, op)| (pos.x - op.0).abs() + (pos.y - op.1).abs())
+            .map(|(_, op)| *op);
+
+        // Compute blended scores: 85% policy + 15% bandit Q-value
         let mut scores: [(BomberAction, f32); ACTION_COUNT] = ALL_ACTIONS.map(|a| (a, 0.0));
 
         for (i, action) in ALL_ACTIONS.iter().enumerate() {
@@ -1047,37 +1100,86 @@ impl BomberPlayer for HLPlayer {
                 continue;
             }
 
+            // Strategic bonus: hunt, ambush, and bomb value
+            let mut strategy_bonus = 0.0f32;
+            match action {
+                BomberAction::Up
+                | BomberAction::Down
+                | BomberAction::Left
+                | BomberAction::Right => {
+                    if let Some((ox, oy)) = nearest_opponent {
+                        let target = move_target(action, pos);
+                        let current_dist = (pos.x - ox).abs() + (pos.y - oy).abs();
+                        let target_dist = (target.x - ox).abs() + (target.y - oy).abs();
+                        // Hunt: move toward opponent
+                        if target_dist < current_dist {
+                            strategy_bonus += 1.5;
+                        }
+                    }
+                }
+                BomberAction::Bomb => {
+                    // Strategic value: more adjacent walls = better bomb placement
+                    let wall_count = [(0i32, -1), (0, 1), (-1, 0), (1, 0)]
+                        .iter()
+                        .filter(|&&(dx, dy)| {
+                            matches!(
+                                grid.get(pos.x + dx, pos.y + dy),
+                                super::Cell::DestructibleWall | super::Cell::PowerUpHidden(_)
+                            )
+                        })
+                        .count();
+                    strategy_bonus += wall_count as f32 * 0.5;
+
+                    // Ambush bonus when near opponent
+                    if let Some((ox, oy)) = nearest_opponent {
+                        let dist_to_opponent = (pos.x - ox).abs() + (pos.y - oy).abs();
+                        if dist_to_opponent <= DEFAULT_BLAST_RANGE as i32 + 2 {
+                            strategy_bonus += 3.0;
+                        }
+                    }
+                }
+                BomberAction::Wait => {}
+            }
+
             // Bandit Q-value component (default 0.0 for unvisited arms)
-            let bandit_q = if self.visits[i] > 0 {
+            let _bandit_q = if self.visits[i] > 0 {
                 self.q_values[i]
             } else {
                 0.0
             };
 
-            // Blend: 60% policy + 40% bandit
-            let blended = h * 0.6 + bandit_q * 0.4;
-            scores[i] = (*action, blended);
+            // Pure heuristic + strategy bonus (bandit noise removed — too sparse at this scale)
+            scores[i] = (*action, h + strategy_bonus);
         }
 
-        // ε-greedy: 5% explore (only non-blocked actions), 95% exploit
-        if rng.f32() < 0.05 {
-            // Pick a random non-compressed, non-hard-blocked action
-            let valid_actions: Vec<usize> = (0..ACTION_COUNT)
-                .filter(|&i| !self.compressed[i] && scores[i].1 > f32::NEG_INFINITY)
-                .collect();
-            if !valid_actions.is_empty() {
-                let pick = valid_actions[rng.usize(0..valid_actions.len())];
-                let action = scores[pick].0;
-                self.round_actions.push(action);
-                if matches!(
-                    action,
-                    BomberAction::Up
+        // ε-greedy: 10% explore (only safe moves — less random than Greedy's 20%)
+        if rng.f32() < 0.10 {
+            // Pick a random non-compressed, non-hard-blocked, safe action
+            let safe_explore: Vec<usize> = (0..ACTION_COUNT)
+                .filter(|&i| {
+                    if self.compressed[i] || scores[i].1 <= f32::NEG_INFINITY {
+                        return false;
+                    }
+                    let action = ALL_ACTIONS[i];
+                    match action {
+                        BomberAction::Up
                         | BomberAction::Down
                         | BomberAction::Left
-                        | BomberAction::Right
-                ) {
-                    self.last_dir = Some(action);
-                }
+                        | BomberAction::Right => {
+                            let target = move_target(&action, pos);
+                            grid.is_walkable(target.x, target.y)
+                                && !bomb_positions.contains(&(target.x, target.y))
+                                && !in_blast_zone(target, grid, &self.known_bombs)
+                        }
+                        _ => false, // Don't randomly explore Bomb/Wait
+                    }
+                })
+                .collect();
+            if !safe_explore.is_empty() {
+                let pick = safe_explore[rng.usize(0..safe_explore.len())];
+                let action = scores[pick].0;
+                self.round_actions.push(action);
+                self.last_dir = Some(action);
                 return action;
             }
         }
@@ -1088,6 +1190,12 @@ impl BomberPlayer for HLPlayer {
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(a, _)| *a)
             .unwrap_or(BomberAction::Wait);
+
+        // Track own bomb placement (critical: prevents walking back into own bomb)
+        if best == BomberAction::Bomb {
+            self.known_bombs
+                .push(((pos.x, pos.y), DEFAULT_BLAST_RANGE, BOMB_FUSE_TICKS));
+        }
 
         self.round_actions.push(best);
         if matches!(
@@ -1110,6 +1218,7 @@ impl BomberPlayer for HLPlayer {
     fn reset(&mut self) {
         self.known_bombs.clear();
         self.known_powerups.clear();
+        self.known_opponents.clear();
         self.round_actions.clear();
         self.last_dir = None;
         // NOTE: Q-values, visits, compressed persist across rounds (bandit memory)
