@@ -1,5 +1,6 @@
 //! Bomberman HL Arena benchmarks — run with: cargo test --features bomber bench_bomber_arena -- --nocapture
 
+#[cfg(feature = "bomber")]
 use std::time::Instant;
 
 #[cfg(feature = "bomber")]
