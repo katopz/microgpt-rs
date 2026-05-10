@@ -7,7 +7,7 @@
 //! 4. Compare pruned vs unpruned tree sizes
 //! 5. Validate code fragments through two-tier syntax checking
 //!
-//! Run: cargo run --example validator_demo --features validator
+//! Run: cargo run --example core_01_validator --features validator
 
 use std::sync::Arc;
 

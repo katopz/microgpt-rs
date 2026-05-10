@@ -31,84 +31,103 @@ gpu = []  # GPU compute via wgpu, safetensors model loading (planned)
 leviathan = []  # LeviathanVerifier real p/q rejection sampling (Algorithm 1)
 full = ["sudoku", "validator", "ppot", "bandit", "rest", "embedding_router", "gpu", "leviathan"]
 
-[[example]]
-name = "sudoku_speculative"
-required-features = ["sudoku"]
+# ── Bandit (RL / Game Theory) ─────────────────────────────────
 
 [[example]]
-name = "sudoku_9x9"
-required-features = ["sudoku"]
+name = "bandit_01_basic"
+required-features = ["bandit"]
 
 [[example]]
-name = "sudoku_tui"
-required-features = ["sudoku"]
+name = "bandit_02_ddtree"
+required-features = ["bandit"]
 
 [[example]]
-name = "blue_bear"
+name = "bandit_03_slot"
+required-features = ["bandit"]
 
 [[example]]
-name = "tactical_ai"
+name = "bandit_04_combat"
+required-features = ["bandit"]
 
 [[example]]
-name = "tactical_ai_tui"
+name = "bandit_05_rps"
+required-features = ["bandit"]
 
 [[example]]
-name = "tactical_bench"
+name = "bandit_06_resolver"
+required-features = ["bandit"]
 
 [[example]]
-name = "tactical_terrain"
+name = "bandit_07_director"
+required-features = ["bandit"]
+
+# ── Blue Bear ──────────────────────────────────────────────────
 
 [[example]]
-name = "dungeon_multifloor"
+name = "bear_01_demo"
 
 [[example]]
-name = "dungeon_tui"
+name = "bear_02_tui"
+
+# ── Core Features ──────────────────────────────────────────────
 
 [[example]]
-name = "tactical_procedural"
-
-[[example]]
-name = "tactical_parallel"
-
-
-[[example]]
-name = "blue_bear_tui"
-
-[[example]]
-name = "raven_recall"
-
-[[example]]
-name = "validator_demo"
+name = "core_01_validator"
 required-features = ["validator"]
 
 [[example]]
-name = "bandit_demo"
-required-features = ["bandit"]
+name = "core_02_raven"
 
 [[example]]
-name = "bandit_ddtree_demo"
-required-features = ["bandit"]
-
-[[example]]
-name = "game_resolver_demo"
-required-features = ["bandit"]
-
-[[example]]
-name = "ai_director_demo"
-required-features = ["bandit"]
-
-[[example]]
-name = "combat_bandit_demo"
-required-features = ["bandit"]
-
-[[example]]
-name = "rps_nash_demo"
-required-features = ["bandit"]
-
-[[example]]
-name = "slot_bandit_demo"
-required-features = ["bandit"]
-
-[[example]]
-name = "ppot_bench"
+name = "core_03_ppot"
 required-features = ["ppot"]
+
+[[example]]
+name = "core_04_prefill"
+
+# ── Dungeon ────────────────────────────────────────────────────
+
+[[example]]
+name = "dungeon_01_tui"
+
+[[example]]
+name = "dungeon_02_multifloor"
+
+# ── Getting Started ────────────────────────────────────────────
+
+[[example]]
+name = "hello_py2rs"
+
+# ── Sudoku ─────────────────────────────────────────────────────
+
+[[example]]
+name = "sudoku_01_9x9"
+required-features = ["sudoku"]
+
+[[example]]
+name = "sudoku_02_speculative"
+required-features = ["sudoku"]
+
+[[example]]
+name = "sudoku_03_tui"
+required-features = ["sudoku"]
+
+# ── Tactical AI ────────────────────────────────────────────────
+
+[[example]]
+name = "tactical_01_ai"
+
+[[example]]
+name = "tactical_02_terrain"
+
+[[example]]
+name = "tactical_03_procedural"
+
+[[example]]
+name = "tactical_04_parallel"
+
+[[example]]
+name = "tactical_05_bench"
+
+[[example]]
+name = "tactical_06_tui"

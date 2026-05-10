@@ -9,7 +9,7 @@
 //! - Tactical Layer: find_path_multifloor computes cross-floor A* paths
 //! - Execution Layer: DungeonPruner.apply_action validates each step
 //!
-//! Run: `cargo run --example dungeon_multifloor`
+//! Run: `cargo run --example dungeon_02_multifloor`
 
 use std::collections::HashMap;
 

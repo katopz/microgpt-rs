@@ -14,7 +14,7 @@
 //! Against a biased opponent, an adaptive agent discovers the exploit:
 //! if opponent plays 60% Rock, the agent converges to mostly Paper (beats Rock).
 //!
-//! Run: `cargo run --example rps_nash_demo --features bandit`
+//! Run: `cargo run --example bandit_05_rps --features bandit`
 
 use microgpt_rs::pruners::{BanditStats, BanditStrategy};
 use microgpt_rs::types::Rng;

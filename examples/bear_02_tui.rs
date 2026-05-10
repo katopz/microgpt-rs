@@ -16,7 +16,7 @@
 //!   R                   — Restart solver
 //!   Q / Esc             — Quit
 //!
-//! Run: `cargo run --example blue_bear_tui`
+//! Run: `cargo run --example bear_02_tui`
 
 use std::io::{self, Stdout};
 use std::time::{Duration, Instant};

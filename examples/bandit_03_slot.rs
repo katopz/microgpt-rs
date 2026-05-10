@@ -3,8 +3,8 @@
 //! Proves DDTree + BanditPruner produces **actual value** with rules-based
 //! marginals, verification, and reward — no real transformer needed.
 //!
-//! Unlike `bandit_demo.rs` (coin flips, no DDTree, disclaimer required) and
-//! `bandit_ddtree_demo.rs` (random marginals, random verification), this demo:
+//! Unlike `bandit_01_basic.rs` (coin flips, no DDTree, disclaimer required) and
+//! `bandit_02_ddtree.rs` (random marginals, random verification), this demo:
 //! - Uses **structured reel weights** as marginals (non-uniform per position)
 //! - Uses **payline rules** for verification (deterministic combo checking)
 //! - Uses **payout tables** for reward (graded 0.0–1.0, not binary)
@@ -13,7 +13,7 @@
 //! No disclaimer needed — the full loop is closed:
 //! `Marginals → DDTree → Verification → Reward → Bandit learns → Repeat`
 //!
-//! Run: `cargo run --example slot_bandit_demo --features bandit`
+//! Run: `cargo run --example bandit_03_slot --features bandit`
 
 use microgpt_rs::pruners::{BanditPruner, BanditStrategy};
 use microgpt_rs::speculative::{ScreeningPruner, build_dd_tree_screened, extract_best_path_into};

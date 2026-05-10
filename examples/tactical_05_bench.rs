@@ -7,7 +7,7 @@
 //! Key insight: Brute-force scales as O(5^steps) — infeasible beyond ~8 steps.
 //! Strategic scales as O(N! targets) + O(map_size) per A* — works for 100+ steps.
 //!
-//! Run: `cargo run --example tactical_bench`
+//! Run: `cargo run --example tactical_05_bench`
 
 use std::collections::HashSet;
 

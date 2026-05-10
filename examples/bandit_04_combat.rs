@@ -24,7 +24,7 @@
 //! This bandit AI *discovers* that Defend beats Aggressive through trial and error.
 //! Change the damage numbers, and it re-learns automatically. No code changes needed.
 //!
-//! Run: `cargo run --example combat_bandit_demo --features bandit`
+//! Run: `cargo run --example bandit_04_combat --features bandit`
 
 use microgpt_rs::pruners::{BanditStats, BanditStrategy};
 use microgpt_rs::types::Rng;

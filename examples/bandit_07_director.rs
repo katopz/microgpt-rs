@@ -15,7 +15,7 @@
 //! - Casuals want rewards → director learns Treasure + EasyMob + Nothing (breather)
 //! - Completionists want variety → director balances all encounter types
 //!
-//! Run: `cargo run --example ai_director_demo --features bandit`
+//! Run: `cargo run --example bandit_07_director --features bandit`
 
 use microgpt_rs::pruners::{BanditStats, BanditStrategy};
 use microgpt_rs::types::Rng;

@@ -5,7 +5,7 @@
 //! - O(log N) attention retrieves execution state via convex hull
 //! - Streaming output shows step-by-step constraint satisfaction
 //!
-//! Run: cargo run --example sudoku_9x9
+//! Run: cargo run --example sudoku_01_9x9
 
 use microgpt_rs::percepta::{StreamingSolver, Sudoku9x9, SymbolicValidator, Vec2};
 

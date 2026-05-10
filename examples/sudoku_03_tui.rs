@@ -6,7 +6,7 @@
 //!
 //! Keys: Tab / 1 / 2 — switch mode · R — restart · Q / Esc — quit.
 //!
-//! Run: `cargo run --features sudoku --release --example sudoku_tui`
+//! Run: `cargo run --features sudoku --release --example sudoku_03_tui`
 
 use std::io::{self, Stdout};
 use std::sync::atomic::{AtomicBool, Ordering};

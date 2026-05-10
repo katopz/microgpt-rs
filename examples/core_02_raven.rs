@@ -8,7 +8,7 @@
 //! Based on "Raven: High-Recall Sequence Modeling with Sparse Memory Routing"
 //! See .research/06_Raven_Routing_Slot_Memories.md
 //!
-//! Run: `cargo run --example raven_recall`
+//! Run: `cargo run --example core_02_raven`
 
 use microgpt_rs::transformer::{
     ForwardContext, MultiLayerKVCache, RavenKVCache, TransformerWeights, forward, forward_raven,

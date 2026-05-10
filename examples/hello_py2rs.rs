@@ -1,4 +1,4 @@
-//! py2rs_hello — Python → Rust Transpilation Demo (Plan 025)
+//! hello_py2rs — Python → Rust Transpilation Demo (Plan 025)
 //!
 //! Demonstrates ZAYA-inspired modality LoRA switching with REAL code I/O:
 //!
@@ -11,7 +11,7 @@
 //! Honest note: with random weights, the output is gibberish.
 //! The *pipeline* is real — trained weights would produce real transpilation.
 //!
-//! Run: cargo run --example py2rs_hello
+//! Run: cargo run --example hello_py2rs
 
 use microgpt_rs::tokenizer::{BpeTokenizerImpl, BpeTrainer};
 use microgpt_rs::transformer::{
@@ -153,7 +153,7 @@ fn make_lora(config: &Config, seed: u32) -> LoraAdapter {
 
 fn main() {
     println!("╔═══════════════════════════════════════════════════════════════════╗");
-    println!("║  py2rs_hello: Python → Rust Transpilation Demo (Plan 025)       ║");
+    println!("║  hello_py2rs: Python → Rust Transpilation Demo (Plan 025)       ║");
     println!("╚═══════════════════════════════════════════════════════════════════╝");
     println!();
 

@@ -1,4 +1,4 @@
-//! PPoT benchmark — run with: `cargo run --example ppot_bench --features ppot`
+//! PPoT benchmark — run with: `cargo run --example core_03_ppot --features ppot`
 //!
 //! Standalone binary for PPoT (Probabilistic Programs of Thought) benchmarks.
 //! Separated from the main binary to avoid icache regression (72KB binary bloat

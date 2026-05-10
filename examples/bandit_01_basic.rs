@@ -3,7 +3,7 @@
 //! Runs UCB1, ε-greedy (with decay), and Thompson Sampling on a 5-armed Bernoulli bandit.
 //! Compares convergence speed, cumulative regret, and final Q-value accuracy.
 //!
-//! Run: `cargo run --example bandit_demo --features bandit`
+//! Run: `cargo run --example bandit_01_basic --features bandit`
 //!
 //! # ⚠️ What This Proves vs What It Doesn't
 //!

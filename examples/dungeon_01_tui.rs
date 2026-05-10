@@ -8,7 +8,7 @@
 //!   Home/End        — Jump to start/end
 //!   Q / Esc         — Quit
 //!
-//! Run: `cargo run --example dungeon_tui`
+//! Run: `cargo run --example dungeon_01_tui`
 
 use std::collections::HashMap;
 use std::io::{self, Stdout};

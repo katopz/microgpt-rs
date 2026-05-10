@@ -6,7 +6,7 @@
 //! 3. End-to-end pipeline generates valid tokens
 //! 4. Shared KV cache between prefill and decode
 //!
-//! Run: cargo run --example bidirectional_prefill_demo
+//! Run: cargo run --example core_04_prefill
 
 use microgpt_rs::transformer::{
     ForwardContext, MultiLayerKVCache, PrefillContext, TransformerWeights, forward,

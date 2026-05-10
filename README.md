@@ -801,7 +801,7 @@ Unlike `bandit_demo.rs` (coin flips, disclaimer required) and `bandit_ddtree_dem
 
 All bandit strategies significantly outperform random. ε-greedy and Thompson converge to Bell triples (reliable 0.6 reward) while random occasionally hits Diamond triples by luck.
 
-Run: `cargo run --example slot_bandit_demo --features bandit`
+Run: `cargo run --example bandit_03_slot --features bandit`
 
 ### Caveats (Honest)
 
@@ -852,8 +852,8 @@ Uses `GameActionScreener` (native Rust game action validator) as inner pruner fo
 4. **Bandit learns meaningful arms**: Constrained converges on game-relevant tokens; Unconstrained spreads visits thinly
 5. **Modelless still functional**: 87.8% accept rate proves bandit can learn without model priors, just slower
 
-Run: `cargo run --example bandit_ddtree_demo --features bandit`
-Run: `cargo run --example game_resolver_demo --features bandit`
+Run: `cargo run --example bandit_02_ddtree --features bandit`
+Run: `cargo run --example bandit_06_resolver --features bandit`
 
 ## 🛠️ Getting Started
 
@@ -881,13 +881,13 @@ cargo run --release --all-features
 cargo test --quiet --workspace --all-features
 
 # Run Sudoku solver example (streaming "thinking" output)
-cargo run --example sudoku_9x9 --features sudoku
+cargo run --example sudoku_01_9x9 --features sudoku
 
 # Run speculative decoding comparison (Unpruned / Static / Path-Aware)
-cargo run --example sudoku_speculative --features sudoku
+cargo run --example sudoku_02_speculative --features sudoku
 
 # Run TUI visualization (real-time grid + speculative mode, requires terminal)
-cargo run --example sudoku_tui --features sudoku
+cargo run --example sudoku_03_tui --features sudoku
 
 # Lint
 cargo clippy --all-targets --all-features --quiet

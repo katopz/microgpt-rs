@@ -3,14 +3,14 @@
 //! Proves whether model-based speculative decoding with bandit is worth the
 //! cost vs a modelless bandit-only approach.
 //!
-//! Unlike `bandit_demo.rs` which uses coin flips (no real marginals, no DDTree,
+//! Unlike `bandit_01_basic.rs` which uses coin flips (no real marginals, no DDTree,
 //! no verification), this demo:
 //! - Uses simulated marginals (concentrated for model-based, uniform for modelless)
 //! - Uses `build_dd_tree_screened()` with `BanditPruner`
 //! - Uses simulated verification with configurable acceptance rate
 //! - Runs both modes side-by-side and prints comparison metrics
 //!
-//! Run: `cargo run --example bandit_ddtree_demo --features bandit`
+//! Run: `cargo run --example bandit_02_ddtree --features bandit`
 //!
 //! # What This Proves
 //!

@@ -4,10 +4,10 @@
 //! adaptive learning (bandit) + DDTree speculative search.
 //!
 //! The "resolver" = validator (domain constraint) + bandit (adaptive learning).
-//! Unlike `bandit_ddtree_demo.rs` which uses `NoScreeningPruner`, this demo
+//! Unlike `bandit_02_ddtree.rs` which uses `NoScreeningPruner`, this demo
 //! uses a real domain screener that enforces game action syntax.
 //!
-//! Run: `cargo run --example game_resolver_demo --features bandit`
+//! Run: `cargo run --example bandit_06_resolver --features bandit`
 //!
 //! # Architecture
 //!

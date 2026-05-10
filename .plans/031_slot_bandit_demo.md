@@ -84,7 +84,7 @@ bandit learning.
 - [x] 6. Add ASCII visualization: convergence plot, Q-value heatmap, combo table
 - [x] 7. Add main() comparing UCB1, ε-greedy, Thompson Sampling + random baseline
 - [x] 8. Add `[[example]] slot_bandit_demo` to Cargo.toml gated by `bandit` feature
-- [x] 9. Test: `cargo run --example slot_bandit_demo --features bandit`
+- [x] 9. Test: `cargo run --example bandit_03_slot --features bandit`
 - [x] 10. Update README.md with slot machine demo section
 
 ## File Changes

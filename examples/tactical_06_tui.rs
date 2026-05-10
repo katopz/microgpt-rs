@@ -13,7 +13,7 @@
 //!   R                   — Restart solver
 //!   Q / Esc             — Quit
 //!
-//! Run: `cargo run --example tactical_ai_tui`
+//! Run: `cargo run --example tactical_06_tui`
 
 use std::collections::HashSet;
 use std::io::{self, Stdout};

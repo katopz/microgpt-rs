@@ -8,7 +8,7 @@
 //! Shows that path-aware pruning catches cross-depth row/col/box conflicts
 //! that static-only pruning misses.
 //!
-//! Run: cargo run --example sudoku_speculative
+//! Run: cargo run --example sudoku_02_speculative
 
 use microgpt_rs::percepta::Sudoku9x9;
 use microgpt_rs::pruners::SudokuPruner;
