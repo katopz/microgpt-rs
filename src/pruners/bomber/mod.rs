@@ -103,8 +103,8 @@ pub enum PowerUpKind {
 impl fmt::Display for PowerUpKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            Self::BombUp => "💥",
-            Self::FireUp => "🔥",
+            Self::BombUp => "🌠",
+            Self::FireUp => "🎇",
             Self::SpeedUp => "👟",
         };
         write!(f, "{s}")
@@ -294,8 +294,8 @@ mod tests {
 
     #[test]
     fn powerup_display() {
-        assert_eq!(format!("{}", PowerUpKind::BombUp), "💥");
-        assert_eq!(format!("{}", PowerUpKind::FireUp), "🔥");
+        assert_eq!(format!("{}", PowerUpKind::BombUp), "🌠");
+        assert_eq!(format!("{}", PowerUpKind::FireUp), "🎇");
         assert_eq!(format!("{}", PowerUpKind::SpeedUp), "👟");
     }
 

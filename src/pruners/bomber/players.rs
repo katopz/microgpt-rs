@@ -30,6 +30,9 @@ const ALL_ACTIONS: [BomberAction; ACTION_COUNT] = [
 /// Tracked bomb: (position, blast_range, fuse_ticks_remaining).
 type KnownBomb = ((i32, i32), u32, u32);
 
+/// Tracked opponent: (player_id, current_pos, prev_pos).
+type KnownOpponent = (u8, (i32, i32), Option<(i32, i32)>);
+
 // ── Trait ──────────────────────────────────────────────────────
 
 /// AI player trait for Bomberman arena.
@@ -222,35 +225,121 @@ fn update_powerups(powerups: &mut Vec<(i32, i32)>, events: &[GameEvent]) {
 }
 
 /// Track opponent positions from PlayerMoved and BombPlaced events.
-fn update_opponents(opponents: &mut Vec<(u8, (i32, i32))>, events: &[GameEvent], my_id: u8) {
+/// Stores `(player_id, current_pos, prev_pos)` for trajectory prediction.
+fn update_opponents(opponents: &mut Vec<KnownOpponent>, events: &[GameEvent], my_id: u8) {
     for event in events {
         match event {
             GameEvent::PlayerMoved { player, to, .. } => {
                 if *player == my_id {
                     continue;
                 }
-                if let Some(entry) = opponents.iter_mut().find(|(p, _)| *p == *player) {
+                if let Some(entry) = opponents.iter_mut().find(|(p, _, _)| *p == *player) {
+                    entry.2 = Some(entry.1);
                     entry.1 = *to;
                 } else {
-                    opponents.push((*player, *to));
+                    opponents.push((*player, *to, None));
                 }
             }
             GameEvent::BombPlaced { player, pos } => {
                 if *player == my_id {
                     continue;
                 }
-                if let Some(entry) = opponents.iter_mut().find(|(p, _)| *p == *player) {
+                if let Some(entry) = opponents.iter_mut().find(|(p, _, _)| *p == *player) {
+                    entry.2 = Some(entry.1);
                     entry.1 = *pos;
                 } else {
-                    opponents.push((*player, *pos));
+                    opponents.push((*player, *pos, None));
                 }
             }
             GameEvent::PlayerKilled { victim, .. } => {
-                opponents.retain(|(p, _)| *p != *victim);
+                opponents.retain(|(p, _, _)| *p != *victim);
             }
             _ => {}
         }
     }
+}
+
+/// Predict opponent's next position from trajectory (prev → current → next).
+fn predict_direction(current: (i32, i32), prev: Option<(i32, i32)>) -> Option<(i32, i32)> {
+    let (cx, cy) = current;
+    let (px, py) = prev?;
+    let dx = cx - px;
+    let dy = cy - py;
+    if dx == 0 && dy == 0 {
+        return None;
+    }
+    Some((cx + dx, cy + dy))
+}
+
+/// Count walkable neighbors (escape routes) from a position.
+fn count_escape_routes(pos: (i32, i32), grid: &ArenaGrid) -> usize {
+    [(0i32, -1), (0, 1), (-1, 0), (1, 0)]
+        .iter()
+        .filter(|&&(dx, dy)| grid.is_walkable(pos.0 + dx, pos.1 + dy))
+        .count()
+}
+
+/// Score a bomb placement by how trapped the opponent would be.
+/// Higher score = fewer opponent escape routes + blast coverage.
+fn trap_score(
+    bomb_pos: (i32, i32),
+    opponent_pos: (i32, i32),
+    grid: &ArenaGrid,
+    blast_range: u32,
+) -> f32 {
+    let dist = (bomb_pos.0 - opponent_pos.0).abs() + (bomb_pos.1 - opponent_pos.1).abs();
+    if dist > blast_range as i32 + 3 {
+        return 0.0;
+    }
+
+    let mut score = 0.0;
+
+    // Bonus: opponent is within blast range
+    if is_in_single_blast(
+        GridPos {
+            x: opponent_pos.0,
+            y: opponent_pos.1,
+        },
+        grid,
+        bomb_pos,
+        blast_range,
+    ) {
+        score += 4.0;
+    }
+
+    // Penalty: more escape routes = harder to trap
+    let routes = count_escape_routes(opponent_pos, grid);
+    match routes {
+        0 => score += 3.0,
+        1 => score += 2.0,
+        2 => score += 0.5,
+        _ => {}
+    }
+
+    // Closeness bonus
+    if dist <= 2 {
+        score += 1.0;
+    }
+
+    score
+}
+
+/// Score movement toward intercepting an opponent's predicted path.
+fn intercept_score(
+    my_target: (i32, i32),
+    opponent_pos: (i32, i32),
+    predicted_pos: Option<(i32, i32)>,
+) -> f32 {
+    let current_dist = (my_target.0 - opponent_pos.0).abs() + (my_target.1 - opponent_pos.1).abs();
+
+    if let Some((px, py)) = predicted_pos {
+        let predicted_dist = (my_target.0 - px).abs() + (my_target.1 - py).abs();
+        if predicted_dist < current_dist {
+            return 1.0;
+        }
+    }
+
+    0.0
 }
 
 /// Check if player has an escape route after placing a bomb at `new_bomb_pos`.
@@ -922,7 +1011,7 @@ pub struct HLPlayer {
     _id: u8,
     known_bombs: Vec<KnownBomb>,
     known_powerups: Vec<(i32, i32)>,
-    known_opponents: Vec<(u8, (i32, i32))>,
+    known_opponents: Vec<KnownOpponent>,
     q_values: [f32; ACTION_COUNT],
     visits: [u32; ACTION_COUNT],
     total_pulls: u32,
@@ -1053,16 +1142,16 @@ impl BomberPlayer for HLPlayer {
         let bomb_positions: std::collections::HashSet<(i32, i32)> =
             self.known_bombs.iter().map(|(p, _, _)| *p).collect();
 
-        // Find nearest opponent for hunting
-        let nearest_opponent = self
+        // Find nearest opponent and their predicted trajectory
+        let nearest_info = self
             .known_opponents
             .iter()
-            .filter(|(_, op)| {
-                // Only consider opponents that are reachable (not on unwalkable cells)
-                grid.is_walkable(op.0, op.1)
-            })
-            .min_by_key(|(_, op)| (pos.x - op.0).abs() + (pos.y - op.1).abs())
-            .map(|(_, op)| *op);
+            .filter(|(_, op, _)| grid.is_walkable(op.0, op.1))
+            .min_by_key(|(_, op, _)| (pos.x - op.0).abs() + (pos.y - op.1).abs());
+
+        let nearest_opponent = nearest_info.map(|(_, op, _)| *op);
+        let predicted_opponent =
+            nearest_info.and_then(|(_, op, prev)| predict_direction(*op, *prev));
 
         // Compute blended scores: 85% policy + 15% bandit Q-value
         let mut scores: [(BomberAction, f32); ACTION_COUNT] = ALL_ACTIONS.map(|a| (a, 0.0));
@@ -1100,7 +1189,7 @@ impl BomberPlayer for HLPlayer {
                 continue;
             }
 
-            // Strategic bonus: hunt, ambush, and bomb value
+            // Strategic bonus: hunt, intercept, ambush, and trap
             let mut strategy_bonus = 0.0f32;
             match action {
                 BomberAction::Up
@@ -1111,9 +1200,22 @@ impl BomberPlayer for HLPlayer {
                         let target = move_target(action, pos);
                         let current_dist = (pos.x - ox).abs() + (pos.y - oy).abs();
                         let target_dist = (target.x - ox).abs() + (target.y - oy).abs();
+
                         // Hunt: move toward opponent
                         if target_dist < current_dist {
                             strategy_bonus += 1.5;
+                        }
+
+                        // Intercept: move toward predicted position
+                        strategy_bonus +=
+                            intercept_score((target.x, target.y), (ox, oy), predicted_opponent);
+
+                        // Chokepoint: prefer moving where opponent has fewer escapes
+                        if target_dist <= 3 {
+                            let routes = count_escape_routes((target.x, target.y), grid);
+                            if routes <= 1 {
+                                strategy_bonus += 1.0;
+                            }
                         }
                     }
                 }
@@ -1130,12 +1232,10 @@ impl BomberPlayer for HLPlayer {
                         .count();
                     strategy_bonus += wall_count as f32 * 0.5;
 
-                    // Ambush bonus when near opponent
+                    // Attack: trap scoring when opponent is nearby
                     if let Some((ox, oy)) = nearest_opponent {
-                        let dist_to_opponent = (pos.x - ox).abs() + (pos.y - oy).abs();
-                        if dist_to_opponent <= DEFAULT_BLAST_RANGE as i32 + 2 {
-                            strategy_bonus += 3.0;
-                        }
+                        strategy_bonus +=
+                            trap_score((pos.x, pos.y), (ox, oy), grid, DEFAULT_BLAST_RANGE);
                     }
                 }
                 BomberAction::Wait => {}

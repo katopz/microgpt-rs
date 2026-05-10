@@ -45,8 +45,8 @@ const FLOOR: &str = "··";
 const BLAST_EMOJI: &str = "💥";
 const BOMB_FRESH: &str = "💣";
 const BOMB_LOW: &str = "🧨";
-const PU_BOMB: &str = "💥";
-const PU_FIRE: &str = "🔥";
+const PU_BOMB: &str = "🌠";
+const PU_FIRE: &str = "🎇";
 const PU_SPEED: &str = "👟";
 
 // ── Timing ─────────────────────────────────────────────────────
