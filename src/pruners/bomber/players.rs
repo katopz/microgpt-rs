@@ -16,6 +16,7 @@ use super::{ArenaGrid, BomberAction, GameEvent, GridPos};
 
 const ACTION_COUNT: usize = 6;
 const DEFAULT_BLAST_RANGE: u32 = 2;
+const BOMB_FUSE_TICKS: u32 = super::BOMB_FUSE_TICKS;
 
 const ALL_ACTIONS: [BomberAction; ACTION_COUNT] = [
     BomberAction::Up,
@@ -25,6 +26,9 @@ const ALL_ACTIONS: [BomberAction; ACTION_COUNT] = [
     BomberAction::Bomb,
     BomberAction::Wait,
 ];
+
+/// Tracked bomb: (position, blast_range, fuse_ticks_remaining).
+type KnownBomb = ((i32, i32), u32, u32);
 
 // ── Trait ──────────────────────────────────────────────────────
 
@@ -118,8 +122,8 @@ fn manhattan(a: GridPos, b: GridPos) -> i32 {
 
 /// Check if position is in the blast zone of any known bomb.
 /// Accounts for walls blocking blast propagation (blast stops at walls).
-fn in_blast_zone(pos: GridPos, grid: &ArenaGrid, bombs: &[((i32, i32), u32)]) -> bool {
-    for &(bomb_pos, range) in bombs {
+fn in_blast_zone(pos: GridPos, grid: &ArenaGrid, bombs: &[KnownBomb]) -> bool {
+    for &(bomb_pos, range, _fuse) in bombs {
         if is_in_single_blast(pos, grid, bomb_pos, range) {
             return true;
         }
@@ -180,16 +184,20 @@ fn is_in_single_blast(pos: GridPos, grid: &ArenaGrid, bomb_pos: (i32, i32), rang
 }
 
 /// Update known bomb list from events.
-fn update_bombs(bombs: &mut Vec<((i32, i32), u32)>, events: &[GameEvent]) {
+fn update_bombs(bombs: &mut Vec<KnownBomb>, events: &[GameEvent]) {
+    // Decrement fuses each tick (called once per select_action)
+    for bomb in bombs.iter_mut() {
+        bomb.2 = bomb.2.saturating_sub(1);
+    }
     for event in events {
         match event {
             GameEvent::BombPlaced { pos, .. } => {
-                if !bombs.iter().any(|(p, _)| *p == *pos) {
-                    bombs.push((*pos, DEFAULT_BLAST_RANGE));
+                if !bombs.iter().any(|(p, _, _)| *p == *pos) {
+                    bombs.push((*pos, DEFAULT_BLAST_RANGE, BOMB_FUSE_TICKS));
                 }
             }
             GameEvent::BombExploded { pos, .. } => {
-                bombs.retain(|(p, _)| *p != *pos);
+                bombs.retain(|(p, _, _)| *p != *pos);
             }
             _ => {}
         }
@@ -221,7 +229,7 @@ fn has_escape_route(
     player_pos: GridPos,
     new_bomb_pos: (i32, i32),
     blast_range: u32,
-    existing_bombs: &[((i32, i32), u32)],
+    existing_bombs: &[KnownBomb],
 ) -> bool {
     use std::collections::{HashSet, VecDeque};
 
@@ -231,14 +239,14 @@ fn has_escape_route(
 
     // Bomb entities block movement — collect all blocked positions
     let blocked: HashSet<(i32, i32)> = {
-        let mut s: HashSet<(i32, i32)> = existing_bombs.iter().map(|(p, _)| *p).collect();
+        let mut s: HashSet<(i32, i32)> = existing_bombs.iter().map(|(p, _, _)| *p).collect();
         s.insert(new_bomb_pos);
         s
     };
 
     // All bombs combined for comprehensive blast zone checking
-    let mut all_bombs: Vec<((i32, i32), u32)> = existing_bombs.to_vec();
-    all_bombs.push((new_bomb_pos, blast_range));
+    let mut all_bombs: Vec<KnownBomb> = existing_bombs.to_vec();
+    all_bombs.push((new_bomb_pos, blast_range, BOMB_FUSE_TICKS));
 
     queue.push_back(((player_pos.x, player_pos.y), 0));
     visited.insert((player_pos.x, player_pos.y));
@@ -271,7 +279,7 @@ fn is_safe_action(
     action: &BomberAction,
     grid: &ArenaGrid,
     pos: GridPos,
-    bombs: &[((i32, i32), u32)],
+    bombs: &[KnownBomb],
 ) -> bool {
     match action {
         BomberAction::Up | BomberAction::Down | BomberAction::Left | BomberAction::Right => {
@@ -312,14 +320,14 @@ fn is_safe_action(
 /// The player stands ON the bomb but moves away next tick, so escape is
 /// checked from adjacent cells — not from the bomb position itself.
 /// Accounts for existing bombs' blast zones and bomb entities blocking movement.
-fn should_place_bomb(grid: &ArenaGrid, pos: GridPos, bombs: &[((i32, i32), u32)]) -> bool {
+fn should_place_bomb(grid: &ArenaGrid, pos: GridPos, bombs: &[KnownBomb]) -> bool {
     // Don't place if already in a blast zone (walls may block, but be safe)
     if in_blast_zone(pos, grid, bombs) {
         return false;
     }
 
     // Don't place if there's already a bomb here
-    if bombs.iter().any(|(p, _)| p.0 == pos.x && p.1 == pos.y) {
+    if bombs.iter().any(|(p, _, _)| p.0 == pos.x && p.1 == pos.y) {
         return false;
     }
 
@@ -403,7 +411,7 @@ fn has_adjacent_wall(grid: &ArenaGrid, pos: GridPos) -> bool {
 fn escape_distance(
     pos: GridPos,
     grid: &ArenaGrid,
-    bombs: &[((i32, i32), u32)],
+    bombs: &[KnownBomb],
     blocked: &std::collections::HashSet<(i32, i32)>,
 ) -> Option<i32> {
     use std::collections::{HashSet, VecDeque};
@@ -451,7 +459,7 @@ fn score_action(
     action: &BomberAction,
     grid: &ArenaGrid,
     pos: GridPos,
-    bombs: &[((i32, i32), u32)],
+    bombs: &[KnownBomb],
     powerups: &[(i32, i32)],
     last_dir: Option<BomberAction>,
 ) -> f32 {
@@ -459,7 +467,7 @@ fn score_action(
 
     // Collect bomb positions that block movement
     let bomb_positions: std::collections::HashSet<(i32, i32)> =
-        bombs.iter().map(|(p, _)| *p).collect();
+        bombs.iter().map(|(p, _, _)| *p).collect();
 
     match action {
         Up | Down | Left | Right => {
@@ -562,11 +570,15 @@ fn score_action(
 /// Avoids walking into walls (up to 3 re-rolls, then Wait).
 pub struct RandomPlayer {
     _id: u8,
+    known_bombs: Vec<KnownBomb>,
 }
 
 impl RandomPlayer {
     pub fn new(id: u8) -> Self {
-        Self { _id: id }
+        Self {
+            _id: id,
+            known_bombs: Vec::new(),
+        }
     }
 }
 
@@ -575,20 +587,28 @@ impl BomberPlayer for RandomPlayer {
         &mut self,
         grid: &ArenaGrid,
         pos: GridPos,
-        _events: &[GameEvent],
+        events: &[GameEvent],
         rng: &mut Rng,
     ) -> BomberAction {
-        // Try random actions, avoid walls (3 attempts)
-        for _ in 0..3 {
-            let idx = rng.usize(0..ACTION_COUNT);
-            let action = index_to_action(idx);
+        update_bombs(&mut self.known_bombs, events);
+
+        // Collect safe walkable moves (avoid walls + blast zones)
+        let safe_moves: Vec<BomberAction> = [
+            BomberAction::Up,
+            BomberAction::Down,
+            BomberAction::Left,
+            BomberAction::Right,
+        ]
+        .into_iter()
+        .filter(|&action| {
             let target = move_target(&action, pos);
-            if action == BomberAction::Bomb || action == BomberAction::Wait {
-                return action;
-            }
-            if grid.is_walkable(target.x, target.y) {
-                return action;
-            }
+            grid.is_walkable(target.x, target.y) && !in_blast_zone(target, grid, &self.known_bombs)
+        })
+        .collect();
+
+        // Prefer safe moves, fall back to Wait
+        if !safe_moves.is_empty() {
+            return safe_moves[rng.usize(0..safe_moves.len())];
         }
         BomberAction::Wait
     }
@@ -601,7 +621,9 @@ impl BomberPlayer for RandomPlayer {
         "🐰"
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.known_bombs.clear();
+    }
 
     fn as_any(&self) -> &dyn Any {
         self
@@ -620,7 +642,7 @@ impl BomberPlayer for RandomPlayer {
 /// and picks the best. Adds 20% random exploration to discover new strategies.
 pub struct GreedyPlayer {
     _id: u8,
-    known_bombs: Vec<((i32, i32), u32)>,
+    known_bombs: Vec<KnownBomb>,
     known_powerups: Vec<(i32, i32)>,
     last_dir: Option<BomberAction>,
 }
@@ -701,7 +723,8 @@ impl BomberPlayer for GreedyPlayer {
             self.last_dir = Some(best);
         }
         if best == BomberAction::Bomb {
-            self.known_bombs.push(((pos.x, pos.y), DEFAULT_BLAST_RANGE));
+            self.known_bombs
+                .push(((pos.x, pos.y), DEFAULT_BLAST_RANGE, BOMB_FUSE_TICKS));
         }
         best
     }
@@ -738,7 +761,7 @@ impl BomberPlayer for GreedyPlayer {
 /// - Never walks into active blast zones, walls, or places bomb without escape
 pub struct ValidatorPlayer {
     _id: u8,
-    known_bombs: Vec<((i32, i32), u32)>,
+    known_bombs: Vec<KnownBomb>,
     known_powerups: Vec<(i32, i32)>,
     last_dir: Option<BomberAction>,
 }
@@ -765,25 +788,56 @@ impl BomberPlayer for ValidatorPlayer {
         update_bombs(&mut self.known_bombs, events);
         update_powerups(&mut self.known_powerups, events);
 
-        // Score all SAFE actions, pick best
+        let in_danger = in_blast_zone(pos, grid, &self.known_bombs);
+        let bomb_positions: std::collections::HashSet<(i32, i32)> =
+            self.known_bombs.iter().map(|(p, _, _)| *p).collect();
+
         let mut best = BomberAction::Wait;
         let mut best_score = f32::NEG_INFINITY;
 
         for action in &ALL_ACTIONS {
-            if !is_safe_action(action, grid, pos, &self.known_bombs) {
-                continue;
-            }
-            let score = score_action(
+            let is_move = matches!(
                 action,
-                grid,
-                pos,
-                &self.known_bombs,
-                &self.known_powerups,
-                self.last_dir,
+                BomberAction::Up | BomberAction::Down | BomberAction::Left | BomberAction::Right
             );
-            if score > best_score {
-                best_score = score;
-                best = *action;
+
+            if in_danger {
+                // Escape mode: score movement by escape distance, skip Bomb/Wait
+                if !is_move {
+                    continue;
+                }
+                let target = move_target(action, pos);
+                if !grid.is_walkable(target.x, target.y)
+                    || bomb_positions.contains(&(target.x, target.y))
+                {
+                    continue;
+                }
+                let score = match escape_distance(target, grid, &self.known_bombs, &bomb_positions)
+                {
+                    Some(dist) => 10.0 - dist as f32 * 0.5,
+                    None => -5.0, // No escape route found — try anyway
+                };
+                if score > best_score {
+                    best_score = score;
+                    best = *action;
+                }
+            } else {
+                // Safe mode: hard-block unsafe actions (validator's purpose)
+                if !is_safe_action(action, grid, pos, &self.known_bombs) {
+                    continue;
+                }
+                let score = score_action(
+                    action,
+                    grid,
+                    pos,
+                    &self.known_bombs,
+                    &self.known_powerups,
+                    self.last_dir,
+                );
+                if score > best_score {
+                    best_score = score;
+                    best = *action;
+                }
             }
         }
 
@@ -794,7 +848,8 @@ impl BomberPlayer for ValidatorPlayer {
             self.last_dir = Some(best);
         }
         if best == BomberAction::Bomb {
-            self.known_bombs.push(((pos.x, pos.y), DEFAULT_BLAST_RANGE));
+            self.known_bombs
+                .push(((pos.x, pos.y), DEFAULT_BLAST_RANGE, BOMB_FUSE_TICKS));
         }
         best
     }
@@ -833,7 +888,7 @@ impl BomberPlayer for ValidatorPlayer {
 /// - Trial logging for outcome attribution
 pub struct HLPlayer {
     _id: u8,
-    known_bombs: Vec<((i32, i32), u32)>,
+    known_bombs: Vec<KnownBomb>,
     known_powerups: Vec<(i32, i32)>,
     q_values: [f32; ACTION_COUNT],
     visits: [u32; ACTION_COUNT],
@@ -981,9 +1036,16 @@ impl BomberPlayer for HLPlayer {
                 continue;
             }
 
-            // Safety validation — penalize unsafe actions
-            let safe = is_safe_action(action, grid, pos, &self.known_bombs);
-            let safety_bonus = if safe { 0.0 } else { -0.5 };
+            // Safety validation — hard-block unsafe Bomb/Wait only;
+            // let score_action handle movement (it uses escape_distance in blast zones)
+            let is_move = matches!(
+                action,
+                BomberAction::Up | BomberAction::Down | BomberAction::Left | BomberAction::Right
+            );
+            if !is_move && !is_safe_action(action, grid, pos, &self.known_bombs) {
+                scores[i] = (*action, f32::NEG_INFINITY);
+                continue;
+            }
 
             // Bandit Q-value component (default 0.0 for unvisited arms)
             let bandit_q = if self.visits[i] > 0 {
@@ -992,19 +1054,19 @@ impl BomberPlayer for HLPlayer {
                 0.0
             };
 
-            // Blend: 60% policy + 40% bandit + safety
-            let blended = h * 0.6 + bandit_q * 0.4 + safety_bonus;
+            // Blend: 60% policy + 40% bandit
+            let blended = h * 0.6 + bandit_q * 0.4;
             scores[i] = (*action, blended);
         }
 
-        // ε-greedy: 10% explore, 90% exploit
-        if rng.f32() < 0.1 {
-            // Pick a random non-compressed action
-            let valid: Vec<usize> = (0..ACTION_COUNT)
+        // ε-greedy: 5% explore (only non-blocked actions), 95% exploit
+        if rng.f32() < 0.05 {
+            // Pick a random non-compressed, non-hard-blocked action
+            let valid_actions: Vec<usize> = (0..ACTION_COUNT)
                 .filter(|&i| !self.compressed[i] && scores[i].1 > f32::NEG_INFINITY)
                 .collect();
-            if !valid.is_empty() {
-                let pick = valid[rng.usize(0..valid.len())];
+            if !valid_actions.is_empty() {
+                let pick = valid_actions[rng.usize(0..valid_actions.len())];
                 let action = scores[pick].0;
                 self.round_actions.push(action);
                 if matches!(
@@ -1133,7 +1195,7 @@ mod tests {
             player: 0,
             pos: (3, 1),
         }];
-        player.known_bombs = vec![((3, 1), 2)];
+        player.known_bombs = vec![((3, 1), 2, BOMB_FUSE_TICKS)];
 
         let action = player.select_action(&grid, pos, &events, &mut rng);
         // Should not move into blast zone (3,1 has range 2, so (3,3) is in blast)
