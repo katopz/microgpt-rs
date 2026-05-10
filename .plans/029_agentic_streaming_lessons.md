@@ -5,14 +5,14 @@
 
 ## Tasks
 
-- [ ] 1. Benchmark: measure TTFT with stable vs unstable prefix on speculative pipeline
-- [ ] 2. Generalize `SolveEvent` → `DraftEvent` enum for streaming speculative steps
-- [ ] 3. Add per-request agent hints to REST module (`latency_sensitivity`, `speculative_prefill`)
-- [ ] 4. Add `/v1/tokenize` endpoint to REST module
-- [ ] 5. Add domain-level truncation policy to `domains.toml`
-- [ ] 6. Document DDTree branch ordering preserves reasoning sequence
-- [ ] 7. Ensure `ScreeningPruner` + `ConstraintPruner` don't compete for same decision
-- [ ] 8. Update README with production lessons from Dynamo
+- [x] 1. Benchmark: measure TTFT with stable vs unstable prefix on speculative pipeline
+- [x] 2. Generalize `SolveEvent` → `DraftEvent` enum for streaming speculative steps
+- [x] 3. Add per-request agent hints to REST module (`latency_sensitivity`, `speculative_prefill`)
+- [x] 4. Add `/v1/tokenize` endpoint to REST module
+- [x] 5. Add domain-level truncation policy to `domains.toml`
+- [x] 6. Document DDTree branch ordering preserves reasoning sequence
+- [x] 7. Ensure `ScreeningPruner` + `ConstraintPruner` don't compete for same decision
+- [x] 8. Update README with production lessons from Dynamo
 
 ---
 

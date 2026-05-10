@@ -791,6 +791,54 @@ bench/
   001_results.csv       ...  026_results.csv       (paired CSV, same index as PNG)
 ```
 
+## 🔧 Production Lessons from NVIDIA Dynamo
+
+Hard-won lessons from [NVIDIA Dynamo's agentic inference](https://developer.nvidia.com/blog/streaming-tokens-and-tools-multi-turn-agentic-harness-support-in-nvidia-dynamo/) (2025-05), applied to our stack.
+
+### Prompt Stability is Key for KV Cache Reuse
+
+A per-session billing header at position zero poisons KV cache reuse across sessions. Dynamo measured **~5× TTFT penalty** (911ms vs 168ms on 52K prompt, B200) from a varying prefix.
+
+**Our status:** `PagedKVCache` supports prefix reuse but impact is not yet measured on GPU. On CPU (no HW KV cache), our [prefix stability benchmark](tests/prefix_stability_bench.rs) confirms negligible difference — as expected.
+
+### Streaming Tool Dispatch
+
+Dynamo added `event: tool_call_dispatch` SSE side channel that fires when tool-call payload is structurally complete — before stream ends. This enables parallel tool execution and token streaming.
+
+**Our status:** Generalized `SolveEvent` → [`DraftEvent`](src/speculative/types.rs) enum for streaming speculative decoding steps: `Drafting`, `Pruned`, `Verified`, `BranchRejected`, `StepComplete`. Events fire at structural completion, not when the entire step finishes.
+
+### Interleaved Reasoning Must Be Preserved
+
+Agentic models produce turns with interleaved reasoning and tool calls. Grouped ordering (reasoning₀, reasoning₁, tool₀, tool₁) **loses sequence meaning** and increased TTFT 1.9× (322ms vs 167ms on B200).
+
+**Our status:** DDTree's `extract_parent_tokens()` preserves **ordered sequences** per branch. Each branch stores tokens in `parent_path` as an ordered bitfield, maintaining the exact order the draft model produced them.
+
+### Single Parser Ownership
+
+Competing parser layers (backend + frontend both parsing `<think/>` boundaries) caused silent malformation. Fix: one owner for reasoning parsing, one for tool-call parsing.
+
+**Our status:** [`ConstraintPruner`](src/speculative/types.rs) owns hard structural validity (syntax, brackets, keywords). [`ScreeningPruner`](src/speculative/types.rs) owns graded semantic relevance (domain fit, topic match). [`BinaryScreeningPruner`](src/speculative/types.rs) adapter bridges with zero additional logic. Both may prune the same token for different reasons — they must not claim ownership of the same decision type.
+
+### Catalog Metadata Shapes Agent Behavior
+
+Dynamo showed wrong catalog = 50% fewer tool calls (41.7 vs 21.0 per task on SWE-Bench Verified). Truncation mode (`tokens` vs `bytes`) changed what the model could inspect after failures.
+
+**Our status:** Added [`TruncationPolicy`](src/router/types.rs) and [`ReasoningRetention`](src/router/types.rs) per domain in [`domains.toml`](domains.toml). Example: `py2rs` domain uses `truncation = { mode = "tokens", limit = 8000 }` and `reasoning_retention = { preserve = true, max_per_turn = 500 }`.
+
+### Per-Request Agent Hints
+
+Dynamo added `nvext.agent_hints: latency_sensitivity, priority, speculative_prefill` — harness signals intent per-turn. A user-waiting session ≠ background tool chain.
+
+**Our status:** Added [`AgentHints`](src/rest/types.rs) with `latency_sensitivity` (0.0=background, 1.0=interactive), `speculative_prefill` flag, and `priority` (0-255). Parseable from `X-Agent-Hints` HTTP header.
+
+### `/v1/tokenize` for Context Accounting
+
+Harnesses need token counting to decide when to compact conversation. Dynamo added tokenize/detokenize endpoints.
+
+**Our status:** Added [`TokenizeRequest`](src/rest/types.rs) / [`TokenizeResponse`](src/rest/types.rs) / [`DetokenizeRequest`](src/rest/types.rs) / [`DetokenizeResponse`](src/rest/types.rs) types wrapping existing BPE tokenizer.
+
+---
+
 ## 📜 References
 
 - [microgpt-c](https://github.com/nicholasgasior/microgpt-c) by Vishal Baraiya
