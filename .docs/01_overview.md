@@ -134,7 +134,7 @@ cargo run --example py2rs_hello                                 # BPE + bidirect
 | 06 | `06_sudoku_tui.md` | TUI visualization |
 | 07 | `07_compiler_in_the_loop_validator.md` | Validator compiler-in-the-loop |
 | 08 | `08_lucebox_techniques.md` | LuceBox techniques |
-| 09 | — | *(GPU training docs moved to riir-ai)* |
+| 09 | — | *(reserved)* |
 | 10 | `06_validator.md` | Constraint validator + SynPruner |
 | 11 | `04_performance.md` | Performance engineering |
 | 12 | `05_sudoku.md` | Sudoku solvers |

@@ -249,19 +249,6 @@ Phase 2: SynPruner — PartialParser + ConstraintPruner impl
 Phase 3: Integration — examples, benchmarks
 ```
 
-## Training Data Vision (Plan 009)
-```
-Rust Docs ──┐
-GitHub ────┼──► CorpusIngester ──► TrainingFilter ──► JSONL
-Crates.io ─┘    (walk+dedup)       (syn+cargo check)    (training data)
-                                                          │
-                                                    LoRA Training (riir-burner → riir-gpu)
-                                                          │
-                                                    lora.bin
-                                                          │
-                                                    Draft model upgrade
-```
-
 ## Key References
 - `.research/00_Neuro-Symbolic LLM Architecture.md` — Original Validator concept
 - `.research/01_Advanced Neuro-Symbolic Rust Translation.md` — Grand Unification architecture
