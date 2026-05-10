@@ -1,0 +1,44 @@
+# domains.toml — Domain definitions for the Prompt Router (Plan 023)
+#
+# Each [[domain]] entry defines a semantic domain that the KeywordRouter
+# can match against user prompts. Curators add new domains by editing this
+# file (or uploading .wasm + .bin pairs in the future Marketplace).
+#
+# Fields:
+#   name                — unique domain name (used as registry key)
+#   keywords            — strings matched against the prompt (case-insensitive)
+#   native_pruner       — built-in pruner: "sudoku", "tactical", "no_pruner"
+#   pruner              — path to a .wasm pruner file (relative to pruner dir)
+#   lora                — path to a LoRA adapter file (relative to pruner dir)
+#   truncation          — context truncation policy: { mode = "tokens"|"bytes", limit = N }
+#   reasoning_retention — reasoning retention: { preserve = bool, max_per_turn = N }
+
+[[domain]]
+name = "sudoku"
+keywords = ["sudoku", "puzzle", "grid", "9x9", "digit"]
+native_pruner = "sudoku"
+
+[[domain]]
+name = "pathfinding"
+keywords = ["path", "maze", "bear", "terrain", "tactical", "grid"]
+native_pruner = "tactical"
+
+[[domain]]
+name = "rust_code"
+keywords = ["rust", "cargo", "axum", "tokio", "trait", "impl", "compile"]
+pruner = "syn_validator.wasm"
+truncation = { mode = "tokens", limit = 10000 }
+
+[[domain]]
+name = "py2rs"
+keywords = ["python", "rewrite", "fastapi", "flask", "translate"]
+pruner = "syn_validator.wasm"
+reader_lora = "python_reader.bin"
+writer_lora = "rust_writer.bin"
+truncation = { mode = "tokens", limit = 8000 }
+reasoning_retention = { preserve = true, max_per_turn = 500 }
+
+[[domain]]
+name = "general"
+keywords = []
+native_pruner = "no_pruner"

@@ -2,7 +2,7 @@
 //!
 //! Two tabs:
 //! - **9×9** — full backtracking solver, animated cell-by-cell.
-//! - **Speculative** — DDTree + path-aware Computable LoRA pruning.
+//! - **Speculative** — DDTree + path-aware Symbolic Validator pruning.
 //!
 //! Keys: Tab / 1 / 2 — switch mode · R — restart · Q / Esc — quit.
 //!
@@ -10,14 +10,14 @@
 
 use std::io::{self, Stdout};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -28,9 +28,9 @@ use ratatui::widgets::{Block, Borders, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 
 use microgpt_rs::percepta::Sudoku9x9;
+use microgpt_rs::pruners::SudokuPruner;
 use microgpt_rs::speculative::{
-    build_dd_tree, build_dd_tree_pruned, extract_parent_tokens, ConstraintPruner, SudokuPruner,
-    TreeNode,
+    ConstraintPruner, TreeNode, build_dd_tree, build_dd_tree_pruned, extract_parent_tokens,
 };
 use microgpt_rs::types::Config;
 
@@ -263,9 +263,10 @@ fn run_speculative(initial: Sudoku9x9, tx: mpsc::Sender<Msg>, cancel: Arc<Atomic
         ..Config::draft()
     };
 
-    let tree_unpruned = build_dd_tree(&marginals, &config);
-    let tree_static = build_dd_tree_pruned(&marginals, &config, &StaticOnlyPruner(&pruner));
-    let tree_aware = build_dd_tree_pruned(&marginals, &config, &pruner);
+    let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+    let tree_unpruned = build_dd_tree(&mv, &config);
+    let tree_static = build_dd_tree_pruned(&mv, &config, &StaticOnlyPruner(&pruner), false);
+    let tree_aware = build_dd_tree_pruned(&mv, &config, &pruner, false);
 
     let _ = tx.send(Msg::Tokens(
         tree_unpruned.len() + tree_static.len() + tree_aware.len(),
@@ -414,7 +415,6 @@ fn count_accum_valid(tree: &[TreeNode], pruner: &SudokuPruner) -> usize {
         })
         .count()
 }
-
 
 // ── App state ──────────────────────────────────────────────────
 
@@ -643,10 +643,7 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = Vec::with_capacity(11);
     for r in 0..9 {
         if r == 3 || r == 6 {
-            lines.push(Line::from(Span::styled(
-                "──────┼───────┼──────",
-                sep,
-            )));
+            lines.push(Line::from(Span::styled("──────┼───────┼──────", sep)));
         }
         let mut spans: Vec<Span> = Vec::with_capacity(20);
         for c in 0..9 {
@@ -678,9 +675,7 @@ fn format_cell(cell: Cell) -> (String, Style) {
         CellKind::Trying => Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
-        CellKind::Bad => Style::default()
-            .fg(Color::Red)
-            .add_modifier(Modifier::BOLD),
+        CellKind::Bad => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         CellKind::Empty => Style::default().fg(Color::DarkGray),
     };
     (cell.digit.to_string(), style)

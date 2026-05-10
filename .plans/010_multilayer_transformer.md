@@ -2,7 +2,7 @@
 
 ## Objective
 
-Extend the transformer from single-layer to multi-layer, enabling cLoRA-scale configs (4-8 layers) and making the architecture match real GPT-2/GPT-3 designs. This is a prerequisite for Plan 008 (wgpu LoRA training) at scale.
+Extend the transformer from single-layer to multi-layer, enabling validator-scale configs (4-8 layers, previously cLoRA-scale) and making the architecture match real GPT-2/GPT-3 designs. This is a prerequisite for Plan 008 (wgpu LoRA training) at scale.
 
 ## The Problem
 
@@ -72,7 +72,7 @@ impl Config {
         }
     }
     
-    /// Multi-layer target model for cLoRA scale.
+    /// Multi-layer target model for Deterministic Validator scale (previously cLoRA).
     /// 4 layers, embd=64, mlp=256 — ~550KB total.
     pub fn small_target() -> Self {
         Self {
@@ -262,8 +262,8 @@ pub fn forward<'a>(
 | `draft` | 1 | 4 | 16 | ~3 KB |
 | `bpe` | 1 | 32 | 128 | ~1.1 MB |
 | `small_target` | 4 | 64 | 256 | ~550 KB |
-| cLoRA target | 4 | 256 | 1024 | ~33 MB |
-| cLoRA large | 8 | 512 | 2048 | ~266 MB |
+| validator target (previously cLoRA) | 4 | 256 | 1024 | ~33 MB |
+| validator large (previously cLoRA) | 8 | 512 | 2048 | ~266 MB |
 
 ## Migration Strategy
 
@@ -286,45 +286,45 @@ pub fn forward<'a>(
 ## Tasks
 
 ### Phase 1: Add n_layer to Config
-- [ ] 1.1 Add `n_layer: usize` to `Config` in `types.rs`
-- [ ] 1.2 Add `n_layer: 1` to `micro()`, `draft()`, `bpe()`, `bpe_draft()`
-- [ ] 1.3 Add `Config::small_target()` with `n_layer: 4`
-- [ ] 1.4 Run `cargo test` — all pass (n_layer unused, backward compat)
+- [x] 1.1 Add `n_layer: usize` to `Config` in `types.rs`
+- [x] 1.2 Add `n_layer: 1` to `micro()`, `draft()`, `bpe()`, `bpe_draft()`
+- [x] 1.3 Add `Config::small_target()` with `n_layer: 4`
+- [x] 1.4 Run `cargo test` — all pass (n_layer unused, backward compat)
 
 ### Phase 2: Multi-Layer Weights
-- [ ] 2.1 Create `LayerWeights` struct in `transformer.rs`
-- [ ] 2.2 Change `TransformerWeights` to hold `layers: Vec<LayerWeights>`
-- [ ] 2.3 Update `TransformerWeights::new()` to create `n_layer` layers
-- [ ] 2.4 Fix weight init scaling: divide by `sqrt(n * n_layer)`
+- [x] 2.1 Create `LayerWeights` struct in `transformer.rs`
+- [x] 2.2 Change `TransformerWeights` to hold `layers: Vec<LayerWeights>`
+- [x] 2.3 Update `TransformerWeights::new()` to create `n_layer` layers
+- [x] 2.4 Fix weight init scaling: divide by `sqrt(n * n_layer)`
 
 ### Phase 3: Multi-Layer KV Cache
-- [ ] 3.1 Create `MultiLayerKVCache` with `Vec<KVCache>`
-- [ ] 3.2 Add `reset()` that resets all layers
-- [ ] 3.3 Keep `KVCache` as-is (used per-layer internally)
+- [x] 3.1 Create `MultiLayerKVCache` with `Vec<KVCache>`
+- [x] 3.2 Add `reset()` that resets all layers
+- [x] 3.3 Keep `KVCache` as-is (used per-layer internally)
 
 ### Phase 4: Forward Pass Layer Loop
-- [ ] 4.1 Change `forward()` signature: `cache: &mut MultiLayerKVCache`
-- [ ] 4.2 Add layer loop: `for (idx, layer) in weights.layers.iter().enumerate()`
-- [ ] 4.3 Move attention + MLP inside the loop
-- [ ] 4.4 Access per-layer cache: `cache.layers[idx]`
+- [x] 4.1 Change `forward()` signature: `cache: &mut MultiLayerKVCache`
+- [x] 4.2 Add layer loop: `for (idx, layer) in weights.layers.iter().enumerate()`
+- [x] 4.3 Move attention + MLP inside the loop
+- [x] 4.4 Access per-layer cache: `cache.layers[idx]`
 
 ### Phase 5: Update All Callers
-- [ ] 5.1 Update `generate()` — use `MultiLayerKVCache`
-- [ ] 5.2 Update `dflash_predict*` — use `MultiLayerKVCache`
-- [ ] 5.3 Update `LeviathanVerifier` — use `MultiLayerKVCache`
-- [ ] 5.4 Update `SimulatedVerifier` — no change (doesn't call forward directly)
-- [ ] 5.5 Update `benchmark.rs` — use `MultiLayerKVCache`
-- [ ] 5.6 Update `main.rs` — use `MultiLayerKVCache`
+- [x] 5.1 Update `generate()` — use `MultiLayerKVCache`
+- [x] 5.2 Update `dflash_predict*` — use `MultiLayerKVCache`
+- [x] 5.3 Update `LeviathanVerifier` — use `MultiLayerKVCache`
+- [x] 5.4 Update `SimulatedVerifier` — no change (doesn't call forward directly)
+- [x] 5.5 Update `benchmark.rs` — use `MultiLayerKVCache`
+- [x] 5.6 Update `main.rs` — use `MultiLayerKVCache`
 
 ### Phase 6: Validation
-- [ ] 6.1 Add test: `forward_output_size` with `n_layer: 2`
-- [ ] 6.2 Add test: `forward_logits_finite` with `n_layer: 4`
-- [ ] 6.3 Add test: `generate_deterministic` with `Config::small_target()`
-- [ ] 6.4 Add test: `n_layer_1_matches_current_behavior` — regression check
-- [ ] 6.5 Add benchmark: single-layer vs multi-layer throughput
-- [ ] 6.6 Run `cargo test --all-features` — all tests pass
-- [ ] 6.7 Run `cargo clippy --all-features` — zero warnings
-- [ ] 6.8 Run `cargo run --release` — benchmark unchanged for micro config
+- [x] 6.1 Add test: `forward_output_size` with `n_layer: 2`
+- [x] 6.2 Add test: `forward_logits_finite` with `n_layer: 4`
+- [x] 6.3 Add test: `generate_deterministic` with `Config::small_target()`
+- [x] 6.4 Add test: `n_layer_1_matches_current_behavior` — regression check
+- [x] 6.5 Add benchmark: single-layer vs multi-layer throughput
+- [x] 6.6 Run `cargo test --all-features` — all tests pass
+- [x] 6.7 Run `cargo clippy --all-features` — zero warnings
+- [x] 6.8 Run `cargo run --release` — benchmark unchanged for micro config
 
 ## Key Risks & Mitigations
 
@@ -341,7 +341,7 @@ pub fn forward<'a>(
 2. `LayerWeights` — per-layer weight struct
 3. `MultiLayerKVCache` — per-layer KV cache
 4. `forward()` — layer loop with zero extra allocations
-5. `Config::small_target()` — 4-layer config for cLoRA scale
+5. `Config::small_target()` — 4-layer config for validator scale (previously cLoRA)
 6. Full backward compatibility: `n_layer: 1` = current behavior
 
 ## Files to Create/Modify
@@ -358,6 +358,6 @@ pub fn forward<'a>(
 
 ## References
 
-- `.plans/007_compiler_in_the_loop_clora.md` — Config::bpe(), cLoRA scale
+- `.plans/007_constraint_validator.md` — Config::bpe(), validator scale (previously `007_compiler_in_the_loop_clora.md`, cLoRA scale)
 - `.plans/008_wgpu_lora_training.md` — GpuWeightBuffers, LoRA per-layer adapters
 - `.research/01_Advanced Neuro-Symbolic Rust Translation.md` — §Foundation Engine

@@ -6,6 +6,13 @@ edition = "2024"
 [dependencies]
 plotters = "0.3"
 rayon = "1.10"
+blake3 = "1"
+fastrand = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+syn = { version = "2", features = ["full", "parsing"], optional = true }
+proc-macro2 = { version = "1", optional = true }
+toml = "0.8"
 
 [dev-dependencies]
 ratatui = "0.29"
@@ -13,8 +20,11 @@ crossterm = "0.28"
 
 [features]
 default = []
-leviathan = []
 sudoku = []
+validator = ["syn", "proc-macro2"]
+sparse_mlp = []  # TwELL-inspired sparse MLP matmul (Plan 022)
+ppot = []  # PPoT logit-parameterized CPU resampling (Plan 026 + 027)
+full = ["sudoku", "validator", "ppot"]
 
 [[example]]
 name = "sudoku_speculative"
@@ -27,3 +37,47 @@ required-features = ["sudoku"]
 [[example]]
 name = "sudoku_tui"
 required-features = ["sudoku"]
+
+[[example]]
+name = "blue_bear"
+
+[[example]]
+name = "tactical_ai"
+
+[[example]]
+name = "tactical_ai_tui"
+
+[[example]]
+name = "tactical_bench"
+
+[[example]]
+name = "tactical_terrain"
+
+[[example]]
+name = "dungeon_multifloor"
+
+[[example]]
+name = "dungeon_tui"
+
+[[example]]
+name = "tactical_procedural"
+
+[[example]]
+name = "tactical_parallel"
+
+
+[[example]]
+name = "blue_bear_tui"
+
+[[example]]
+name = "raven_recall"
+
+[[example]]
+name = "validator_demo"
+required-features = ["validator"]
+
+
+
+[[example]]
+name = "ppot_bench"
+required-features = ["ppot"]

@@ -1,7 +1,7 @@
 # Plan 001: 9×9 Sudoku Example with Streaming Thinking
 
 ## Goal
-Create a runnable `examples/sudoku_9x9.rs` that demonstrates the Computable LoRA concept
+Create a runnable `examples/sudoku_9x9.rs` that demonstrates the Deterministic Validator concept
 by solving a 9×9 Sudoku puzzle with streaming "thinking" output — matching the web demo
 experience shown in the Percepta blog.
 
@@ -22,8 +22,8 @@ experience shown in the Percepta blog.
   - Make it `pub` so examples can use it
   - Add unit tests in `tests/integration.rs`
 
-- [x] **T2: Add Computable LoRA intercept struct**
-  - `ComputableLora` struct that wraps constraint validation
+- [x] **T2: Add Deterministic Validator intercept struct**
+  - `SymbolicValidator` struct (previously `ComputableLora`) that wraps constraint validation
   - Method `prune_drafts(state, row, col, logits) -> Vec<(u8, f32)>`
   - Returns only valid (digit, prob) pairs — invalid ones removed
   - This is the bridge between LLM drafting and deterministic rules
@@ -52,7 +52,7 @@ experience shown in the Percepta blog.
   - `cargo clippy --quiet` clean
   - Commit: `097fd48 feat: 9x9 sudoku example with streaming thinking output`
 
-- [x] **T6: Wire `ComputableLora` into `speculative.rs` DDTree**
+- [x] **T6: Wire `SymbolicValidator` into `speculative.rs` DDTree**
   - Add `ConstraintPruner` trait to `speculative.rs` (`Send + Sync`)
   - Implement `NoPruner` (identity) and `SudokuPruner` (row/col/box rules)
   - `SudokuPruner` maps DDTree depth → (row, col), validates digits 1-9
@@ -65,7 +65,7 @@ experience shown in the Percepta blog.
 - [x] **T7: End-to-end Sudoku speculative decoding example**
   - Create `examples/sudoku_speculative.rs`
   - Simulated draft model marginals (uniform over valid digits)
-  - DDTree comparison: without vs with Computable LoRA pruning
+  - DDTree comparison: without vs with Deterministic Validator pruning
   - Results: **52% valid unpruned → 100% valid pruned** (48 invalid branches eliminated)
   - Token distribution table shows exactly which digits were pruned per depth
   - Commit: `feat: constraint pruner for dd-tree speculative decoding`
@@ -76,7 +76,7 @@ experience shown in the Percepta blog.
 - Linear and fast attention scores match perfectly
 - Streaming output matches web demo style
 - **DDTree pruning: 52% valid → 100% valid branches** (48 invalid eliminated)
-- Computable LoRA guarantees mathematically valid placements
+- Deterministic Validator guarantees mathematically valid placements
 - 148 tests passing (68 unit + 80 integration), zero clippy warnings
 </newtext>
 

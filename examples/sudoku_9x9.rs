@@ -1,16 +1,16 @@
 //! 9×9 Sudoku Example: Streaming "Thinking" Output
 //!
-//! Demonstrates the Computable LoRA concept:
+//! Demonstrates the Symbolic Validator concept:
 //! - Deterministic rules engine prunes LLM hallucinations
 //! - O(log N) attention retrieves execution state via convex hull
 //! - Streaming output shows step-by-step constraint satisfaction
 //!
 //! Run: cargo run --example sudoku_9x9
 
-use microgpt_rs::percepta::{ComputableLora, StreamingSolver, Sudoku9x9, Vec2};
+use microgpt_rs::percepta::{StreamingSolver, Sudoku9x9, SymbolicValidator, Vec2};
 
 fn main() {
-    println!("🧠 Computable LoRA: 9×9 Sudoku Solver");
+    println!("🧠 Symbolic Validator: 9×9 Sudoku Solver");
     println!("{}", "═".repeat(60));
 
     // ── 1. Load the Arto Inkala puzzle ────────────────────────────
@@ -20,8 +20,8 @@ fn main() {
     println!("\n📝 Puzzle loaded — {clues} clues given.\n");
     print!("{}", puzzle.display());
 
-    // ── 2. Computable LoRA intercept demo ─────────────────────────
-    println!("\n⚡ Computable LoRA Intercept Demo");
+    // ── 2. Symbolic Validator intercept demo ─────────────────────────
+    println!("\n⚡ Symbolic Validator Intercept Demo");
     println!("{}", "─".repeat(60));
 
     // Simulate: fast draft model proposes logits for cell (0,1)
@@ -42,10 +42,10 @@ fn main() {
         println!("    Digit {digit}: log_prob={prob:.2}");
     }
 
-    // Computable LoRA prunes invalid moves deterministically
-    let valid = ComputableLora::prune_drafts(&puzzle, row, col, &llm_drafts);
+    // Symbolic Validator prunes invalid moves deterministically
+    let valid = SymbolicValidator::prune_drafts(&puzzle, row, col, &llm_drafts);
 
-    println!("\n  After Computable LoRA pruning:");
+    println!("\n  After Symbolic Validator pruning:");
     for (digit, prob) in &valid {
         println!("    ✅ Digit {digit}: log_prob={prob:.2}");
     }
