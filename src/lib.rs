@@ -15,17 +15,5 @@ pub mod alloc;
 #[global_allocator]
 static GLOBAL_ALLOC: alloc::TrackingAllocator = alloc::TrackingAllocator;
 
-#[cfg(feature = "rest")]
-pub mod rest;
-
 #[cfg(feature = "validator")]
 pub mod validator;
-
-#[cfg(feature = "gpu")]
-pub mod gpu;
-
-#[cfg(feature = "wasm")]
-pub mod wasm;
-
-#[cfg(feature = "router")]
-pub mod router;

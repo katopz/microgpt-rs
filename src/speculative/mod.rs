@@ -39,16 +39,8 @@ pub use step::{
     speculative_step_rollback_with,
 };
 
-#[cfg(feature = "embedding_router")]
-pub use step::{
-    speculative_step_embedding_conditioned, speculative_step_embedding_conditioned_with,
-};
-
 #[cfg(feature = "sudoku")]
 pub use crate::pruners::SudokuPruner;
-
-#[cfg(feature = "rest")]
-pub use step::speculative_step_rest;
 
 // ── PPoT Re-exports (Plan 026 + 027) ──────────────────────────
 #[cfg(feature = "ppot")]
