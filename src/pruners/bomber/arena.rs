@@ -97,9 +97,9 @@ impl ArenaGrid {
         self.cells[y as usize][x as usize] = cell;
     }
 
-    /// True if the cell is walkable (`Floor` or `PowerUpHidden`).
+    /// True if the cell is walkable (only `Floor`).
     pub fn is_walkable(&self, x: i32, y: i32) -> bool {
-        matches!(self.get(x, y), Cell::Floor | Cell::PowerUpHidden(_))
+        matches!(self.get(x, y), Cell::Floor)
     }
 
     /// True if (x, y) is within grid bounds.
