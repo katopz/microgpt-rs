@@ -719,14 +719,9 @@ cargo clippy --all-targets --all-features --quiet
 |------|-------------|-------------|
 | `sudoku` | — | SudokuPruner constraint pruning + examples |
 | `validator` | `syn`, `proc-macro2` | SynPruner + partial parser |
-| `rest` | `reqwest`, `tokio` | REST module |
-| `gpu` | `wgpu`, `bytemuck`, `pollster`, `safetensors` | wgpu context & buffers |
-| `wasm` | `wasmtime`, `wat` | WASM validator runtime (WasmPruner) |
 | `sparse_mlp` | — | TwELL-inspired sparse MLP matmul (Plan 022) |
 | `ppot` | — | PPoT logit-parameterized CPU resampling + adaptive rescue (Plans 026 + 027) |
-| `router` | `wasm` | Prompt router + expert registry (Plan 023) |
-| `embedding_router` | `router`, `reqwest`, `tokio` | Embedding router + KV cache priming via anyrag (Plan 024) |
-| `full` | all above (except leviathan, always on) | Enable all features |
+| `full` | all above | Enable all features |
 
 Build with `--features <flag>` or `--all-features`.
 
@@ -757,12 +752,6 @@ src/
     sudoku_pruner.rs  SudokuPruner (path-aware, cross-depth conflict detection) *
   tokenizer/        BPE tokenizer (encode/decode/train, Config::bpe())
   validator/        SynPruner + partial parser ‡
-  gpu/              wgpu context & buffers §
-  rest/             REST module ¶
-  router/           Prompt router + expert registry (Plan 023): KeywordRouter, ExpertRegistry, WasmPrunerCache, PromptRouter trait ◊
-                    Embedding router + projector (Plan 024): EmbeddingRouter, TruncatePadProjector, EmbeddingProjector ⬡
-                    Dual LoRA loading (Plan 025): DomainConfig { reader_lora, writer_lora }, LoraPair in ExpertBundle ◊
-  wasm/             WasmPruner (ConstraintPruner + ScreeningPruner), WASM runtime (abi, state, wasmtime loader, EXPORT_RELEVANCE) †
   percepta.rs       Vec2, KVCache2D — O(log N) 2D convex hull attention (Percepta)
                     Sudoku9x9, SymbolicValidator, StreamingSolver, SolveEvent
   benchmark.rs      BenchResult, run_all, save_results_csv (AR / DFlash / DDTree / Speculative / AR Draft / Leviathan / Sparse MLP∘)
@@ -771,18 +760,11 @@ src/
   ∘ behind --features sparse_mlp
   ○ behind --features ppot
   ‡ behind --features validator
-  § behind --features gpu
-  ¶ behind --features rest
-  ◊ behind --features router
-  ⬡ behind --features embedding_router
-  † behind --features wasm
 examples/
   raven_recall.rs        Raven RSM demo: frozen slots, O(1) scaling, memory footprint comparison
   sudoku_9x9.rs          Streaming solver with "thinking" output + hull compression stats *
   sudoku_speculative.rs  3-column DDTree comparison: Unpruned / Static-Only / Path-Aware *
   sudoku_tui.rs          Ratatui TUI: real-time grid visualization + speculative mode *
-  router_demo.rs         Prompt router demo: classify prompts, select expert bundles ◊
-  embedding_router_demo.rs  Embedding router demo: KV cache priming with three-tier fallback ⬡
 tests/
   integration.rs  80 integration tests (adversarial + DFA + arithmetic + backtracking + geometry
                   + Sudoku9x9 + SymbolicValidator + StreamingSolver)
