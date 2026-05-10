@@ -8,8 +8,8 @@
 use fastrand::Rng;
 
 use microgpt_rs::pruners::bomber::{
-    BomberAction, BomberPlayer, GameEvent, GreedyPlayer, HLPlayer, RandomPlayer, ValidatorPlayer,
-    init_world, run_tick, spawn_players,
+    BomberPlayer, GameEvent, GreedyPlayer, HLPlayer, RandomPlayer, ValidatorPlayer, init_world,
+    run_tick, spawn_players,
 };
 
 // ── Config ─────────────────────────────────────────────────────

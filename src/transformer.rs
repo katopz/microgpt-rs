@@ -1599,6 +1599,8 @@ pub fn forward_raven<'a>(
 }
 
 #[cfg(test)]
+#[allow(unnameable_test_items)]
+#[allow(dead_code)]
 mod tests {
     use super::*;
 

@@ -66,7 +66,7 @@ struct TickSnapshot {
     powerups: Vec<((i32, i32), PowerUpKind)>,
     scores: [i32; 4],
     tick: u32,
-    events: Vec<GameEvent>,
+    _events: Vec<GameEvent>,
 }
 
 // ── Round Recording ────────────────────────────────────────────
@@ -75,7 +75,7 @@ struct RecordedRound {
     snapshots: Vec<TickSnapshot>,
     final_scores: [i32; 4],
     winner: Option<u8>,
-    total_ticks: u32,
+    _total_ticks: u32,
 }
 
 fn record_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng) -> RecordedRound {
@@ -165,7 +165,7 @@ fn record_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng)
         snapshots,
         final_scores: scores,
         winner,
-        total_ticks,
+        _total_ticks: total_ticks,
     }
 }
 
@@ -229,7 +229,7 @@ fn capture_snapshot(world: &mut bevy_ecs::world::World, events: &[GameEvent]) ->
         powerups,
         scores,
         tick,
-        events: events.to_vec(),
+        _events: events.to_vec(),
     }
 }
 

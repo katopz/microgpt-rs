@@ -31,7 +31,7 @@ struct PlayerStats {
     survival_count: u32,
     kill_count: u32,
     death_count: u32,
-    suicide_count: u32,
+    _suicide_count: u32,
     powerup_count: u32,
     total_score: i64,
     rounds_played: u32,
@@ -72,7 +72,7 @@ impl PlayerStats {
 struct RoundTrace {
     round: usize,
     scores: [i32; 4],
-    survivors: Vec<u8>,
+    _survivors: Vec<u8>,
     ticks: u32,
     p4_actions: Vec<BomberAction>,
     p4_survived: bool,
@@ -269,7 +269,7 @@ fn main() {
         let trace = RoundTrace {
             round,
             scores: result.scores,
-            survivors: result.survivors.clone(),
+            _survivors: result.survivors.clone(),
             ticks: result.ticks,
             p4_actions: result.p4_actions,
             p4_survived,

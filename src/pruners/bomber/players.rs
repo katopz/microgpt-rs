@@ -815,9 +815,9 @@ mod tests {
     #[test]
     fn test_hl_player_adapts() {
         let mut player = HLPlayer::new(3);
-        let grid = empty_grid();
-        let mut rng = Rng::with_seed(42);
-        let pos = GridPos { x: 3, y: 3 };
+        let _grid = empty_grid();
+        let _rng = Rng::with_seed(42);
+        let _pos = GridPos { x: 3, y: 3 };
 
         // Simulate several rounds with good outcomes for Up
         for _ in 0..25 {
