@@ -16,7 +16,7 @@ use microgpt_rs::pruners::monopoly::{
 // ── Config ─────────────────────────────────────────────────────
 
 const GAMES: usize = 1000;
-const MAX_TURNS: u32 = 500;
+const MAX_TURNS: u32 = 300;
 const SEED: u64 = 42;
 
 // ── Player Metadata ────────────────────────────────────────────
@@ -111,25 +111,31 @@ fn main() {
         }
 
         // ── HL Bandit Update ───────────────────────────────────
+        // Use the actual strategy the HL player used this game
+        // (selected via start_game() -> reset() before the game)
         let hl_survived = !bankrupt_ids[3];
         let hl_won = result.winner == 3;
 
         let reward = match (hl_survived, hl_won) {
             (_, true) => 1.0,
-            (true, false) => 0.5,
+            (true, false) => 0.3,
             (false, false) => 0.0,
         };
 
-        // Phase-appropriate strategy from game length
-        // (mirrors DecisionContext::game_phase thresholds)
-        let strategy = match result.total_turns {
-            0..=10 => Strategy::Expansion,
-            11..=25 => Strategy::Development,
-            _ => Strategy::Survival,
-        };
-
         if let Some(hl) = players[3].as_any_mut().downcast_mut::<HLPlayer>() {
+            // Reward the strategy that was actually active during this game
+            let strategy = Strategy::all()[hl.current_strategy];
             hl.update_outcome(strategy, reward);
+
+            // Compress every 200 games
+            if (game + 1) % 200 == 0 {
+                let compressed = hl.compress_cycle();
+                if !compressed.is_empty() {
+                    let names = HLPlayer::strategy_names();
+                    let which: Vec<&str> = compressed.iter().map(|&i| names[i]).collect();
+                    eprintln!("  [HL] Compressed: {}", which.join(", "));
+                }
+            }
         }
 
         // ── Progress ───────────────────────────────────────────

@@ -100,11 +100,17 @@ fn build_ctx(world: &World, player_id: u8, turn_number: u32) -> DecisionContext 
             square_mortgaged[sq_idx] = owned.is_mortgaged;
             if owned.owner == entity {
                 owned_properties.push(sq_idx as u8);
-                if let Some(prop) = world.get::<Property>(sq_entity) {
-                    let gi = prop.group as usize;
-                    if gi < group_counts.len() {
-                        group_counts[gi] += 1;
-                    }
+                // Only count actual street properties in group_counts
+                // (railroads/utilities have Property with placeholder Brown group)
+                let is_street = world
+                    .get::<BoardSquare>(sq_entity)
+                    .map(|bs| matches!(bs.kind, SquareKind::Property(_)))
+                    .unwrap_or(false);
+                if is_street
+                    && let Some(prop) = world.get::<Property>(sq_entity)
+                    && (prop.group as usize) < group_counts.len()
+                {
+                    group_counts[prop.group as usize] += 1;
                 }
             } else {
                 let idx = owner_id as usize;
@@ -118,8 +124,7 @@ fn build_ctx(world: &World, player_id: u8, turn_number: u32) -> DecisionContext 
     for i in 0..4u8 {
         if i != player_id {
             let e = player_entities[i as usize];
-            opponent_cash[i as usize] =
-                world.get::<Player>(e).map(|p| p.cash).unwrap_or(0);
+            opponent_cash[i as usize] = world.get::<Player>(e).map(|p| p.cash).unwrap_or(0);
         }
     }
 
@@ -266,7 +271,12 @@ fn collect_salary(world: &mut World, entity: Entity, events: &mut Vec<GameEvent>
 // Jail
 // ---------------------------------------------------------------------------
 
-fn send_to_jail(world: &mut World, entity: Entity, events: &mut Vec<GameEvent>, reason: JailReason) {
+fn send_to_jail(
+    world: &mut World,
+    entity: Entity,
+    events: &mut Vec<GameEvent>,
+    reason: JailReason,
+) {
     let pid = player_id_from_entity(world, entity);
     if let Some(mut p) = world.get_mut::<Player>(entity) {
         p.in_jail = true;
@@ -274,7 +284,10 @@ fn send_to_jail(world: &mut World, entity: Entity, events: &mut Vec<GameEvent>, 
         p.position = JAIL_SQUARE;
         p.doubles_count = 0;
     }
-    events.push(GameEvent::PlayerJailed { player: pid, reason });
+    events.push(GameEvent::PlayerJailed {
+        player: pid,
+        reason,
+    });
 }
 
 fn release_from_jail(
@@ -393,7 +406,10 @@ pub fn calculate_net_worth(world: &World, entity: Entity) -> u32 {
                 continue;
             }
             if owned.is_mortgaged {
-                value += world.get::<Property>(sq_entity).map(|p| p.mortgage_value).unwrap_or(0);
+                value += world
+                    .get::<Property>(sq_entity)
+                    .map(|p| p.mortgage_value)
+                    .unwrap_or(0);
             } else if let Some(prop) = world.get::<Property>(sq_entity) {
                 value += prop.price;
                 value += (owned.houses.min(4) as u32) * prop.house_cost / 2;
@@ -425,7 +441,11 @@ pub fn can_build_house(world: &World, entity: Entity, square: u8) -> bool {
         .iter()
         .map(|&sq| {
             let e = squares[sq as usize];
-            world.get::<Owned>(e).filter(|o| o.owner == entity).map(|o| o.houses).unwrap_or(0)
+            world
+                .get::<Owned>(e)
+                .filter(|o| o.owner == entity)
+                .map(|o| o.houses)
+                .unwrap_or(0)
         })
         .min()
         .unwrap_or(0);
@@ -442,20 +462,34 @@ pub fn liquidate_assets(world: &mut World, entity: Entity, target: u32) -> u32 {
         let mut list = Vec::new();
         for &sq_entity in &squares {
             if let Some(owned) = world.get::<Owned>(sq_entity)
-                && owned.owner == entity && owned.houses > 0 {
-                    let sq_idx = world.get::<BoardSquare>(sq_entity).map(|bs| bs.index).unwrap_or(0);
-                    let cost = world.get::<Property>(sq_entity).map(|p| p.house_cost).unwrap_or(0);
-                    list.push((sq_idx, owned.houses, cost));
-                }
+                && owned.owner == entity
+                && owned.houses > 0
+            {
+                let sq_idx = world
+                    .get::<BoardSquare>(sq_entity)
+                    .map(|bs| bs.index)
+                    .unwrap_or(0);
+                let cost = world
+                    .get::<Property>(sq_entity)
+                    .map(|p| p.house_cost)
+                    .unwrap_or(0);
+                list.push((sq_idx, owned.houses, cost));
+            }
         }
         list
     };
     for (sq, houses, cost) in sell_list {
-        if raised >= target { break; }
+        if raised >= target {
+            break;
+        }
         let sq_entity = world.resource::<Board>().squares[sq as usize];
         let refund = (cost / 2) * houses as u32;
-        if let Some(mut o) = world.get_mut::<Owned>(sq_entity) { o.houses = 0; }
-        if let Some(mut p) = world.get_mut::<Player>(entity) { p.receive(refund); }
+        if let Some(mut o) = world.get_mut::<Owned>(sq_entity) {
+            o.houses = 0;
+        }
+        if let Some(mut p) = world.get_mut::<Player>(entity) {
+            p.receive(refund);
+        }
         raised += refund;
     }
 
@@ -465,19 +499,34 @@ pub fn liquidate_assets(world: &mut World, entity: Entity, target: u32) -> u32 {
         let mut list = Vec::new();
         for &sq_entity in &squares {
             if let Some(owned) = world.get::<Owned>(sq_entity)
-                && owned.owner == entity && !owned.is_mortgaged && owned.houses == 0 {
-                    let sq_idx = world.get::<BoardSquare>(sq_entity).map(|bs| bs.index).unwrap_or(0);
-                    let val = world.get::<Property>(sq_entity).map(|p| p.mortgage_value).unwrap_or(0);
-                    list.push((sq_idx, val));
-                }
+                && owned.owner == entity
+                && !owned.is_mortgaged
+                && owned.houses == 0
+            {
+                let sq_idx = world
+                    .get::<BoardSquare>(sq_entity)
+                    .map(|bs| bs.index)
+                    .unwrap_or(0);
+                let val = world
+                    .get::<Property>(sq_entity)
+                    .map(|p| p.mortgage_value)
+                    .unwrap_or(0);
+                list.push((sq_idx, val));
+            }
         }
         list
     };
     for (sq, val) in mortgage_list {
-        if raised >= target { break; }
+        if raised >= target {
+            break;
+        }
         let sq_entity = world.resource::<Board>().squares[sq as usize];
-        if let Some(mut o) = world.get_mut::<Owned>(sq_entity) { o.is_mortgaged = true; }
-        if let Some(mut p) = world.get_mut::<Player>(entity) { p.receive(val); }
+        if let Some(mut o) = world.get_mut::<Owned>(sq_entity) {
+            o.is_mortgaged = true;
+        }
+        if let Some(mut p) = world.get_mut::<Player>(entity) {
+            p.receive(val);
+        }
         raised += val;
     }
 
@@ -489,19 +538,22 @@ pub fn transfer_assets(world: &mut World, from: Entity, to: Option<Entity>) {
     let squares = world.resource::<Board>().squares;
     for &sq_entity in &squares {
         if let Some(mut owned) = world.get_mut::<Owned>(sq_entity)
-            && owned.owner == from {
-                if let Some(to_entity) = to {
-                    owned.owner = to_entity;
-                } else {
-                    owned.owner = Entity::PLACEHOLDER;
-                    owned.is_mortgaged = false;
-                    owned.houses = 0;
-                }
+            && owned.owner == from
+        {
+            if let Some(to_entity) = to {
+                owned.owner = to_entity;
+            } else {
+                owned.owner = Entity::PLACEHOLDER;
+                owned.is_mortgaged = false;
+                owned.houses = 0;
             }
+        }
     }
     if let Some(to_entity) = to {
         let cash = world.get::<Player>(from).map(|p| p.cash).unwrap_or(0);
-        if let Some(mut r) = world.get_mut::<Player>(to_entity) { r.receive(cash); }
+        if let Some(mut r) = world.get_mut::<Player>(to_entity) {
+            r.receive(cash);
+        }
     }
     if let Some(mut p) = world.get_mut::<Player>(from) {
         p.cash = 0;
@@ -527,13 +579,17 @@ fn find_nearest(world: &World, from: u8, is_railroad: bool) -> u8 {
     let squares = world.resource::<Board>().squares;
     for offset in 1..=BOARD_SIZE {
         let pos = ((from as u16 + offset as u16) % BOARD_SIZE as u16) as u8;
-        let kind = world.get::<BoardSquare>(squares[pos as usize]).map(|bs| bs.kind);
+        let kind = world
+            .get::<BoardSquare>(squares[pos as usize])
+            .map(|bs| bs.kind);
         let matches = if is_railroad {
             matches!(kind, Some(SquareKind::Railroad))
         } else {
             matches!(kind, Some(SquareKind::Utility))
         };
-        if matches { return pos; }
+        if matches {
+            return pos;
+        }
     }
     from
 }
@@ -548,46 +604,74 @@ fn execute_card_effect(
 
     match effect {
         CardEffect::CollectMoney(amount) => {
-            if let Some(mut p) = world.get_mut::<Player>(entity) { p.receive(amount); }
+            if let Some(mut p) = world.get_mut::<Player>(entity) {
+                p.receive(amount);
+            }
         }
         CardEffect::PayMoney(amount) => {
-            if !pay_debt(world, entity, amount, None, events) { return true; }
+            if !pay_debt(world, entity, amount, None, events) {
+                return true;
+            }
         }
         CardEffect::PayPerHouse { house, hotel } => {
             let squares = world.resource::<Board>().squares;
             let mut total = 0u32;
             for &sq_entity in &squares {
                 if let Some(owned) = world.get::<Owned>(sq_entity)
-                    && owned.owner == entity {
-                        total += if owned.houses >= 5 { hotel } else { owned.houses as u32 * house };
-                    }
+                    && owned.owner == entity
+                {
+                    total += if owned.houses >= 5 {
+                        hotel
+                    } else {
+                        owned.houses as u32 * house
+                    };
+                }
             }
             let _ = squares;
-            if !pay_debt(world, entity, total, None, events) { return true; }
+            if !pay_debt(world, entity, total, None, events) {
+                return true;
+            }
         }
         CardEffect::MoveTo(target) => {
             let old = world.get::<Player>(entity).map(|p| p.position).unwrap_or(0);
-            if target < old { collect_salary(world, entity, events); }
+            if target < old {
+                collect_salary(world, entity, events);
+            }
             move_to(world, entity, target);
             events.push(GameEvent::PlayerMoved {
-                player: pid, from: old, to: target, passed_go: target < old,
+                player: pid,
+                from: old,
+                to: target,
+                passed_go: target < old,
             });
         }
         CardEffect::MoveBack(spaces) => {
             let old = world.get::<Player>(entity).map(|p| p.position).unwrap_or(0);
-            let new_pos = if old >= spaces { old - spaces } else { BOARD_SIZE - (spaces - old) };
+            let new_pos = if old >= spaces {
+                old - spaces
+            } else {
+                BOARD_SIZE - (spaces - old)
+            };
             move_to(world, entity, new_pos);
             events.push(GameEvent::PlayerMoved {
-                player: pid, from: old, to: new_pos, passed_go: false,
+                player: pid,
+                from: old,
+                to: new_pos,
+                passed_go: false,
             });
         }
         CardEffect::MoveToNearest { is_railroad } => {
             let from = world.get::<Player>(entity).map(|p| p.position).unwrap_or(0);
             let target = find_nearest(world, from, is_railroad);
-            if target < from { collect_salary(world, entity, events); }
+            if target < from {
+                collect_salary(world, entity, events);
+            }
             move_to(world, entity, target);
             events.push(GameEvent::PlayerMoved {
-                player: pid, from, to: target, passed_go: target < from,
+                player: pid,
+                from,
+                to: target,
+                passed_go: target < from,
             });
         }
         CardEffect::GoToJail => {
@@ -595,26 +679,41 @@ fn execute_card_effect(
             return true;
         }
         CardEffect::GetOutOfJailFree => {
-            if let Some(mut p) = world.get_mut::<Player>(entity) { p.get_out_of_jail_free += 1; }
+            if let Some(mut p) = world.get_mut::<Player>(entity) {
+                p.get_out_of_jail_free += 1;
+            }
         }
         CardEffect::PayEachPlayer(amount) => {
             let player_entities = world.resource::<PlayerEntities>().entities;
             let active = count_active_players(world).saturating_sub(1);
             let total = amount * active as u32;
-            if !pay_debt(world, entity, total, None, events) { return true; }
+            if !pay_debt(world, entity, total, None, events) {
+                return true;
+            }
             for (i, &other) in player_entities.iter().enumerate() {
-                if other != entity && is_player_active(world, i as u8)
-                    && let Some(mut o) = world.get_mut::<Player>(other) { o.receive(amount); }
+                if other != entity
+                    && is_player_active(world, i as u8)
+                    && let Some(mut o) = world.get_mut::<Player>(other)
+                {
+                    o.receive(amount);
+                }
             }
         }
         CardEffect::CollectFromEachPlayer(amount) => {
             let player_entities = world.resource::<PlayerEntities>().entities;
             for (i, &other) in player_entities.iter().enumerate() {
                 if other != entity && is_player_active(world, i as u8) {
-                    let can_pay = world.get::<Player>(other).map(|p| p.cash >= amount).unwrap_or(false);
+                    let can_pay = world
+                        .get::<Player>(other)
+                        .map(|p| p.cash >= amount)
+                        .unwrap_or(false);
                     if can_pay {
-                        if let Some(mut o) = world.get_mut::<Player>(other) { o.pay(amount); }
-                        if let Some(mut p) = world.get_mut::<Player>(entity) { p.receive(amount); }
+                        if let Some(mut o) = world.get_mut::<Player>(other) {
+                            o.pay(amount);
+                        }
+                        if let Some(mut p) = world.get_mut::<Player>(entity) {
+                            p.receive(amount);
+                        }
                     }
                 }
             }
@@ -636,24 +735,37 @@ fn pay_debt(
 ) -> bool {
     let cash = world.get::<Player>(entity).map(|p| p.cash).unwrap_or(0);
     if cash >= amount {
-        if let Some(mut p) = world.get_mut::<Player>(entity) { p.pay(amount); }
+        if let Some(mut p) = world.get_mut::<Player>(entity) {
+            p.pay(amount);
+        }
         if let Some(c) = creditor
-            && let Some(mut r) = world.get_mut::<Player>(c) { r.receive(amount); }
+            && let Some(mut r) = world.get_mut::<Player>(c)
+        {
+            r.receive(amount);
+        }
         return true;
     }
     let shortfall = amount - cash;
     liquidate_assets(world, entity, shortfall);
     let new_cash = world.get::<Player>(entity).map(|p| p.cash).unwrap_or(0);
     if new_cash >= amount {
-        if let Some(mut p) = world.get_mut::<Player>(entity) { p.pay(amount); }
+        if let Some(mut p) = world.get_mut::<Player>(entity) {
+            p.pay(amount);
+        }
         if let Some(c) = creditor
-            && let Some(mut r) = world.get_mut::<Player>(c) { r.receive(amount); }
+            && let Some(mut r) = world.get_mut::<Player>(c)
+        {
+            r.receive(amount);
+        }
         true
     } else {
         let pid = player_id_from_entity(world, entity);
         let cid = creditor.map(|e| player_id_from_entity(world, e));
         transfer_assets(world, entity, creditor);
-        events.push(GameEvent::PlayerBankrupt { player: pid, creditor: cid });
+        events.push(GameEvent::PlayerBankrupt {
+            player: pid,
+            creditor: cid,
+        });
         false
     }
 }
@@ -674,7 +786,10 @@ pub fn execute_turn(
     events.push(GameEvent::TurnStarted { player: player_id });
 
     // ── Phase 1: PreTurn (Jail) ──
-    let in_jail = world.get::<Player>(entity).map(|p| p.in_jail).unwrap_or(false);
+    let in_jail = world
+        .get::<Player>(entity)
+        .map(|p| p.in_jail)
+        .unwrap_or(false);
 
     if in_jail {
         let turn_number = world.resource::<TurnState>().turn_number;
@@ -684,43 +799,85 @@ pub fn execute_turn(
         match decision {
             JailDecision::PayFine => {
                 let fine = world.resource::<GameConfig>().jail_fine;
-                if let Some(mut p) = world.get_mut::<Player>(entity) { p.pay(fine); }
+                if let Some(mut p) = world.get_mut::<Player>(entity) {
+                    p.pay(fine);
+                }
                 release_from_jail(world, entity, &mut events, ReleaseMethod::PaidFine);
             }
             JailDecision::UseCard => {
-                let has_card = world.get::<Player>(entity).map(|p| p.get_out_of_jail_free > 0).unwrap_or(false);
+                let has_card = world
+                    .get::<Player>(entity)
+                    .map(|p| p.get_out_of_jail_free > 0)
+                    .unwrap_or(false);
                 if has_card {
-                    if let Some(mut p) = world.get_mut::<Player>(entity) { p.get_out_of_jail_free -= 1; }
+                    if let Some(mut p) = world.get_mut::<Player>(entity) {
+                        p.get_out_of_jail_free -= 1;
+                    }
                     release_from_jail(world, entity, &mut events, ReleaseMethod::UsedCard);
                 }
             }
             JailDecision::RollForDoubles => {
                 let (d1, d2, is_doubles) = roll_dice(rng);
-                events.push(GameEvent::DiceRolled { player: player_id, die1: d1, die2: d2, doubles: is_doubles });
+                events.push(GameEvent::DiceRolled {
+                    player: player_id,
+                    die1: d1,
+                    die2: d2,
+                    doubles: is_doubles,
+                });
                 if is_doubles {
                     release_from_jail(world, entity, &mut events, ReleaseMethod::RolledDoubles);
                     let (new_pos, passed_go) = move_forward(world, entity, d1 + d2);
-                    if passed_go { collect_salary(world, entity, &mut events); }
+                    if passed_go {
+                        collect_salary(world, entity, &mut events);
+                    }
                     events.push(GameEvent::PlayerMoved {
-                        player: player_id, from: JAIL_SQUARE, to: new_pos, passed_go,
+                        player: player_id,
+                        from: JAIL_SQUARE,
+                        to: new_pos,
+                        passed_go,
                     });
-                    resolve_landing(world, entity, player_id, new_pos, (d1, d2), ai, rng, &mut events);
+                    resolve_landing(
+                        world,
+                        entity,
+                        player_id,
+                        new_pos,
+                        (d1, d2),
+                        ai,
+                        rng,
+                        &mut events,
+                    );
                 } else {
                     if let Some(mut p) = world.get_mut::<Player>(entity) {
                         p.jail_turns += 1;
                         if p.jail_turns >= MAX_JAIL_TURNS {
-                            release_from_jail(world, entity, &mut events, ReleaseMethod::MaxTurnsExceeded);
+                            release_from_jail(
+                                world,
+                                entity,
+                                &mut events,
+                                ReleaseMethod::MaxTurnsExceeded,
+                            );
                         }
                     }
-                    let bankrupt = world.get::<Player>(entity).map(|p| p.is_bankrupt).unwrap_or(false);
-                    return TurnResult { player: player_id, events, went_bankrupt: bankrupt };
+                    let bankrupt = world
+                        .get::<Player>(entity)
+                        .map(|p| p.is_bankrupt)
+                        .unwrap_or(false);
+                    return TurnResult {
+                        player: player_id,
+                        events,
+                        went_bankrupt: bankrupt,
+                    };
                 }
             }
         }
     }
 
     if !is_player_active(world, player_id) {
-        return TurnResult { player: player_id, events, went_bankrupt: true };
+        return TurnResult {
+            player: player_id,
+            events,
+            went_bankrupt: true,
+        };
     }
 
     // ── Phase 2-4: Rolling / Resolving / Doubles Loop ──
@@ -729,7 +886,12 @@ pub fn execute_turn(
     loop {
         let (d1, d2, is_doubles) = roll_dice(rng);
         let dice = (d1, d2);
-        events.push(GameEvent::DiceRolled { player: player_id, die1: d1, die2: d2, doubles: is_doubles });
+        events.push(GameEvent::DiceRolled {
+            player: player_id,
+            die1: d1,
+            die2: d2,
+            doubles: is_doubles,
+        });
 
         if is_doubles {
             doubles_count += 1;
@@ -743,27 +905,57 @@ pub fn execute_turn(
 
         let old_pos = world.get::<Player>(entity).map(|p| p.position).unwrap_or(0);
         let (new_pos, passed_go) = move_forward(world, entity, d1 + d2);
-        if passed_go { collect_salary(world, entity, &mut events); }
-        events.push(GameEvent::PlayerMoved { player: player_id, from: old_pos, to: new_pos, passed_go });
+        if passed_go {
+            collect_salary(world, entity, &mut events);
+        }
+        events.push(GameEvent::PlayerMoved {
+            player: player_id,
+            from: old_pos,
+            to: new_pos,
+            passed_go,
+        });
 
-        resolve_landing(world, entity, player_id, new_pos, dice, ai, rng, &mut events);
+        resolve_landing(
+            world,
+            entity,
+            player_id,
+            new_pos,
+            dice,
+            ai,
+            rng,
+            &mut events,
+        );
 
-        if !is_player_active(world, player_id) { break; }
+        if !is_player_active(world, player_id) {
+            break;
+        }
 
         if is_doubles {
-            let jailed = world.get::<Player>(entity).map(|p| p.in_jail).unwrap_or(false);
-            if jailed { break; }
+            let jailed = world
+                .get::<Player>(entity)
+                .map(|p| p.in_jail)
+                .unwrap_or(false);
+            if jailed {
+                break;
+            }
             continue;
         }
         break;
     }
 
     if !is_player_active(world, player_id) {
-        return TurnResult { player: player_id, events, went_bankrupt: true };
+        return TurnResult {
+            player: player_id,
+            events,
+            went_bankrupt: true,
+        };
     }
 
     // ── Phase 5: Strategic (Build) ──
-    let jailed = world.get::<Player>(entity).map(|p| p.in_jail).unwrap_or(false);
+    let jailed = world
+        .get::<Player>(entity)
+        .map(|p| p.in_jail)
+        .unwrap_or(false);
     if !jailed {
         let turn_number = world.resource::<TurnState>().turn_number;
         let ctx = build_ctx(world, player_id, turn_number);
@@ -773,86 +965,171 @@ pub fn execute_turn(
             if can_build_house(world, entity, sq) {
                 let squares = world.resource::<Board>().squares;
                 let sq_entity = squares[sq as usize];
-                let cost = world.get::<Property>(sq_entity).map(|p| p.house_cost).unwrap_or(0);
-                let can_afford = world.get::<Player>(entity).map(|p| p.cash >= cost).unwrap_or(false);
+                let cost = world
+                    .get::<Property>(sq_entity)
+                    .map(|p| p.house_cost)
+                    .unwrap_or(0);
+                let can_afford = world
+                    .get::<Player>(entity)
+                    .map(|p| p.cash >= cost)
+                    .unwrap_or(false);
                 if can_afford {
-                    if let Some(mut p) = world.get_mut::<Player>(entity) { p.pay(cost); }
+                    if let Some(mut p) = world.get_mut::<Player>(entity) {
+                        p.pay(cost);
+                    }
                     if let Some(mut o) = world.get_mut::<Owned>(sq_entity) {
                         o.houses += 1;
-                        events.push(GameEvent::HouseBuilt { player: player_id, square: sq, houses: o.houses });
+                        events.push(GameEvent::HouseBuilt {
+                            player: player_id,
+                            square: sq,
+                            houses: o.houses,
+                        });
                     }
-                    if let Some(mut stats) = world.get_resource_mut::<Statistics>() { stats.record_house(player_id); }
+                    if let Some(mut stats) = world.get_resource_mut::<Statistics>() {
+                        stats.record_house(player_id);
+                    }
                 }
             }
         }
     }
 
-    if let Some(mut stats) = world.get_resource_mut::<Statistics>() { stats.turns_played += 1; }
+    if let Some(mut stats) = world.get_resource_mut::<Statistics>() {
+        stats.turns_played += 1;
+    }
 
-    let bankrupt = world.get::<Player>(entity).map(|p| p.is_bankrupt).unwrap_or(false);
-    TurnResult { player: player_id, events, went_bankrupt: bankrupt }
+    let bankrupt = world
+        .get::<Player>(entity)
+        .map(|p| p.is_bankrupt)
+        .unwrap_or(false);
+    TurnResult {
+        player: player_id,
+        events,
+        went_bankrupt: bankrupt,
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Square resolution
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_landing(
-    world: &mut World, entity: Entity, player_id: u8, square: u8,
-    dice: (u8, u8), ai: &mut dyn MonopolyPlayer, rng: &mut fastrand::Rng, events: &mut Vec<GameEvent>,
+    world: &mut World,
+    entity: Entity,
+    player_id: u8,
+    square: u8,
+    dice: (u8, u8),
+    ai: &mut dyn MonopolyPlayer,
+    rng: &mut fastrand::Rng,
+    events: &mut Vec<GameEvent>,
 ) {
     let squares = world.resource::<Board>().squares;
     let sq_entity = squares[square as usize];
-    let kind = world.get::<BoardSquare>(sq_entity).map(|bs| bs.kind).unwrap_or(SquareKind::Go);
+    let kind = world
+        .get::<BoardSquare>(sq_entity)
+        .map(|bs| bs.kind)
+        .unwrap_or(SquareKind::Go);
 
     match kind {
         SquareKind::Go | SquareKind::FreeParking | SquareKind::Jail => {}
-        SquareKind::GoToJail => { send_to_jail(world, entity, events, JailReason::LandedOnGoToJail); }
+        SquareKind::GoToJail => {
+            send_to_jail(world, entity, events, JailReason::LandedOnGoToJail);
+        }
         SquareKind::Tax(tax_kind) => {
-            let amount = match tax_kind { TaxKind::Income => 200, TaxKind::Luxury => 100 };
-            events.push(GameEvent::TaxPaid { player: player_id, amount, tax_kind });
+            let amount = match tax_kind {
+                TaxKind::Income => 200,
+                TaxKind::Luxury => 100,
+            };
+            events.push(GameEvent::TaxPaid {
+                player: player_id,
+                amount,
+                tax_kind,
+            });
             pay_debt(world, entity, amount, None, events);
         }
         SquareKind::Chance => {
             let effect = draw_card(world, true);
-            events.push(GameEvent::CardDrawn { player: player_id, is_chance: true, effect: effect.clone() });
+            events.push(GameEvent::CardDrawn {
+                player: player_id,
+                is_chance: true,
+                effect: effect.clone(),
+            });
             let jailed = execute_card_effect(world, entity, effect, events);
-            if !jailed { resolve_card_move(world, entity, player_id, square, events); }
+            if !jailed {
+                resolve_card_move(world, entity, player_id, square, events);
+            }
         }
         SquareKind::CommunityChest => {
             let effect = draw_card(world, false);
-            events.push(GameEvent::CardDrawn { player: player_id, is_chance: false, effect: effect.clone() });
+            events.push(GameEvent::CardDrawn {
+                player: player_id,
+                is_chance: false,
+                effect: effect.clone(),
+            });
             let jailed = execute_card_effect(world, entity, effect, events);
-            if !jailed { resolve_card_move(world, entity, player_id, square, events); }
+            if !jailed {
+                resolve_card_move(world, entity, player_id, square, events);
+            }
         }
         SquareKind::Property(_) | SquareKind::Railroad | SquareKind::Utility => {
-            resolve_property(world, entity, player_id, sq_entity, square, dice, ai, rng, events);
+            resolve_property(
+                world, entity, player_id, sq_entity, square, dice, ai, rng, events,
+            );
         }
     }
 }
 
 fn resolve_card_move(
-    world: &mut World, entity: Entity, player_id: u8, original_square: u8, events: &mut Vec<GameEvent>,
+    world: &mut World,
+    entity: Entity,
+    player_id: u8,
+    original_square: u8,
+    events: &mut Vec<GameEvent>,
 ) {
-    let new_pos = world.get::<Player>(entity).map(|p| p.position).unwrap_or(original_square);
-    if new_pos == original_square { return; }
+    let new_pos = world
+        .get::<Player>(entity)
+        .map(|p| p.position)
+        .unwrap_or(original_square);
+    if new_pos == original_square {
+        return;
+    }
     let squares = world.resource::<Board>().squares;
     let sq_entity = squares[new_pos as usize];
-    let kind = world.get::<BoardSquare>(sq_entity).map(|bs| bs.kind).unwrap_or(SquareKind::Go);
+    let kind = world
+        .get::<BoardSquare>(sq_entity)
+        .map(|bs| bs.kind)
+        .unwrap_or(SquareKind::Go);
     match kind {
-        SquareKind::GoToJail => { send_to_jail(world, entity, events, JailReason::CardEffect); }
+        SquareKind::GoToJail => {
+            send_to_jail(world, entity, events, JailReason::CardEffect);
+        }
         SquareKind::Tax(tax_kind) => {
-            let amount = match tax_kind { TaxKind::Income => 200, TaxKind::Luxury => 100 };
-            events.push(GameEvent::TaxPaid { player: player_id, amount, tax_kind });
+            let amount = match tax_kind {
+                TaxKind::Income => 200,
+                TaxKind::Luxury => 100,
+            };
+            events.push(GameEvent::TaxPaid {
+                player: player_id,
+                amount,
+                tax_kind,
+            });
             pay_debt(world, entity, amount, None, events);
         }
         _ => {}
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_property(
-    world: &mut World, entity: Entity, player_id: u8, sq_entity: Entity, square: u8,
-    dice: (u8, u8), ai: &mut dyn MonopolyPlayer, rng: &mut fastrand::Rng, events: &mut Vec<GameEvent>,
+    world: &mut World,
+    entity: Entity,
+    player_id: u8,
+    sq_entity: Entity,
+    square: u8,
+    dice: (u8, u8),
+    ai: &mut dyn MonopolyPlayer,
+    rng: &mut fastrand::Rng,
+    events: &mut Vec<GameEvent>,
 ) {
     let owned_opt = world.get::<Owned>(sq_entity);
     let is_owned = owned_opt.is_some();
@@ -862,37 +1139,68 @@ fn resolve_property(
 
     if !is_owned {
         // Unowned — ask AI to buy or auction
-        let price = world.get::<Property>(sq_entity).map(|p| p.price).unwrap_or(0);
+        let price = world
+            .get::<Property>(sq_entity)
+            .map(|p| p.price)
+            .unwrap_or(0);
         let turn_number = world.resource::<TurnState>().turn_number;
         let ctx = build_ctx(world, player_id, turn_number);
         if ai.should_buy_property(&ctx, square, price) && ctx.cash >= price {
-            if let Some(mut p) = world.get_mut::<Player>(entity) { p.pay(price); }
+            if let Some(mut p) = world.get_mut::<Player>(entity) {
+                p.pay(price);
+            }
             world.entity_mut(sq_entity).insert(Owned::new(entity));
-            events.push(GameEvent::PropertyBought { player: player_id, square, price });
-            if let Some(mut stats) = world.get_resource_mut::<Statistics>() { stats.record_purchase(player_id); }
+            events.push(GameEvent::PropertyBought {
+                player: player_id,
+                square,
+                price,
+            });
+            if let Some(mut stats) = world.get_resource_mut::<Statistics>() {
+                stats.record_purchase(player_id);
+            }
         } else {
-            events.push(GameEvent::PropertyDeclined { player: player_id, square });
+            events.push(GameEvent::PropertyDeclined {
+                player: player_id,
+                square,
+            });
             run_auction(world, square, sq_entity, price, ai, rng, events);
         }
     } else if is_self {
         // Own property — nothing
     } else if let Some(owner_e) = owner_entity {
         // Opponent's property — pay rent
-        let owner_bankrupt = world.get::<Player>(owner_e).map(|p| p.is_bankrupt).unwrap_or(true);
-        if owner_bankrupt { return; }
+        let owner_bankrupt = world
+            .get::<Player>(owner_e)
+            .map(|p| p.is_bankrupt)
+            .unwrap_or(true);
+        if owner_bankrupt {
+            return;
+        }
         let rent = calculate_rent(world, square, dice, owner_e);
         if rent > 0 {
             let owner_id = player_id_from_entity(world, owner_e);
-            events.push(GameEvent::RentPaid { payer: player_id, payee: owner_id, amount: rent, square });
-            if let Some(mut stats) = world.get_resource_mut::<Statistics>() { stats.record_rent(player_id, rent); }
+            events.push(GameEvent::RentPaid {
+                payer: player_id,
+                payee: owner_id,
+                amount: rent,
+                square,
+            });
+            if let Some(mut stats) = world.get_resource_mut::<Statistics>() {
+                stats.record_rent(player_id, rent);
+            }
             pay_debt(world, entity, rent, Some(owner_e), events);
         }
     }
 }
 
 fn run_auction(
-    world: &mut World, square: u8, sq_entity: Entity, base_price: u32,
-    ai: &mut dyn MonopolyPlayer, _rng: &mut fastrand::Rng, events: &mut Vec<GameEvent>,
+    world: &mut World,
+    square: u8,
+    sq_entity: Entity,
+    base_price: u32,
+    ai: &mut dyn MonopolyPlayer,
+    _rng: &mut fastrand::Rng,
+    events: &mut Vec<GameEvent>,
 ) {
     events.push(GameEvent::AuctionStarted { square });
     let player_entities = world.resource::<PlayerEntities>().entities;
@@ -901,23 +1209,33 @@ fn run_auction(
     let turn_number = world.resource::<TurnState>().turn_number;
 
     for i in 0..4u8 {
-        if !is_player_active(world, i) { continue; }
+        if !is_player_active(world, i) {
+            continue;
+        }
         let ctx = build_ctx(world, i, turn_number);
         let bid = ai.auction_bid(&ctx, square, highest_bid);
         if bid > highest_bid && bid <= ctx.cash {
             highest_bid = bid;
             highest_bidder = Some(i);
-            events.push(GameEvent::AuctionBid { player: i, amount: bid });
+            events.push(GameEvent::AuctionBid {
+                player: i,
+                amount: bid,
+            });
         }
     }
 
     // No bids → sell at minimum to first active player
     if highest_bidder.is_none() || highest_bid == 0 {
         for i in 0..4u8 {
-            if !is_player_active(world, i) { continue; }
+            if !is_player_active(world, i) {
+                continue;
+            }
             let bidder_entity = player_entities[i as usize];
             let min_bid = (base_price / 2).max(super::AUCTION_MIN_BID);
-            let can_afford = world.get::<Player>(bidder_entity).map(|p| p.cash >= min_bid).unwrap_or(false);
+            let can_afford = world
+                .get::<Player>(bidder_entity)
+                .map(|p| p.cash >= min_bid)
+                .unwrap_or(false);
             if can_afford {
                 highest_bid = min_bid;
                 highest_bidder = Some(i);
@@ -928,10 +1246,20 @@ fn run_auction(
 
     if let Some(winner_id) = highest_bidder {
         let winner_entity = player_entities[winner_id as usize];
-        if let Some(mut p) = world.get_mut::<Player>(winner_entity) { p.pay(highest_bid); }
-        world.entity_mut(sq_entity).insert(Owned::new(winner_entity));
-        events.push(GameEvent::AuctionWon { player: winner_id, square, amount: highest_bid });
-        if let Some(mut stats) = world.get_resource_mut::<Statistics>() { stats.record_purchase(winner_id); }
+        if let Some(mut p) = world.get_mut::<Player>(winner_entity) {
+            p.pay(highest_bid);
+        }
+        world
+            .entity_mut(sq_entity)
+            .insert(Owned::new(winner_entity));
+        events.push(GameEvent::AuctionWon {
+            player: winner_id,
+            square,
+            amount: highest_bid,
+        });
+        if let Some(mut stats) = world.get_resource_mut::<Statistics>() {
+            stats.record_purchase(winner_id);
+        }
     }
 }
 
@@ -951,27 +1279,42 @@ pub fn run_game(
     let mut turn = 0u32;
     let mut current = 0u8;
 
-    for p in players.iter_mut() { p.reset(); }
+    for p in players.iter_mut() {
+        p.reset();
+    }
 
     let winner = loop {
-        if turn >= max_turns { break find_richest(&world); }
+        if turn >= max_turns {
+            break find_richest(&world);
+        }
         let active = count_active_players(&world);
-        if active <= 1 { break find_winner(&world); }
-        if !is_player_active(&world, current) { current = (current + 1) % 4; continue; }
+        if active <= 1 {
+            break find_winner(&world);
+        }
+        if !is_player_active(&world, current) {
+            current = (current + 1) % 4;
+            continue;
+        }
 
         let result = execute_turn(&mut world, current, players[current as usize].as_mut(), rng);
         all_events.extend(result.events);
 
         if result.went_bankrupt {
             let active = count_active_players(&world);
-            if active <= 1 { break find_winner(&world); }
+            if active <= 1 {
+                break find_winner(&world);
+            }
         }
         turn += 1;
         current = (current + 1) % 4;
     };
 
     all_events.push(GameEvent::GameOver { winner });
-    GameResult { winner, total_turns: turn, events: all_events }
+    GameResult {
+        winner,
+        total_turns: turn,
+        events: all_events,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -980,10 +1323,12 @@ pub fn run_game(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::players::RandomPlayer;
+    use super::*;
 
-    fn test_world() -> World { init_world(42) }
+    fn test_world() -> World {
+        init_world(42)
+    }
 
     #[test]
     fn init_game_creates_valid_world() {
@@ -1011,7 +1356,9 @@ mod tests {
     fn move_forward_wraps() {
         let mut world = test_world();
         let entity = player_entity(&world, 0);
-        if let Some(mut p) = world.get_mut::<Player>(entity) { p.position = 38; }
+        if let Some(mut p) = world.get_mut::<Player>(entity) {
+            p.position = 38;
+        }
         let (new_pos, passed_go) = move_forward(&mut world, entity, 5);
         assert_eq!(new_pos, 3);
         assert!(passed_go);
@@ -1023,7 +1370,11 @@ mod tests {
         let entity = player_entity(&world, 0);
         let squares = world.resource::<Board>().squares;
         assert!(!owns_complete_set(&world, entity, PropertyGroup::Brown));
-        for sq in [1u8, 3] { world.entity_mut(squares[sq as usize]).insert(Owned::new(entity)); }
+        for sq in [1u8, 3] {
+            world
+                .entity_mut(squares[sq as usize])
+                .insert(Owned::new(entity));
+        }
         assert!(owns_complete_set(&world, entity, PropertyGroup::Brown));
     }
 
@@ -1065,7 +1416,11 @@ mod tests {
         let mut world = test_world();
         let owner = player_entity(&world, 0);
         let squares = world.resource::<Board>().squares;
-        world.entity_mut(squares[1]).insert(Owned { owner, is_mortgaged: true, houses: 0 });
+        world.entity_mut(squares[1]).insert(Owned {
+            owner,
+            is_mortgaged: true,
+            houses: 0,
+        });
         assert_eq!(calculate_rent(&world, 1, (3, 4), owner), 0);
     }
 
@@ -1074,7 +1429,11 @@ mod tests {
         let mut world = test_world();
         let entity = player_entity(&world, 0);
         let squares = world.resource::<Board>().squares;
-        for sq in [6u8, 8, 9] { world.entity_mut(squares[sq as usize]).insert(Owned::new(entity)); }
+        for sq in [6u8, 8, 9] {
+            world
+                .entity_mut(squares[sq as usize])
+                .insert(Owned::new(entity));
+        }
         assert!(can_build_house(&world, entity, 6));
     }
 
@@ -1084,7 +1443,9 @@ mod tests {
         let entity = player_entity(&world, 0);
         let squares = world.resource::<Board>().squares;
         world.entity_mut(squares[1]).insert(Owned::new(entity));
-        if let Some(mut p) = world.get_mut::<Player>(entity) { p.cash = 0; }
+        if let Some(mut p) = world.get_mut::<Player>(entity) {
+            p.cash = 0;
+        }
         let raised = liquidate_assets(&mut world, entity, 30);
         assert!(raised >= 30);
         assert!(world.get::<Owned>(squares[1]).unwrap().is_mortgaged);
@@ -1106,13 +1467,20 @@ mod tests {
     fn full_game_completes() {
         let mut rng = fastrand::Rng::with_seed(42);
         let mut players: [Box<dyn MonopolyPlayer>; 4] = [
-            Box::new(RandomPlayer::new(0)), Box::new(RandomPlayer::new(1)),
-            Box::new(RandomPlayer::new(2)), Box::new(RandomPlayer::new(3)),
+            Box::new(RandomPlayer::new(0)),
+            Box::new(RandomPlayer::new(1)),
+            Box::new(RandomPlayer::new(2)),
+            Box::new(RandomPlayer::new(3)),
         ];
         let result = run_game(42, &mut players, &mut rng, 1000);
         assert!(result.total_turns > 0);
         assert!(result.winner < 4);
-        assert!(result.events.iter().any(|e| matches!(e, GameEvent::GameOver { .. })));
+        assert!(
+            result
+                .events
+                .iter()
+                .any(|e| matches!(e, GameEvent::GameOver { .. }))
+        );
     }
 
     #[test]

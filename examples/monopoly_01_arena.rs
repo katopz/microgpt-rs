@@ -15,7 +15,7 @@ use microgpt_rs::pruners::monopoly::{
 // ── Config ─────────────────────────────────────────────────────
 
 const GAMES: usize = 100;
-const MAX_TURNS: u32 = 500;
+const MAX_TURNS: u32 = 300;
 
 // ── Main ───────────────────────────────────────────────────────
 
@@ -27,19 +27,21 @@ fn main() {
     println!("╚═════════════════════════════════════════════════════════╝");
     println!();
 
+    // Players persist across games — HL bandit Q-values accumulate
+    let mut players: [Box<dyn MonopolyPlayer>; 4] = [
+        Box::new(RandomPlayer::new(0)),
+        Box::new(GreedyPlayer::new(1)),
+        Box::new(ValidatorPlayer::new(2)),
+        Box::new(HLPlayer::new(3)),
+    ];
+
     let mut wins = [0u32; 4];
     let mut bankruptcies = [0u32; 4];
-    let mut total_net_worth = [0u64; 4];
+    let mut total_net_worth = [0i64; 4];
     let mut total_turns = 0u32;
 
     for game in 0..GAMES {
         let seed = 42 + game as u64;
-        let mut players: [Box<dyn MonopolyPlayer>; 4] = [
-            Box::new(RandomPlayer::new(0)),
-            Box::new(GreedyPlayer::new(1)),
-            Box::new(ValidatorPlayer::new(2)),
-            Box::new(HLPlayer::new(3)),
-        ];
 
         let result = run_game(seed, &mut players, &mut rng, MAX_TURNS);
 
@@ -57,13 +59,13 @@ fn main() {
         for event in &result.events {
             match event {
                 GameEvent::SalaryCollected { player, amount } => {
-                    total_net_worth[*player as usize] += *amount as u64;
+                    total_net_worth[*player as usize] += *amount as i64;
                 }
                 GameEvent::PropertyBought { player, price, .. } => {
-                    total_net_worth[*player as usize] += *price as u64;
+                    total_net_worth[*player as usize] += *price as i64;
                 }
                 GameEvent::RentPaid { payer, amount, .. } => {
-                    total_net_worth[*payer as usize] -= *amount as u64;
+                    total_net_worth[*payer as usize] -= *amount as i64;
                 }
                 _ => {}
             }
@@ -79,10 +81,20 @@ fn main() {
             let strategy = Strategy::all()[hl.current_strategy];
             let reward = match (survived, won) {
                 (_, true) => 1.0,
-                (true, false) => 0.5,
+                (true, false) => 0.3,
                 (false, false) => -1.0,
             };
             hl.update_outcome(strategy, reward);
+
+            // Compress every 50 games
+            if (game + 1) % 50 == 0 {
+                let compressed = hl.compress_cycle();
+                if !compressed.is_empty() {
+                    let names = HLPlayer::strategy_names();
+                    let which: Vec<&str> = compressed.iter().map(|&i| names[i]).collect();
+                    eprintln!("  [HL] Compressed strategies: {}", which.join(", "));
+                }
+            }
         }
 
         // Progress indicator
@@ -133,5 +145,17 @@ fn main() {
         println!(
             "  ❌ HL thesis NOT proven: HL ({hl_wins}W) vs Validator ({validator_wins}W), diff={pp:.1}pp (threshold: 5pp)"
         );
+    }
+    println!();
+
+    // HL bandit Q-values report
+    if let Some(hl) = players[3].as_any().downcast_ref::<HLPlayer>() {
+        println!("─── HL Bandit Q-Values ────────────────────────────────────────");
+        let q = hl.strategy_q();
+        let visits = hl.strategy_visits();
+        let strategy_names = HLPlayer::strategy_names();
+        for (i, name) in strategy_names.iter().enumerate() {
+            println!("  {name:<14}{:.2} ({} visits)", q[i], visits[i]);
+        }
     }
 }

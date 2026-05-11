@@ -133,6 +133,17 @@ pub enum GamePhase {
     Late,
 }
 
+impl GamePhase {
+    /// Map each phase to its preferred strategy.
+    pub fn preferred_strategy(&self) -> Strategy {
+        match self {
+            Self::Early => Strategy::Expansion,
+            Self::Mid => Strategy::Development,
+            Self::Late => Strategy::Survival,
+        }
+    }
+}
+
 // ── Strategy (HL Player) ───────────────────────────────────────
 
 /// Strategy profiles for the HL bandit layer.
@@ -481,16 +492,19 @@ impl GreedyPlayer {
 
 impl MonopolyPlayer for GreedyPlayer {
     fn should_buy_property(&mut self, ctx: &DecisionContext, _square: u8, price: u32) -> bool {
-        // Buy everything affordable with $100 buffer
+        // Buy everything affordable with cash buffer
         ctx.cash > price + Self::CASH_BUFFER
     }
 
     fn auction_bid(&mut self, ctx: &DecisionContext, square: u8, current_bid: u32) -> u32 {
-        // Bid up to 80% of printed price
-        let max_bid = (ctx.square_prices[square as usize] as f32 * 0.8) as u32;
+        // Bid up to max of 90% printed price or 80% strategic value
+        let printed_price = ctx.square_prices[square as usize];
+        let strategic = property_strategic_value(ctx, square);
+        let max_bid = ((printed_price as f32 * 0.9).max(strategic * 0.8) as u32)
+            .min(ctx.cash.saturating_sub(Self::CASH_BUFFER));
         let new_bid = current_bid + AUCTION_MIN_BID;
 
-        if new_bid <= max_bid && new_bid <= ctx.cash {
+        if new_bid <= max_bid {
             new_bid
         } else {
             0 // pass
@@ -523,8 +537,8 @@ impl MonopolyPlayer for GreedyPlayer {
                 // Can build if no hotel yet
                 if ctx.square_houses[sq_idx] < 5 {
                     let house_cost = ctx.square_house_cost[sq_idx];
-                    // Build up to 2 houses per call
-                    if ctx.cash >= house_cost * 2 {
+                    // Build if can afford (not requiring 2x)
+                    if ctx.cash >= house_cost {
                         buildable.push((sq, ctx.square_base_rent[sq_idx]));
                     }
                 }
@@ -568,8 +582,38 @@ impl MonopolyPlayer for GreedyPlayer {
         }
     }
 
-    fn propose_trade(&self, _ctx: &DecisionContext) -> Option<TradeOffer> {
-        None // Greedy doesn't propose trades
+    fn propose_trade(&self, ctx: &DecisionContext) -> Option<TradeOffer> {
+        // Find a property that would complete our set
+        for group in PropertyGroup::all() {
+            let owned = ctx.count_in_group(group);
+            if owned + 1 != group.size() {
+                continue;
+            }
+
+            // Find which square in this group we don't own
+            for sq in 0..BOARD_SIZE {
+                let kind = super::square_kind(sq);
+                if let SquareKind::Property(g) = kind {
+                    if g != group {
+                        continue;
+                    }
+                    if ctx.square_owners[sq as usize] == Some(ctx.player_id) {
+                        continue;
+                    }
+                    if let Some(owner_id) = ctx.square_owners[sq as usize] {
+                        let price = ctx.square_prices[sq as usize];
+                        let offer_price = (price as f32 * 1.3) as u32;
+                        if ctx.cash > offer_price + Self::CASH_BUFFER {
+                            let mut offer = TradeOffer::new(ctx.player_id, owner_id);
+                            offer.proposer_cash = offer_price;
+                            offer.responder_properties = vec![sq];
+                            return Some(offer);
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn mortgage_priority(&self, ctx: &DecisionContext) -> Vec<u8> {
@@ -620,7 +664,7 @@ pub struct ValidatorPlayer {
 
 impl ValidatorPlayer {
     const DEFAULT_RESERVE: u32 = 200;
-    const BUILD_CASH_THRESHOLD: u32 = 300;
+    const BUILD_CASH_THRESHOLD: u32 = 150;
     const BID_SAFETY_MARGIN: f32 = 0.15; // 15% below strategic value
 
     pub fn new(id: u8) -> Self {
@@ -652,9 +696,25 @@ impl ValidatorPlayer {
 }
 
 impl MonopolyPlayer for ValidatorPlayer {
-    fn should_buy_property(&mut self, ctx: &DecisionContext, _square: u8, price: u32) -> bool {
-        // Buy only if cash buffer >= $200 after purchase
-        self.can_afford_safely(ctx, price)
+    fn should_buy_property(&mut self, ctx: &DecisionContext, square: u8, price: u32) -> bool {
+        if !self.can_afford_safely(ctx, price) {
+            return false;
+        }
+        let kind = super::square_kind(square);
+        // Always buy railroads and utilities — safe income, no house investment needed
+        if matches!(kind, SquareKind::Railroad | SquareKind::Utility) {
+            return true;
+        }
+        // Always buy if it completes a set
+        if let SquareKind::Property(group) = kind {
+            let needed = group.size().saturating_sub(ctx.count_in_group(group));
+            if needed == 1 {
+                return true;
+            }
+        }
+        // Otherwise buy if reasonable value
+        let strategic = property_strategic_value(ctx, square);
+        strategic >= price as f32 * 0.8
     }
 
     fn auction_bid(&mut self, ctx: &DecisionContext, square: u8, current_bid: u32) -> u32 {
@@ -793,8 +853,37 @@ impl MonopolyPlayer for ValidatorPlayer {
         }
     }
 
-    fn propose_trade(&self, _ctx: &DecisionContext) -> Option<TradeOffer> {
-        None // Validator doesn't propose trades
+    fn propose_trade(&self, ctx: &DecisionContext) -> Option<TradeOffer> {
+        // Find a property that would complete our set — with safety margin
+        for group in PropertyGroup::all() {
+            let owned = ctx.count_in_group(group);
+            if owned + 1 != group.size() {
+                continue;
+            }
+
+            for sq in 0..40u8 {
+                let kind = super::square_kind(sq);
+                if let SquareKind::Property(g) = kind {
+                    if g != group {
+                        continue;
+                    }
+                    if ctx.square_owners[sq as usize] == Some(ctx.player_id) {
+                        continue;
+                    }
+                    if let Some(owner_id) = ctx.square_owners[sq as usize] {
+                        let price = ctx.square_prices[sq as usize];
+                        // Offer face value — don't overpay like Greedy
+                        if ctx.cash > price + self.min_cash_reserve {
+                            let mut offer = TradeOffer::new(ctx.player_id, owner_id);
+                            offer.proposer_cash = price;
+                            offer.responder_properties = vec![sq];
+                            return Some(offer);
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn mortgage_priority(&self, ctx: &DecisionContext) -> Vec<u8> {
@@ -872,10 +961,43 @@ impl HLPlayer {
             min_cash_reserve: 200,
             game_count: 0,
             opponent_properties: Vec::new(),
-            strategy_q: [0.0; Strategy::COUNT],
+            strategy_q: [1.0; Strategy::COUNT], // optimistic init → explores all arms
             strategy_visits: [0; Strategy::COUNT],
             current_strategy: 0, // start with Expansion
             compressed: [false; Strategy::COUNT],
+        }
+    }
+
+    /// Called at the start of each game. Selects strategy via bandit.
+    pub fn start_game(&mut self) {
+        self.game_count += 1;
+        self.opponent_properties.clear();
+        // Pick strategy based on game_count (all games start Early)
+        // Use ε-greedy with proper randomness
+        let explore = self.game_count.is_multiple_of(10) && !self.compressed.iter().all(|&c| c);
+
+        if explore {
+            let available: Vec<usize> = (0..Strategy::COUNT)
+                .filter(|&i| !self.compressed[i])
+                .collect();
+            if !available.is_empty() {
+                let pick = available[(self.game_count as usize) % available.len()];
+                self.current_strategy = pick;
+            }
+        } else {
+            // Exploit: pick best Q-value strategy
+            let mut best_idx = 0;
+            let mut best_q = f32::NEG_INFINITY;
+            for i in 0..Strategy::COUNT {
+                if self.compressed[i] {
+                    continue;
+                }
+                if self.strategy_q[i] > best_q {
+                    best_q = self.strategy_q[i];
+                    best_idx = i;
+                }
+            }
+            self.current_strategy = best_idx;
         }
     }
 
@@ -892,49 +1014,24 @@ impl HLPlayer {
 
     /// Select strategy via epsilon-greedy bandit selection.
     pub fn select_strategy(&mut self, phase: GamePhase) -> Strategy {
-        // Determine preferred strategy for current phase
-        let preferred = match phase {
-            GamePhase::Early => Strategy::Expansion,
-            GamePhase::Mid => Strategy::Development,
-            GamePhase::Late => Strategy::Survival,
-        };
-
-        // Epsilon-greedy: explore on every 10th game if not all compressed
-        let explore = (self.game_count.is_multiple_of(10)) && !self.compressed.iter().all(|&c| c);
-
-        if explore {
-            // Pick random non-compressed strategy
-            let available: Vec<usize> = (0..Strategy::COUNT)
-                .filter(|&i| !self.compressed[i])
-                .collect();
-            if !available.is_empty() {
-                let pick = available[self.game_count as usize % available.len()];
-                self.current_strategy = pick;
-                return Strategy::all()[pick];
-            }
+        // Phase-adaptive: if current strategy is compressed, re-select
+        if self.compressed[self.current_strategy] {
+            self.start_game();
         }
 
-        // Exploit: prefer phase-appropriate strategy, fallback to best Q-value
-        let preferred_idx = preferred.as_usize();
-        if !self.compressed[preferred_idx] && self.strategy_q[preferred_idx] >= 0.0 {
-            self.current_strategy = preferred_idx;
-            return preferred;
+        // Optionally adapt mid-game based on phase
+        let phase_preferred = phase.preferred_strategy();
+        let phase_idx = phase_preferred.as_usize();
+
+        // If phase-appropriate strategy has much higher Q, switch to it
+        if !self.compressed[phase_idx]
+            && phase_idx != self.current_strategy
+            && self.strategy_q[phase_idx] > self.strategy_q[self.current_strategy] + 0.1
+        {
+            self.current_strategy = phase_idx;
         }
 
-        // Fallback: pick strategy with highest Q-value
-        let mut best_idx = 0;
-        let mut best_q = f32::NEG_INFINITY;
-        for i in 0..Strategy::COUNT {
-            if self.compressed[i] {
-                continue;
-            }
-            if self.strategy_q[i] > best_q {
-                best_q = self.strategy_q[i];
-                best_idx = i;
-            }
-        }
-        self.current_strategy = best_idx;
-        Strategy::all()[best_idx]
+        Strategy::all()[self.current_strategy]
     }
 
     /// Run absorb-compress cycle. Returns newly compressed strategy indices.
@@ -1305,8 +1402,7 @@ impl MonopolyPlayer for HLPlayer {
     }
 
     fn reset(&mut self) {
-        self.opponent_properties.clear();
-        self.game_count += 1;
+        self.start_game();
 
         // Absorb-compress every 10 games
         if self.game_count.is_multiple_of(10) {
@@ -1452,21 +1548,21 @@ mod tests {
         let mut player = GreedyPlayer::new(1);
         let ctx = default_ctx();
 
-        // Should buy if cash - price >= 100
-        assert!(player.should_buy_property(&ctx, 1, 100)); // 1500 - 100 > 100
-        assert!(player.should_buy_property(&ctx, 1, 500)); // 1500 - 500 = 1000 > 100
-        assert!(!player.should_buy_property(&ctx, 1, 1500)); // 1500 - 1500 = 0 < 100
-        assert!(!player.should_buy_property(&ctx, 1, 1401)); // 1500 - 1401 = 99 < 100
+        // Should buy if cash - price > 50 (buffer)
+        assert!(player.should_buy_property(&ctx, 1, 100)); // 1500 - 100 = 1400 > 50
+        assert!(player.should_buy_property(&ctx, 1, 500)); // 1500 - 500 = 1000 > 50
+        assert!(!player.should_buy_property(&ctx, 1, 1500)); // 1500 - 1500 = 0 < 50
+        assert!(!player.should_buy_property(&ctx, 1, 1450)); // 1500 - 1450 = 50, not > 50
     }
 
     #[test]
-    fn test_greedy_player_auction_bids_up_to_80_percent() {
+    fn test_greedy_player_auction_bids_up_to_90_percent() {
         let mut player = GreedyPlayer::new(1);
         let mut ctx = default_ctx();
         ctx.square_prices[1] = 100; // Mediterranean Ave
         ctx.cash = 1000;
 
-        // Should bid up to 80% of price = 80
+        // Should bid up to 90% of price = 90
         let bid = player.auction_bid(&ctx, 1, 0);
         assert_eq!(bid, AUCTION_MIN_BID); // 10
 
@@ -1474,7 +1570,10 @@ mod tests {
         assert_eq!(bid2, 70 + AUCTION_MIN_BID); // 80
 
         let bid3 = player.auction_bid(&ctx, 1, 80);
-        assert_eq!(bid3, 0); // pass — above 80% threshold
+        assert_eq!(bid3, 80 + AUCTION_MIN_BID); // 90
+
+        let bid4 = player.auction_bid(&ctx, 1, 90);
+        assert_eq!(bid4, 0); // pass — above 90% threshold
     }
 
     #[test]
@@ -1532,9 +1631,10 @@ mod tests {
     #[test]
     fn test_validator_never_drops_below_reserve() {
         let mut player = ValidatorPlayer::new(2);
-        let ctx = default_ctx();
-        // cash=1500, reserve=200
-        // 1500 - 100 = 1400 > 200 => buy
+        let mut ctx = default_ctx();
+        ctx.square_prices[1] = 100; // needed for strategic value check
+        // cash=1500, reserve=200, strategic=100*0.9=90 >= 100*0.8=80
+        // 1500 > 100 + 200 => buy
         assert!(player.should_buy_property(&ctx, 1, 100));
         // 1500 - 1300 = 200 = reserve, need strictly > => no buy
         assert!(!player.should_buy_property(&ctx, 1, 1300));
@@ -1585,7 +1685,7 @@ mod tests {
     fn test_validator_builds_only_with_sufficient_cash() {
         let mut player = ValidatorPlayer::new(2);
         let mut ctx = default_ctx();
-        ctx.cash = 400; // reserve(200) + threshold(300) = 500 > 400 => no build
+        ctx.cash = 300; // reserve(200) + threshold(200) = 400 > 300 => no build
 
         // Set up a complete set
         ctx.owned_properties = vec![1, 3]; // Brown set
@@ -1626,18 +1726,22 @@ mod tests {
     #[test]
     fn test_hl_player_strategy_selection() {
         let mut player = HLPlayer::new(3);
-        // Set game_count > 0 so epsilon-greedy doesn't explore (0 % 10 == 0 triggers explore)
-        player.game_count = 1;
 
-        // Early game should prefer Expansion
-        let mut ctx = default_ctx();
-        ctx.turn_number = 5;
+        // start_game selects strategy (game_count becomes 1, exploit picks best Q = all 0 → idx 0)
+        player.start_game();
+        assert_eq!(player.current_strategy, 0); // Expansion
+
+        // Early game should return Expansion (current strategy)
+        let ctx = default_ctx();
         let strategy = player.select_strategy(ctx.game_phase());
         assert_eq!(strategy, Strategy::Expansion);
 
-        // Late game should prefer Survival
-        ctx.turn_number = 30;
+        // Boost Survival Q-value above optimistic init (1.0) to test mid-game phase adaptation
+        player.strategy_q[Strategy::Survival.as_usize()] = 1.5;
+        let mut ctx = default_ctx();
+        ctx.turn_number = 30; // Late phase prefers Survival
         let strategy = player.select_strategy(ctx.game_phase());
+        // Survival Q (1.5) > Expansion Q (1.0) + 0.1, should switch
         assert_eq!(strategy, Strategy::Survival);
     }
 
@@ -1645,13 +1749,14 @@ mod tests {
     fn test_hl_player_q_value_update() {
         let mut player = HLPlayer::new(3);
 
-        // Update with positive reward
+        // Optimistic init starts at 1.0 — positive reward keeps it high
         player.update_outcome(Strategy::Expansion, 1.0);
-        assert!(player.strategy_q[Strategy::Expansion.as_usize()] > 0.0);
+        assert!(player.strategy_q[Strategy::Expansion.as_usize()] >= 1.0);
 
-        // Update with negative reward
+        // Negative reward pulls Q-value below initial
+        let before = player.strategy_q[Strategy::Conservative.as_usize()];
         player.update_outcome(Strategy::Conservative, -1.0);
-        assert!(player.strategy_q[Strategy::Conservative.as_usize()] < 0.0);
+        assert!(player.strategy_q[Strategy::Conservative.as_usize()] < before);
     }
 
     #[test]

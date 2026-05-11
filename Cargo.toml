@@ -102,6 +102,10 @@ required-features = ["monopoly"]
 name = "monopoly_03_hl_proof"
 required-features = ["monopoly"]
 
+[[example]]
+name = "monopoly_04_bench"
+required-features = ["monopoly"]
+
 # ── Blue Bear ──────────────────────────────────────────────────
 
 [[example]]
