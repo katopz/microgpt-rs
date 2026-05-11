@@ -572,7 +572,10 @@ fn record_game(seed: u64) -> RecordedGame {
     for event in &result.events {
         let active = active_player_from(event);
 
-        // Track dice rolls
+        // Track dice rolls, clear on new turn
+        if let GameEvent::TurnStarted { .. } = event {
+            last_dice = None;
+        }
         if let GameEvent::DiceRolled {
             die1,
             die2,
@@ -784,17 +787,14 @@ fn interior_content(row: usize, snap: &ReplayFrame, width: usize) -> Span<'stati
             let content = stat.content.to_string();
             Span::styled(pad_to(&content, width), stat.style)
         }
+        5 => Span::raw(pad_to("⋮ ", width)),
         6 => Span::raw(pad_to("⋮ ", width)),
         7 => {
-            // Dice display
-            if let Some((d1, d2, doubles)) = snap.dice_info {
-                let active = snap
-                    .active_player
-                    .map(|p| format!("P{}", p + 1))
-                    .unwrap_or_default();
+            // Dice display — only show when active player is known
+            if let (Some(ap), Some((d1, d2, doubles))) = (snap.active_player, snap.dice_info) {
                 let dice_str = format!(
-                    "{} rolled {}+{}={}{}",
-                    active,
+                    "⋮ P{} rolled {}+{}={}{}",
+                    ap + 1,
                     d1,
                     d2,
                     d1 + d2,
