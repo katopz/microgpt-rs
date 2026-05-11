@@ -66,44 +66,24 @@ Deterministic validation — a neuro-symbolic inference system where `rustc`/`sy
 ## Status
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Path encoding (u128) | ❌ Planned | Current u64 5-bit overflows with BPE vocab > 31 |
-| BPE Tokenizer | ❌ Planned | Module structure sketched |
-| PartialParser | ❌ Planned | Bracket balancer DFA designed |
-| SynPruner | ❌ Planned | Two-tier validation designed |
-| Training data pipeline | ❌ Deferred to Plan 009 | Depends on tokenizer + validator |
+| Path encoding (u128) | ✅ Working | 16-bit slots, max token 65535, max depth 8 |
+| BPE Tokenizer | ✅ Working | encode/decode/train, `Config::bpe()` |
+| PartialParser | ✅ Working | Bracket balance DFA |
+| SynPruner | ✅ Working | Two-tier validation (DFA + syn) |
+| CompilerFeedback | ✅ Working | Pattern-matches rustc errors (E0382, E0495, E0277) |
+| Training data pipeline | ✅ Working | Via riir-burner + riir-gpu |
 
-## Path Encoding Redesign
+## Path Encoding
 
-### Current Problem
 ```rust
-// dd_tree.rs — current encoding
-parent_path: u64  // 5 bits per depth → max token 31, max depth 12
-```
-BPE vocab=4096 → token ID 4096 needs 13 bits. Current 5-bit slots overflow immediately.
-
-### Proposed Fix
-```rust
-// speculative/types.rs — redesigned
+// speculative/types.rs
 parent_path: u128  // 16 bits per depth → max token 65535, max depth 8
 ```
 - Extract: `(path >> (depth * 16)) & 0xFFFF`
 - Push: `(path << 16) | token_idx as u128`
 - Zero-alloc variant: `extract_parent_tokens_into(path, n, buf)`
 
-### Breaking Change
-- All code using `parent_path: u64` → `u128`
-- Encoding direction flips: MSB-first → LSB-first
-- All roundtrip tests must be rewritten
-
-## BPE Tokenizer (`tokenizer/`) (planned)
-
-### Module Layout
-```
-src/tokenizer/
-├── mod.rs       # Re-exports
-├── types.rs     # BpeTokenizer, MergeRule, SpecialTokens
-└── bpe.rs       # encode(), decode(), train()
-```
+## BPE Tokenizer (`tokenizer/`)
 
 ### Core Types
 ```rust
@@ -154,9 +134,8 @@ impl Config {
 ```
 - Total weights: ~1.1 MB (target), ~130 KB (draft)
 
-## PartialParser (`validator/partial_parser.rs`) (planned)
+## PartialParser (`validator/partial_parser.rs`)
 
-### Design: Bracket Balancer + Keyword Acceptor
 NOT a full Rust parser. A pragmatic DFA:
 
 ```rust
@@ -183,7 +162,7 @@ This is "Phase 0 Validator":
 - Near-zero false negatives (rarely prunes valid code)
 - The remaining ~80-90% pass to Tier 1 (syn) and Tier 2 (cargo check)
 
-## SynPruner (`validator/syn_pruner.rs`) (planned)
+## SynPruner (`validator/syn_pruner.rs`)
 
 ### Two-Tier Validation
 
@@ -222,7 +201,8 @@ pub fn validate_path(&self, token_ids: &[usize]) -> PruneResult {
 }
 ```
 
-## CompilerFeedback (`validator/types.rs`) (planned)
+## CompilerFeedback (`validator/types.rs`)
+
 ```rust
 pub struct CompilerFeedback {
     pub error_message: String,
@@ -233,6 +213,8 @@ pub struct CompilerFeedback {
 - `extract_suggestion(error)` — pattern-matches common rustc errors (E0382, E0495, E0277)
 - `to_context()` — formats as `/* COMPILER ERROR: ... Suggestion: ... */` for next LLM prompt
 
+Integrated into the speculative loop: after cargo check fails, `CompilerFeedback` extracts the error and injects it as context for the next generation attempt.
+
 ## Feature Flag
 ```toml
 validator = ["syn", "proc-macro2"]
@@ -242,14 +224,14 @@ validator = ["syn", "proc-macro2"]
 - Only SynPruner requires syn
 
 ## Dependency Chain
-```
-Phase 0: Path encoding fix (u128) — prerequisite for BPE vocab > 31
-Phase 1: BPE Tokenizer — encode/decode/train
-Phase 2: SynPruner — PartialParser + ConstraintPruner impl
-Phase 3: Integration — examples, benchmarks
-```
+All phases complete:
+- ✅ Phase 0: Path encoding fix (u128) — prerequisite for BPE vocab > 31
+- ✅ Phase 1: BPE Tokenizer — encode/decode/train
+- ✅ Phase 2: SynPruner — PartialParser + ConstraintPruner impl
+- ✅ Phase 3: Integration — examples, benchmarks
 
 ## Key References
 - `.research/00_Neuro-Symbolic LLM Architecture.md` — Original Validator concept
 - `.research/01_Advanced Neuro-Symbolic Rust Translation.md` — Grand Unification architecture
 - `syn` crate — Rust AST parser
+- `riir-burner` + `riir-gpu` — Training data pipeline (BPE training corpus)
