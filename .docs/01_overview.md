@@ -14,58 +14,77 @@ A from-scratch Rust implementation of a GPT-2 style transformer with speculative
 
 ## Current Capabilities
 
-- Single-token autoregressive generation: ~1.18M tok/s (micro config)
-- DFlash marginal prediction: ~4.1M tok/s
-- DDTree build: ~360K trees/s
-- Speculative decoding: ~1.48M tok/s (AR Draft)
-- 240+ tests passing, zero clippy warnings
+- Single-token autoregressive generation: ~900K tok/s (micro config)
+- DFlash marginal prediction: ~4.2M tok/s
+- DDTree build: ~431K trees/s
+- Speculative decoding: ~1.64M tok/s (AR Draft)
+- forward_raven (16 slots): ~1.6M trees/s
+- raven_recall (1000 noise): ~9.3M tok/s
+- 276+ tests passing, zero clippy warnings
 
 ## Module Structure
 
 ```
 src/
-├── lib.rs                    # Public API surface
-├── main.rs                   # Benchmark runner
-├── types.rs                  # Config, Rng, math kernels (matmul, softmax, rmsnorm)
-├── transformer.rs            # ForwardContext, TransformerWeights, LayerWeights, forward(), generate()
-├── percepta.rs               # Sudoku solvers (4x4, 9x9), StreamingSolver, KVCache2D
-├── benchmark.rs              # All benchmark functions
-├── plot.rs                   # Plotting utilities (plotters-based)
-├── speculative/
-│   ├── mod.rs                # Re-exports
-│   ├── types.rs              # TreeNode, DraftResult, ConstraintPruner, SpeculativeContext
-│   ├── sampling.rs           # sample_from_distribution, sample_residual_distribution
-│   ├── dd_tree.rs            # DDTree build (best-first + chain-seed), TreeBuilder
-│   ├── dflash.rs             # DFlash predict (marginal, AR, parallel, conditioned)
-│   ├── verifier.rs           # SpeculativeVerifier trait, SimulatedVerifier, LeviathanVerifier
-│   ├── step.rs               # High-level step functions (speculative_step, rollback, conditioned)
-│   ├── prefill.rs            # Speculative prefill scoring + prompt compression
-│   └── sudoku_pruner.rs      # SudokuPruner (behind "sudoku" feature)
-├── tokenizer/                # BPE tokenizer (behind "validator" feature)
-├── validator/                # SynPruner + PartialParser (behind "validator" feature)
-└── ppot/                     # PPoT CPU resampling (behind "ppot" feature)
+  lib.rs            Module index
+  main.rs           Entry point (proof → bench → Percepta bench → plot)
+  types.rs          Config (micro + draft, screening_threshold, sparse_threshold), Rng, softmax, rmsnorm, matmul, matmul_relu, sparse_matmul, sample_token, LoraAdapter, LoraPair, lora_apply
+  transformer.rs    TransformerWeights, KVCache, PagedKVCache, RavenKVCache, ForwardContext (+ sparse buffers + lora_buf), PrefillContext, forward, forward_base, forward_prefill, forward_paged, forward_raven, generate, generate_into, generate_batch, generate_with_prefill
+  speculative/      SOLID decomposition:
+    mod.rs          Re-exports
+    types.rs        TreeNode, DraftResult, ConstraintPruner trait, ScreeningPruner trait, NoPruner, NoScreeningPruner, BinaryScreeningPruner, SpeculativeContext, DDTreeBranchCache
+    sampling.rs     sample_from_distribution, sample_residual_distribution, sample_residual_distribution_into
+    dd_tree.rs      build_dd_tree, build_dd_tree_pruned, build_dd_tree_screened, TreeBuilder, extract_parent_tokens, extract_parent_tokens_into
+    dflash.rs       dflash_predict, dflash_predict_with, dflash_predict_ar, dflash_predict_ar_with, dflash_predict_parallel
+    verifier.rs     SpeculativeVerifier trait, SimulatedVerifier, LeviathanVerifier
+    step.rs         speculative_step, speculative_step_verifier, speculative_step_rollback, speculative_step_conditioned
+    prefill.rs      PrefillScorer trait, AttentionScorer, compress_prompt, speculative_prefill, score_with
+    ppot/           PPoT (Plans 026 + 027)
+      mod.rs        Module root, public API re-exports
+      types.rs      TokenRule enum, PpotConfig
+      entropy.rs    token_entropy, identify_high_entropy_positions, identify_positions_adaptive
+      resample.rs   ppot_rescue, ppot_rescue_adaptive, ppot_resample_multi_strategy
+      knowledge.rs  RejectionInsight, SessionKnowledge
+      rank.rs       rank_by_consistency, select_best_variant
+    sudoku_pruner.rs  SudokuPruner *
+    bandit.rs         BanditPruner, BanditSession, BanditEnv, BernoulliEnv, GaussianEnv, BanditStrategy, BanditStats ♭
+    trial_log.rs      TrialLog, TrialRecord, TrialSummary ♭
+    absorb_compress.rs AbsorbCompress trait, AbsorbCompressLayer, CompressConfig ♭
+    hot_swap.rs       HotSwapPruner ♭
+    regression.rs     RegressionSuite, GoldenTrace, RegressionResult, ReplayReward ♭
+  tokenizer/        BPE tokenizer (encode/decode/train, Config::bpe())
+  validator/        SynPruner + partial parser ‡
+  percepta.rs       Vec2, KVCache2D, Sudoku9x9, SymbolicValidator, StreamingSolver, SolveEvent
+  benchmark.rs      BenchResult, run_all, save_results_csv
+  plot.rs           plot_results → PNG
+
+  * behind --features sudoku
+  ∘ behind --features sparse_mlp
+  ○ behind --features ppot
+  ‡ behind --features validator
+  ♭ behind --features bandit
 ```
 
 ## Feature Flags
 
-```toml
-[features]
-default = []
-sudoku = []                         # SudokuPruner + sudoku examples
-validator = ["syn", "proc-macro2"]  # BPE tokenizer + SynPruner
-sparse_mlp = []                     # TwELL-inspired sparse MLP matmul
-ppot = []                           # PPoT logit-parameterized CPU resampling
-full = ["sudoku", "validator", "sparse_mlp", "ppot"]
-```
+| Flag | Dependencies | Description |
+|------|-------------|-------------|
+| `sudoku` | — | SudokuPruner constraint pruning + examples |
+| `validator` | `syn`, `proc-macro2` | SynPruner + partial parser |
+| `sparse_mlp` | — | TwELL-inspired sparse MLP matmul (Plan 022) |
+| `ppot` | — | PPoT logit-parameterized CPU resampling + adaptive rescue (Plans 026 + 027) |
+| `bandit` | — | Multi-armed bandit + HL infrastructure: TrialLog, AbsorbCompress, HotSwapPruner, RegressionSuite (Plans 030–032) |
+| `bomber` | `bandit` | Bomberman HL arena (Plan 033) |
+| `full` | all above | Enable all features |
 
 ## Quick Start
 
 ```bash
-cargo test --quiet                           # Run all 240+ tests
-cargo run --release                          # Run benchmark suite (includes Leviathan verification)
-cargo run --example sudoku_9x9 --features sudoku               # Sudoku streaming solver
-cargo run --example sudoku_speculative --features sudoku       # DDTree pruning demo
-cargo run --example sudoku_tui --features sudoku               # TUI visualization
+cargo test --quiet --workspace --all-features   # Run all 276+ tests
+cargo run --release                             # Run benchmark suite (includes Leviathan verification)
+cargo run --example sudoku_01_9x9 --features sudoku           # Sudoku streaming solver
+cargo run --example sudoku_02_speculative --features sudoku   # DDTree pruning demo
+cargo run --example sudoku_03_tui --features sudoku           # TUI visualization
 cargo run --example validator_demo --features validator        # SynPruner + DDTree pipeline
 cargo run --example py2rs_hello                                 # BPE + bidirectional prefill demo
 ```
@@ -85,58 +104,22 @@ cargo run --example py2rs_hello                                 # BPE + bidirect
 
 1. **Zero allocations on hot paths** — all buffers pre-allocated in `SpeculativeContext` and `ForwardContext`
 2. **Feature-gated modularity** — domain code (sudoku, validator) never pollutes core
-3. **Trait-based strategy** — `ConstraintPruner`, `SpeculativeVerifier`, `PrefillScorer` for swappable behavior
+3. **Trait-based strategy** — `ConstraintPruner`, `SpeculativeVerifier`, `PrefillScorer`, `ScreeningPruner` for swappable behavior
 4. **SOLID module decomposition** — each file < 1024 lines, single responsibility
 5. **`mod.rs` for index only**, minimal `main.rs`/`lib.rs`
 6. **Unsafe only in verified hot-path kernels** with `get_unchecked` + `#[inline(always)]`
-
-## Architecture Diagram
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                     Benchmark Runner                     │
-│                      (main.rs)                          │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  ┌──────────────┐    ┌──────────────────────────────┐  │
-│  │  Transformer  │    │      Speculative Pipeline     │  │
-│  │  (forward,    │◄──►│  ┌─────┐ ┌───────┐ ┌──────┐  │  │
-│  │   generate,   │    │  │DFlash│→│DDTree │→│Verify│  │  │
-│  │   weights)    │    │  └─────┘ └───────┘ └──────┘  │  │
-│  └──────────────┘    └──────────────────────────────┘  │
-│         │                        │                      │
-│         ▼                        ▼                      │
-│  ┌──────────────┐    ┌──────────────────────────────┐  │
-│  │  Types/Kernel │    │     Constraint Pruners        │  │
-│  │  (matmul,     │    │  ┌────────┐ ┌──────────────┐ │  │
-│  │   softmax,    │    │  │Sudoku  │ │Validator(plan)│ │  │
-│  │   rmsnorm)    │    │  └────────┘ └──────────────┘ │  │
-│  └──────────────┘    └──────────────────────────────┘  │
-│                                                         │
-│  ┌──────────────┐    ┌──────────────────────────────┐  │
-│  │  Percepta     │    │       Validator / BPE          │  │
-│  │  (Sudoku      │    │  (SynPruner, PartialParser,    │  │
-│  │   solvers)    │    │   BPE tokenizer)               │  │
-│  └──────────────┘    └──────────────────────────────┘  │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-```
 
 ## Related Documentation
 
 | # | Document | Topic |
 |---|----------|-------|
-| 01 | `01_sudoku_9x9_example.md` | 9×9 Sudoku streaming solver |
-| 02 | `02_dynamic_pruning.md` | Dynamic constraint pruning |
-| 03 | `03_perf_optimization.md` | Performance optimization notes |
-| 04 | `04_leviathan_distill.md` | Leviathan verification distillation |
-| 05 | `05_speculative_module_refactor.md` | Speculative module design |
-| 06 | `06_sudoku_tui.md` | TUI visualization |
-| 07 | `07_compiler_in_the_loop_validator.md` | Validator compiler-in-the-loop |
+| 01 | `01_overview.md` | Overview & reference card (this file) |
+| 02 | `02_architecture.md` | Architecture details (forward pass, routers, LoRA) |
+| 03 | `03_speculative_decoding.md` | Speculative decoding deep-dive |
+| 04 | `04_performance.md` | Performance engineering & benchmarks |
+| 05 | `05_sudoku.md` | Sudoku solvers |
+| 06 | `06_validator.md` | Constraint validator + SynPruner |
+| 07 | *(reserved)* | — |
 | 08 | `08_lucebox_techniques.md` | LuceBox techniques |
-| 09 | — | *(reserved)* |
-| 10 | `06_validator.md` | Constraint validator + SynPruner |
-| 11 | `04_performance.md` | Performance engineering |
-| 12 | `05_sudoku.md` | Sudoku solvers |
-| 13 | `02_architecture.md` | Architecture details |
-| 14 | `03_speculative_decoding.md` | Speculative decoding deep-dive |
+| 09 | `09_heuristic-learning.md` | Heuristic learning, bandit, HL arena |
+| 10 | `10_bomber_arena.md` | Bomberman HL arena (Plan 033) |
