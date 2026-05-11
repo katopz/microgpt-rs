@@ -70,6 +70,13 @@ pub trait SpeculativeVerifier: Send + Sync {
 
 📖 See [`.docs/02_architecture.md`](.docs/02_architecture.md) for full details.
 
+### Early Exit & Dynamic Budget (Plan 026)
+
+- **`Config::with_overrides()`** — Apply per-domain inference budget from TOML. `None` fields unchanged, `Some` fields override.
+- **`early_exit_patience`** / **`early_exit_gap`** — Confidence-gap early exit in DDTree Phase C. When the best path dominates for `patience` consecutive iterations with a score gap > `gap`, expansion stops early.
+- **`InferenceOverrides`** DTO — Plain struct (no serde) for dependency-free budget injection.
+- **Default**: `early_exit_patience = 0`, `early_exit_gap = 0.0` — zero behavioral change.
+
 ## 🧠 Deterministic Validator
 
 The core idea: LLMs draft tokens from semantic probability, but can't natively enforce hard constraints. A deterministic rules engine sits between draft and verification:

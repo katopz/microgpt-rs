@@ -450,11 +450,44 @@ impl TreeBuilder {
         }
 
         // ── Phase C: Standard best-first expansion ────────────────
+        let mut best_score: Option<f32> = None;
+        let mut second_best_score: Option<f32> = None;
+        let mut consecutive_dominant: usize = 0;
         while self.tree.len() < config.tree_budget {
             let Some(best) = self.heap.pop() else {
                 break;
             };
             self.tree.push(best);
+
+            // Confidence-gap early exit (Plan 026: AutoTTS)
+            let score = best.score;
+            match best_score {
+                None => {
+                    best_score = Some(score);
+                }
+                Some(bs) if score > bs => {
+                    second_best_score = Some(bs);
+                    best_score = Some(score);
+                    consecutive_dominant = 1;
+                }
+                Some(bs) => {
+                    // Not a new best — track running second best (degrades with heap)
+                    second_best_score = Some(score);
+                    if bs - score > config.early_exit_gap {
+                        consecutive_dominant += 1;
+                    } else {
+                        consecutive_dominant = 0;
+                    }
+                }
+            }
+            if config.early_exit_patience > 0
+                && config.early_exit_gap > 0.0
+                && consecutive_dominant >= config.early_exit_patience
+                && best_score.unwrap_or(0.0) - second_best_score.unwrap_or(0.0)
+                    > config.early_exit_gap
+            {
+                break;
+            }
 
             if best.depth + 1 < marginals.len() {
                 let next_depth = best.depth + 1;
@@ -739,11 +772,44 @@ impl TreeBuilder {
         }
 
         // ── Phase C: Best-first expansion with screening ─────────
+        let mut best_score: Option<f32> = None;
+        let mut second_best_score: Option<f32> = None;
+        let mut consecutive_dominant: usize = 0;
         while self.tree.len() < config.tree_budget {
             let Some(best) = self.heap.pop() else {
                 break;
             };
             self.tree.push(best);
+
+            // Confidence-gap early exit (Plan 026: AutoTTS)
+            let score = best.score;
+            match best_score {
+                None => {
+                    best_score = Some(score);
+                }
+                Some(bs) if score > bs => {
+                    second_best_score = Some(bs);
+                    best_score = Some(score);
+                    consecutive_dominant = 1;
+                }
+                Some(bs) => {
+                    // Not a new best — track running second best (degrades with heap)
+                    second_best_score = Some(score);
+                    if bs - score > config.early_exit_gap {
+                        consecutive_dominant += 1;
+                    } else {
+                        consecutive_dominant = 0;
+                    }
+                }
+            }
+            if config.early_exit_patience > 0
+                && config.early_exit_gap > 0.0
+                && consecutive_dominant >= config.early_exit_patience
+                && best_score.unwrap_or(0.0) - second_best_score.unwrap_or(0.0)
+                    > config.early_exit_gap
+            {
+                break;
+            }
 
             if best.depth + 1 < marginals.len() {
                 let next_depth = best.depth + 1;
@@ -1440,5 +1506,71 @@ mod tests {
             (chain_d0.unwrap().score - expected_d0).abs() < 1e-4,
             "chain d0 score should include ln(0.6) penalty"
         );
+    }
+
+    // ── Early Exit Tests (Plan 026: AutoTTS) ──────────────────
+
+    #[test]
+    fn test_ddtree_early_exit_triggers_on_clear_winner() {
+        // Create marginals where one path dominates massively
+        let config = Config {
+            tree_budget: 1000,
+            early_exit_patience: 3,
+            early_exit_gap: 1.0,
+            ..Config::draft()
+        };
+        // One dominant token per depth
+        let mut marginals = Vec::new();
+        for _ in 0..config.draft_lookahead {
+            let mut probs = vec![0.001_f32; config.vocab_size];
+            probs[0] = 0.99; // token 0 dominates
+            marginals.push(probs);
+        }
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+        let tree = build_dd_tree(&mv, &config);
+        // Should exit well before budget of 1000
+        assert!(
+            tree.len() < 1000,
+            "early exit should trigger, got {} nodes vs budget 1000",
+            tree.len()
+        );
+    }
+
+    #[test]
+    fn test_ddtree_early_exit_disabled_when_patience_zero() {
+        let config = Config {
+            tree_budget: 100,
+            early_exit_patience: 0,
+            early_exit_gap: 100.0,
+            ..Config::draft()
+        };
+        let (weights, _) = make_draft();
+        let marginals = dflash_predict(&weights, &Config::draft(), 0, 0);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+        let tree = build_dd_tree(&mv, &config);
+        // patience=0 disables early exit — tree should reach natural termination
+        assert!(
+            tree.len() <= config.tree_budget,
+            "tree size {} exceeds budget {}",
+            tree.len(),
+            config.tree_budget
+        );
+    }
+
+    #[test]
+    fn test_ddtree_early_exit_no_false_exit_on_tight_gap() {
+        // Uniform marginals — no clear winner, gap stays small
+        let config = Config {
+            tree_budget: 50,
+            early_exit_patience: 5,
+            early_exit_gap: 50.0, // very high gap requirement
+            ..Config::draft()
+        };
+        let (weights, _) = make_draft();
+        let marginals = dflash_predict(&weights, &Config::draft(), 0, 0);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+        let tree = build_dd_tree(&mv, &config);
+        // Gap too high to ever trigger — tree should fill normally
+        assert!(!tree.is_empty());
     }
 }

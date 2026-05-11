@@ -24,6 +24,9 @@ pub struct Config {
     pub screening_threshold: f32,
     // Sparse MLP (Plan 022)
     pub sparse_threshold: f32,
+    // Early exit (Plan 026: AutoTTS)
+    pub early_exit_patience: usize,
+    pub early_exit_gap: f32,
 }
 
 impl Config {
@@ -51,6 +54,8 @@ impl Config {
             lora_targets: Vec::new(),
             screening_threshold: 0.0,
             sparse_threshold: 0.8,
+            early_exit_patience: 0,
+            early_exit_gap: 0.0,
         }
     }
 
@@ -94,6 +99,8 @@ impl Config {
             lora_targets: Vec::new(),
             screening_threshold: 0.0,
             sparse_threshold: 0.8,
+            early_exit_patience: 0,
+            early_exit_gap: 0.0,
         }
     }
 
@@ -121,6 +128,8 @@ impl Config {
             lora_targets: Vec::new(),
             screening_threshold: 0.0,
             sparse_threshold: 0.8,
+            early_exit_patience: 0,
+            early_exit_gap: 0.0,
         }
     }
 
@@ -146,6 +155,8 @@ impl Config {
             lora_targets: Vec::new(),
             screening_threshold: 0.0,
             sparse_threshold: 0.8,
+            early_exit_patience: 0,
+            early_exit_gap: 0.0,
         }
     }
 
@@ -173,6 +184,8 @@ impl Config {
             lora_targets: Vec::new(),
             screening_threshold: 0.0,
             sparse_threshold: 0.8,
+            early_exit_patience: 0,
+            early_exit_gap: 0.0,
         }
     }
 
@@ -199,6 +212,8 @@ impl Config {
             lora_targets: Vec::new(),
             screening_threshold: 0.0,
             sparse_threshold: 0.8,
+            early_exit_patience: 0,
+            early_exit_gap: 0.0,
         }
     }
 
@@ -224,6 +239,59 @@ impl Config {
         }
         Ok(())
     }
+
+    /// Apply per-domain inference overrides, returning a new Config.
+    ///
+    /// `None` fields are left unchanged; `Some` fields replace the current value.
+    /// Used by the router to inject domain-specific budgets from TOML config.
+    pub fn with_overrides(&self, overrides: &InferenceOverrides) -> Self {
+        let mut c = self.clone();
+        if let Some(v) = overrides.tree_budget {
+            c.tree_budget = v;
+        }
+        if let Some(v) = overrides.draft_lookahead {
+            c.draft_lookahead = v;
+        }
+        if let Some(v) = overrides.parallel_threshold {
+            c.parallel_threshold = v;
+        }
+        if let Some(v) = overrides.screening_threshold {
+            c.screening_threshold = v;
+        }
+        if let Some(v) = overrides.temperature {
+            c.temperature = v;
+        }
+        if let Some(v) = overrides.sparse_threshold {
+            c.sparse_threshold = v;
+        }
+        if let Some(v) = overrides.early_exit_patience {
+            c.early_exit_patience = v;
+        }
+        if let Some(v) = overrides.early_exit_gap {
+            c.early_exit_gap = v;
+        }
+        c
+    }
+}
+
+/// Override DTO for applying per-domain inference budget to a [`Config`].
+///
+/// All fields are `Option` — `None` means "keep Config's current value".
+/// This is a plain struct (no serde) to keep `microgpt-rs` dependency-free
+/// from router/TOML types. Conversion from the router's `InferenceBudget`
+/// happens at the router boundary.
+///
+/// See Plan 026 (AutoTTS Dynamic Inference Budget).
+#[derive(Debug, Clone, Default)]
+pub struct InferenceOverrides {
+    pub tree_budget: Option<usize>,
+    pub draft_lookahead: Option<usize>,
+    pub parallel_threshold: Option<usize>,
+    pub screening_threshold: Option<f32>,
+    pub temperature: Option<f32>,
+    pub sparse_threshold: Option<f32>,
+    pub early_exit_patience: Option<usize>,
+    pub early_exit_gap: Option<f32>,
 }
 
 impl Default for Config {
@@ -806,4 +874,71 @@ fn read_u16_le(data: &[u8], offset: &mut usize) -> Result<u16, String> {
     );
     *offset += 2;
     Ok(val)
+}
+
+#[cfg(test)]
+mod tests_types {
+    use super::*;
+
+    #[test]
+    fn test_with_overrides_none_unchanged() {
+        let config = Config::draft();
+        let overrides = InferenceOverrides::default();
+        let result = config.with_overrides(&overrides);
+        assert_eq!(result.tree_budget, config.tree_budget);
+        assert_eq!(result.draft_lookahead, config.draft_lookahead);
+        assert_eq!(result.temperature, config.temperature);
+        assert_eq!(result.early_exit_patience, config.early_exit_patience);
+        assert_eq!(result.early_exit_gap, config.early_exit_gap);
+    }
+
+    #[test]
+    fn test_with_overrides_some_applied() {
+        let config = Config::draft();
+        let overrides = InferenceOverrides {
+            tree_budget: Some(5000),
+            draft_lookahead: Some(12),
+            temperature: None,
+            early_exit_patience: Some(5),
+            early_exit_gap: Some(2.0),
+            ..Default::default()
+        };
+        let result = config.with_overrides(&overrides);
+        assert_eq!(result.tree_budget, 5000);
+        assert_eq!(result.draft_lookahead, 12);
+        assert_eq!(result.temperature, config.temperature); // None → unchanged
+        assert_eq!(result.early_exit_patience, 5);
+        assert_eq!(result.early_exit_gap, 2.0);
+    }
+
+    #[test]
+    fn test_with_overrides_all_fields() {
+        let config = Config::micro();
+        let overrides = InferenceOverrides {
+            tree_budget: Some(9999),
+            draft_lookahead: Some(15),
+            parallel_threshold: Some(256),
+            screening_threshold: Some(0.3),
+            temperature: Some(0.1),
+            sparse_threshold: Some(0.5),
+            early_exit_patience: Some(10),
+            early_exit_gap: Some(3.0),
+        };
+        let result = config.with_overrides(&overrides);
+        assert_eq!(result.tree_budget, 9999);
+        assert_eq!(result.draft_lookahead, 15);
+        assert_eq!(result.parallel_threshold, 256);
+        assert_eq!(result.screening_threshold, 0.3);
+        assert_eq!(result.temperature, 0.1);
+        assert_eq!(result.sparse_threshold, 0.5);
+        assert_eq!(result.early_exit_patience, 10);
+        assert_eq!(result.early_exit_gap, 3.0);
+    }
+
+    #[test]
+    fn test_early_exit_defaults_disabled() {
+        let config = Config::draft();
+        assert_eq!(config.early_exit_patience, 0);
+        assert_eq!(config.early_exit_gap, 0.0);
+    }
 }

@@ -12,6 +12,7 @@
 #   lora                — path to a LoRA adapter file (relative to pruner dir)
 #   truncation          — context truncation policy: { mode = "tokens"|"bytes", limit = N }
 #   reasoning_retention — reasoning retention: { preserve = bool, max_per_turn = N }
+#   inference           — per-domain inference budget (Plan 026): { tree_budget, draft_lookahead, beta, ... }
 
 [[domain]]
 name = "sudoku"
@@ -29,6 +30,12 @@ keywords = ["rust", "cargo", "axum", "tokio", "trait", "impl", "compile"]
 pruner = "syn_validator.wasm"
 truncation = { mode = "tokens", limit = 10000 }
 
+[domain.inference]
+tree_budget = 3000
+draft_lookahead = 10
+early_exit_patience = 5
+early_exit_gap = 2.0
+
 [[domain]]
 name = "py2rs"
 keywords = ["python", "rewrite", "fastapi", "flask", "translate"]
@@ -38,7 +45,16 @@ writer_lora = "rust_writer.bin"
 truncation = { mode = "tokens", limit = 8000 }
 reasoning_retention = { preserve = true, max_per_turn = 500 }
 
+# AutoTTS β parameterization — derives all inference knobs from single scalar
+[domain.inference]
+beta = 0.8
+
 [[domain]]
 name = "general"
 keywords = []
 native_pruner = "no_pruner"
+
+# Explicit low budget for trivial prompts
+[domain.inference]
+tree_budget = 16
+draft_lookahead = 3
