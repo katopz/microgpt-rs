@@ -894,12 +894,15 @@ fn monopoly_app(seed: u64) -> World {
   - Output format matching bomber_01_arena.rs style
 
 - [x] **Task 11: TUI Example** (`examples/monopoly_02_tui.rs`)
-  - ratatui board rendering with colored property groups
-  - Player stats panel (cash, properties, bankrupt status)
+  - Visual board perimeter: 40 squares on 11×11 grid with colored cells
+  - Walk animation: step-by-step player movement (like bomber_02_tui walk effect)
+  - Frame-based replay: pre-generated frames with walk (80ms) and event (300ms) timing
+  - Interior stats: player cash/properties/status + dice faces ⚀⚁⚂⚃⚄⚅
+  - Deferred salary: visually applied when player walks past GO (fixed old double-count bug)
   - Event log with scrollable history, current event highlighted
-  - Turn-by-turn or fast-forward controls (Space/←/→/F/A/Q)
-  - Pre-computed game replay via `replay_to(index)` state reconstruction
-  - 695 lines, compiles cleanly
+  - Controls: Space/→ step, A auto-play, F fast-forward, Home/End jump, Q quit
+  - Property group colors (bg/fg), ownership highlighting, player emoji overlay
+  - 1127 lines, compiles cleanly with zero clippy warnings
 
 - [x] **Task 12: HL Proof Example** (`examples/monopoly_03_hl_proof.rs`)
   - Run 1000 games comparing HL vs Validator vs Greedy vs Random
