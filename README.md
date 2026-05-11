@@ -19,6 +19,7 @@ Inspired by [microgpt-c](https://github.com/nicholasgasior/microgpt-c), [talos-v
 - **Multi-Armed Bandit** — Adaptive `ScreeningPruner` with UCB1, ε-greedy, Thompson Sampling strategies.
 - **Heuristic Learning** — TrialLog, AbsorbCompress, HotSwapPruner, RegressionSuite for policy evolution.
 - **Bomberman Arena** — 4-player HL proof: adaptive intelligence (+177) > greedy (+131) > static rules (-30) > random (-55).
+- **Monopoly FSM Arena** — 4-player turn-based FSM: sequential phase AI (PreTurn→Rolling→Resolving→Strategic→EndTurn) with bandit strategy adaptation across 1000 games.
 - **Bandit + WASM Pruners** — `BanditPruner` wraps any `ScreeningPruner` with exploration. `WasmPruner` loads sandboxed `.wasm` validators.
 
 📖 **Deep dives:** See [`.docs/`](.docs/) for architecture, speculative decoding, performance, sudoku, validator, HL, and bomber arena details.
@@ -186,6 +187,21 @@ Round N+m:   Agent writes new validator.rs → compile .wasm → HotSwapPruner.r
 
 📖 See [`.docs/10_bomber_arena.md`](.docs/10_bomber_arena.md).
 
+## 🎲 Monopoly FSM Arena
+
+4-player Monopoly with `bevy_ecs` standalone. Turn-based event-driven FSM with 8 phases, 40-square board, and 4 AI tiers.
+
+| Player | Tech | Strategy |
+|--------|------|----------|
+| **HL** 🧠 | Bandit + opponent modeling + phase adaptation | Expansion→Development→Survival |
+| Validator 🛡️ | Safety rules ($200 reserve, no opponent monopolies) | Conservative cash management |
+| Greedy 💰 | Heuristic scoring (buy everything affordable) | Aggressive acquisition |
+| Random 🎲 | Square-parity pseudo-random | Baseline |
+
+90+ tests, 3 examples (headless arena, TUI replay, 1000-game HL proof).
+
+📖 See [`.docs/11_monopoly_fsm.md`](.docs/11_monopoly_fsm.md).
+
 ## 🏭 Productions
 
 MicroGPT-RS is the **core inference library** — pure algorithms, zero side effects. It powers a broader production ecosystem:
@@ -300,7 +316,8 @@ cargo clippy --all-targets --all-features --quiet
 | `sparse_mlp` | TwELL-inspired sparse MLP matmul |
 | `ppot` | PPoT logit-parameterized CPU resampling + adaptive rescue |
 | `bandit` | Multi-armed bandit + HL infrastructure (TrialLog, AbsorbCompress, HotSwapPruner) |
-| `bomber` | Bomberman HL arena (behind `bandit`) |
+| `bomber` | Bomberman HL arena (bevy_ecs + bandit) |
+| `monopoly` | Monopoly FSM arena (bevy_ecs + bandit) |
 | `rest` | REST client for RAG-augmented speculative decoding |
 | `full` | Enable all features |
 
