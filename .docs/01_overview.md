@@ -74,7 +74,8 @@ src/
 | `sparse_mlp` | — | TwELL-inspired sparse MLP matmul (Plan 022) |
 | `ppot` | — | PPoT logit-parameterized CPU resampling + adaptive rescue (Plans 026 + 027) |
 | `bandit` | — | Multi-armed bandit + HL infrastructure: TrialLog, AbsorbCompress, HotSwapPruner, RegressionSuite (Plans 030–032) |
-| `bomber` | `bandit` | Bomberman HL arena (Plan 033) |
+| `bomber` | `bevy_ecs`, `bandit` | Bomberman HL arena (Plan 033) |
+| `monopoly` | `bevy_ecs`, `bandit` | Monopoly FSM arena (Plan 035) |
 | `full` | all above | Enable all features |
 
 ## Quick Start
@@ -123,3 +124,4 @@ cargo run --example py2rs_hello                                 # BPE + bidirect
 | 08 | `08_lucebox_techniques.md` | LuceBox techniques |
 | 09 | `09_heuristic-learning.md` | Heuristic learning, bandit, HL arena |
 | 10 | `10_bomber_arena.md` | Bomberman HL arena (Plan 033) |
+| 11 | `11_monopoly_fsm.md` | Monopoly FSM arena (Plan 035) |
