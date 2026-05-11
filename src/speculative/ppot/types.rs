@@ -182,6 +182,16 @@ pub struct PpotConfig {
     /// Whether adaptive rescue is enabled (requires PPoT enabled).
     pub adaptive_enabled: bool,
 
+    // ── Plan 036: Review Loop ──
+    /// Maximum review iterations before giving up (paper's rN).
+    /// 0 = disabled, 1 = single rescue attempt, 2+ = structured review loop.
+    pub max_review_loops: usize,
+    /// Whether to carry rejection reason between review loops.
+    pub inject_rejection_feedback: bool,
+    /// Minimum benefit-risk ratio to continue reviewing.
+    /// Below this threshold, stop reviewing (reviewer is net-negative).
+    pub min_review_benefit_ratio: f64,
+
     /// Pre-computed support sets for each TokenRule, indexed by `TokenRule::index()`.
     /// Built once from `vocab_size`, avoids realloc per sample.
     cached_support: Option<Box<[Vec<usize>; 5]>>,
@@ -203,6 +213,10 @@ impl Default for PpotConfig {
             threshold_raise_on_success: 0.05,
             max_insights: 64,
             adaptive_enabled: true,
+
+            max_review_loops: 0,
+            inject_rejection_feedback: false,
+            min_review_benefit_ratio: 2.0,
             cached_support: None,
         }
     }
@@ -224,6 +238,19 @@ impl PpotConfig {
             enabled: true,
             rule: TokenRule::Digit,
             entropy_threshold: 0.3,
+            ..Self::default()
+        }
+    }
+
+    /// PPoT config with review loop enabled (Plan 036).
+    ///
+    /// Uses ProgressiveFeedback with 2 loops (paper's best performer).
+    pub fn with_review_loop(max_loops: usize) -> Self {
+        Self {
+            enabled: true,
+            max_review_loops: max_loops,
+            inject_rejection_feedback: true,
+            min_review_benefit_ratio: 2.0,
             ..Self::default()
         }
     }

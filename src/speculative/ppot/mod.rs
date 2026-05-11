@@ -67,3 +67,8 @@ pub use knowledge::{ErrorKind, RejectionInsight, SessionKnowledge};
 pub use rank::{rank_by_consistency, rank_by_consistency_weighted, select_best_variant};
 
 pub use resample::{ppot_resample_multi_strategy, ppot_rescue_adaptive};
+
+// ── Re-exports: Plan 036 Review Loop ───────────────────────────
+
+#[cfg(feature = "bandit")]
+pub use resample::ppot_rescue_reviewed;

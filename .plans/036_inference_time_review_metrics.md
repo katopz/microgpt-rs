@@ -38,7 +38,7 @@ Without these metrics, you cannot tell if your `BanditPruner` or `ScreeningPrune
 
 ## Tasks
 
-- [ ] **Task 1: ReviewMetrics struct** (`src/pruners/review_metrics.rs`)
+- [x] **Task 1: ReviewMetrics struct** (`src/pruners/review_metrics.rs`)
   - Struct `ReviewMetrics` with atomic counters:
     - `helpful: AtomicU64` — base was wrong, reviewer fixed it
     - `harmful: AtomicU64` — base was right, reviewer broke it
@@ -57,7 +57,7 @@ Without these metrics, you cannot tell if your `BanditPruner` or `ScreeningPrune
   - Tests: record classifications, ratio calculation, zero-harmful edge case, display format
   - ~120 lines
 
-- [ ] **Task 2: Integrate ReviewMetrics into TrialLog** (`src/pruners/trial_log.rs` extension)
+- [x] **Task 2: Integrate ReviewMetrics into TrialLog** (`src/pruners/trial_log.rs` extension)
   - Add `review_metrics: Option<ReviewMetrics>` field to `TrialLog`
   - `TrialLog::with_metrics(self) -> Self` — enable metrics tracking (builder pattern)
   - Extend `TrialRecord` with optional fields:
@@ -70,7 +70,7 @@ Without these metrics, you cannot tell if your `BanditPruner` or `ScreeningPrune
   - Tests: append_with_review updates counters, metrics None when not enabled, summary matches manual calculation
   - ~60 lines added
 
-- [ ] **Task 3: ReviewStrategy enum** (`src/pruners/review_metrics.rs`)
+- [x] **Task 3: ReviewStrategy enum** (`src/pruners/review_metrics.rs`)
   - Enum mirroring the paper's three mechanisms:
     ```rust
     pub enum ReviewStrategy {
@@ -90,7 +90,7 @@ Without these metrics, you cannot tell if your `BanditPruner` or `ScreeningPrune
   - Tests: default, display format
   - ~40 lines
 
-- [ ] **Task 4: BenefitRatioGate for AbsorbCompress** (`src/pruners/absorb_compress.rs` extension)
+- [x] **Task 4: BenefitRatioGate for AbsorbCompress** (`src/pruners/absorb_compress.rs` extension)
   - Add `min_benefit_ratio: f64` field to `CompressConfig` (default: `2.0` — conservative)
   - Extend `AbsorbCompress::should_compress()` to accept `&ReviewMetrics`:
     - Returns `false` if metrics show `benefit_ratio() < min_benefit_ratio`
@@ -100,7 +100,7 @@ Without these metrics, you cannot tell if your `BanditPruner` or `ScreeningPrune
   - Tests: compress blocked when ratio below threshold, compress proceeds when ratio above, blind version unaffected
   - ~40 lines added
 
-- [ ] **Task 5: ReviewLoopConfig for PPoT** (`src/speculative/ppot/types.rs` extension)
+- [x] **Task 5: ReviewLoopConfig for PPoT** (`src/speculative/ppot/types.rs` extension)
   - Add fields to `PpotConfig`:
     ```rust
     /// Maximum review iterations before giving up (paper's rN).
@@ -117,7 +117,7 @@ Without these metrics, you cannot tell if your `BanditPruner` or `ScreeningPrune
   - Tests: default values, custom config
   - ~30 lines added
 
-- [ ] **Task 6: Structured review loop in PPoT rescue** (`src/speculative/ppot/resample.rs` extension)
+- [x] **Task 6: Structured review loop in PPoT rescue** (`src/speculative/ppot/resample.rs` extension)
   - New function `ppot_rescue_reviewed()`:
     ```rust
     pub fn ppot_rescue_reviewed(
@@ -141,7 +141,7 @@ Without these metrics, you cannot tell if your `BanditPruner` or `ScreeningPrune
   - Tests: returns path on first success, loops on failure, breaks when ratio below threshold, disabled when max_loops=0
   - ~80 lines
 
-- [ ] **Task 7: Wire ReviewMetrics into BanditSession** (`src/pruners/bandit.rs` extension)
+- [x] **Task 7: Wire ReviewMetrics into BanditSession** (`src/pruners/bandit.rs` extension)
   - Add `review_metrics: Option<ReviewMetrics>` field to `BanditSession`
   - `BanditSession::with_metrics(self, metrics: ReviewMetrics) -> Self` — builder
   - In `BanditSession::run()`:
@@ -152,7 +152,7 @@ Without these metrics, you cannot tell if your `BanditPruner` or `ScreeningPrune
   - Tests: metrics populated after run, ratio matches manual calculation
   - ~60 lines added
 
-- [ ] **Task 8: Demo — ReviewMetrics with Bandit** (`examples/review_01_metrics.rs`)
+- [x] **Task 8: Demo — ReviewMetrics with Bandit** (`examples/review_01_metrics.rs`)
   - Uses `BernoulliEnv` (5 arms) with `BanditSession`
   - Enables `ReviewMetrics` via `BanditSession::with_metrics()`
   - Runs 1000 episodes with `TrialLog` + metrics
@@ -163,14 +163,14 @@ Without these metrics, you cannot tell if your `BanditPruner` or `ScreeningPrune
   - Demonstrates: "the bandit reviewer fixed X% of random errors, broke Y% of correct picks"
   - ~150 lines
 
-- [ ] **Task 9: Benchmark — ReviewMetrics overhead** (`tests/bench_review_metrics.rs`)
+- [x] **Task 9: Benchmark — ReviewMetrics overhead** (`tests/bench_review_metrics.rs`)
   - Benchmark `ReviewMetrics::record()` throughput (atomic increments)
   - Benchmark `BanditPruner::relevance()` with and without metrics enabled
   - Benchmark `ppot_rescue_reviewed()` vs `ppot_rescue()` — measure loop overhead
   - Target: `record()` adds <1ns (single atomic increment path), relevance() overhead <2%, rescue_reviewed() overhead proportional to max_loops
   - ~100 lines
 
-- [ ] **Task 10: Update docs**
+- [x] **Task 10: Update docs**
   - Update `src/pruners/mod.rs` with `pub mod review_metrics;`
   - Update `README.md` with "Inference-Time Review Metrics" section referencing arXiv:2604.27233
   - Update `.docs/09_heuristic_learning.md` with benefit-risk ratio guidance

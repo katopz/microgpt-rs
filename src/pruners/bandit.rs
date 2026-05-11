@@ -32,8 +32,10 @@
 //! ```
 
 use std::fmt;
+use std::sync::Arc;
 
 use super::absorb_compress::AbsorbCompress;
+use super::review_metrics::ReviewMetrics;
 use super::trial_log::{TrialLog, TrialRecord};
 use crate::speculative::types::ScreeningPruner;
 use crate::types::Rng;
@@ -602,6 +604,8 @@ pub struct BanditSession<E: BanditEnv> {
     stats: BanditStats,
     cumulative_reward: f32,
     cumulative_regret: f32,
+    /// Optional review metrics for inference-time feedback tracking (Plan 036).
+    review_metrics: Option<Arc<ReviewMetrics>>,
 }
 
 impl<E: BanditEnv> BanditSession<E> {
@@ -614,7 +618,18 @@ impl<E: BanditEnv> BanditSession<E> {
             stats: BanditStats::new(num_arms),
             cumulative_reward: 0.0,
             cumulative_regret: 0.0,
+            review_metrics: None,
         }
+    }
+
+    /// Enable review metrics tracking (Plan 036, builder pattern).
+    ///
+    /// After each episode, records whether the bandit's pick was the
+    /// optimal arm vs whether a simulated random pick would have been.
+    /// The same `Arc<ReviewMetrics>` can be shared across components.
+    pub fn with_metrics(mut self, metrics: Arc<ReviewMetrics>) -> Self {
+        self.review_metrics = Some(metrics);
+        self
     }
 
     /// Select an arm based on the current strategy and stats.
@@ -701,6 +716,14 @@ impl<E: BanditEnv> BanditSession<E> {
 
             self.decay_epsilon();
 
+            // Record review metrics (Plan 036)
+            if let Some(ref metrics) = self.review_metrics {
+                let reviewed_correct = arm == optimal_arm;
+                // Simulate base (random) correctness deterministically
+                let base_correct = episode % self.env.num_arms() == optimal_arm;
+                metrics.record(base_correct, reviewed_correct);
+            }
+
             events.push(BanditEvent::EpisodeComplete {
                 episode,
                 arm,
@@ -765,6 +788,14 @@ impl<E: BanditEnv> BanditSession<E> {
 
             self.decay_epsilon();
 
+            // Record review metrics (Plan 036)
+            if let Some(ref metrics) = self.review_metrics {
+                let reviewed_correct = arm == optimal_arm;
+                // Simulate base (random) correctness deterministically
+                let base_correct = episode % self.env.num_arms() == optimal_arm;
+                metrics.record(base_correct, reviewed_correct);
+            }
+
             // Persist to trial log
             let record = TrialRecord {
                 episode,
@@ -775,6 +806,8 @@ impl<E: BanditEnv> BanditSession<E> {
                 cumulative_regret: self.cumulative_regret,
                 config: config.to_string(),
                 note: String::new(),
+                base_correct: None,
+                reviewed_correct: None,
             };
             if let Err(e) = trial_log.append(&record) {
                 eprintln!("trial_log write error at episode {episode}: {e}");

@@ -23,10 +23,19 @@
 //!     println!("Hard-blocked arms: {promoted:?}");
 //! }
 //! ```
+//!
+//! # Benefit-Ratio Gate (Plan 036)
+//!
+//! When review metrics are available, compression can be gated by the
+//! benefit-to-risk ratio. If the reviewer is net-negative (ratio below
+//! threshold), compressing its decisions into hard blocks would be harmful.
+//! Use [`AbsorbCompressLayer::should_compress_gated`] to check.
 
 use std::collections::HashSet;
 
 use crate::speculative::types::ScreeningPruner;
+
+use super::review_metrics::ReviewMetrics;
 
 // ── Config ──────────────────────────────────────────────────────
 
@@ -36,6 +45,13 @@ use crate::speculative::types::ScreeningPruner;
 /// 1. It has been visited at least `min_visits` times
 /// 2. Its average reward (Q-value) is below `q_threshold`
 /// 3. `compress()` is called and it's among the worst `promote_count` arms
+///
+/// # Benefit-Ratio Gate (Plan 036)
+///
+/// When `min_benefit_ratio` is set, compression is only allowed when the
+/// reviewer's benefit-to-risk ratio exceeds this threshold. This prevents
+/// hardening a net-negative reviewer's decisions into permanent blocks.
+/// Paper default: 2.0 (conservative — allows slightly worse reviewers).
 #[derive(Clone, Debug)]
 pub struct CompressConfig {
     /// Minimum visits before an arm is eligible for compression.
@@ -46,6 +62,15 @@ pub struct CompressConfig {
     pub promote_count: usize,
     /// Check `should_compress()` every N `absorb()` calls.
     pub check_interval: usize,
+    /// Minimum benefit-to-risk ratio to allow compression (Plan 036).
+    ///
+    /// When review metrics show `benefit_ratio() < min_benefit_ratio`,
+    /// compression is blocked — the reviewer is net-negative and
+    /// hardening its decisions would be harmful.
+    ///
+    /// Default: 2.0 (conservative). Paper found 3.1:1 for o3-mini.
+    /// Set to 0.0 to disable the gate.
+    pub min_benefit_ratio: f64,
 }
 
 impl Default for CompressConfig {
@@ -55,6 +80,7 @@ impl Default for CompressConfig {
             q_threshold: 0.05,
             promote_count: 3,
             check_interval: 100,
+            min_benefit_ratio: 2.0,
         }
     }
 }
@@ -72,7 +98,14 @@ impl CompressConfig {
             q_threshold,
             promote_count,
             check_interval,
+            min_benefit_ratio: 2.0,
         }
+    }
+
+    /// Create config with custom benefit-ratio threshold.
+    pub fn with_benefit_ratio(mut self, min_benefit_ratio: f64) -> Self {
+        self.min_benefit_ratio = min_benefit_ratio;
+        self
     }
 }
 
@@ -100,6 +133,15 @@ pub trait AbsorbCompress: ScreeningPruner {
 
     /// Whether enough observations have been absorbed to trigger compression.
     fn should_compress(&self) -> bool;
+
+    /// Whether compression is allowed given review metrics (Plan 036).
+    ///
+    /// Returns `true` when:
+    /// - `metrics` is `None` (no gate, fall through), OR
+    /// - `metrics.benefit_ratio() >= min_benefit_ratio` (reviewer is net-positive)
+    ///
+    /// Returns `false` when the reviewer is net-negative (ratio below threshold).
+    fn should_compress_gated(&self, metrics: Option<&ReviewMetrics>) -> bool;
 }
 
 // ── Layer ───────────────────────────────────────────────────────
@@ -220,7 +262,30 @@ impl<P: ScreeningPruner> AbsorbCompress for AbsorbCompressLayer<P> {
     }
 
     fn should_compress(&self) -> bool {
-        self.total_absorbed > 0 && self.total_absorbed.is_multiple_of(self.config.check_interval)
+        self.total_absorbed > 0
+            && self
+                .total_absorbed
+                .is_multiple_of(self.config.check_interval)
+    }
+
+    fn should_compress_gated(&self, metrics: Option<&ReviewMetrics>) -> bool {
+        if !self.should_compress() {
+            return false;
+        }
+        // No metrics → no gate, fall through to original behavior
+        let Some(metrics) = metrics else {
+            return true;
+        };
+        // Gate: only compress when reviewer is net-positive
+        let ratio = metrics.benefit_ratio();
+        if ratio < self.config.min_benefit_ratio {
+            eprintln!(
+                "absorb_compress: compression gated — benefit ratio {ratio:.2} < threshold {:.2}",
+                self.config.min_benefit_ratio
+            );
+            return false;
+        }
+        true
     }
 }
 

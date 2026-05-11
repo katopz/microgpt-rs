@@ -37,6 +37,9 @@ pub mod hot_swap;
 pub mod regression;
 
 #[cfg(feature = "bandit")]
+pub mod review_metrics;
+
+#[cfg(feature = "bandit")]
 pub mod trial_log;
 
 #[cfg(feature = "bandit")]
@@ -47,6 +50,9 @@ pub use bandit::{
     BanditEnv, BanditEvent, BanditPruner, BanditResult, BanditSession, BanditStats, BanditStrategy,
     BernoulliEnv, GaussianEnv,
 };
+
+#[cfg(feature = "bandit")]
+pub use review_metrics::{ReviewMetrics, ReviewStrategy, ReviewSummary};
 
 #[cfg(feature = "bandit")]
 pub use hot_swap::HotSwapPruner;

@@ -17,7 +17,7 @@ Inspired by [microgpt-c](https://github.com/nicholasgasior/microgpt-c), [talos-v
 - **Sparse MLP** — Unstructured sparsity acceleration, skipping dead neurons in ReLU activations.
 - **BPE Tokenizer** — Train/encode/decode with Config::bpe() preset for code generation.
 - **Multi-Armed Bandit** — Adaptive `ScreeningPruner` with UCB1, ε-greedy, Thompson Sampling strategies.
-- **Heuristic Learning** — TrialLog, AbsorbCompress, HotSwapPruner, RegressionSuite for policy evolution.
+- **Heuristic Learning** — TrialLog, AbsorbCompress, HotSwapPruner, RegressionSuite, ReviewMetrics for policy evolution.
 - **Bomberman Arena** — 4-player HL proof: adaptive intelligence (+177) > greedy (+131) > static rules (-30) > random (-55).
 - **Monopoly FSM Arena** — 4-player turn-based FSM: sequential phase AI (PreTurn→Rolling→Resolving→Strategic→EndTurn) with bandit strategy adaptation across 1000 games.
 - **Bandit + WASM Pruners** — `BanditPruner` wraps any `ScreeningPruner` with exploration. `WasmPruner` loads sandboxed `.wasm` validators.
@@ -173,6 +173,18 @@ Round N+m:   Agent writes new validator.rs → compile .wasm → HotSwapPruner.r
 ```
 
 📖 See [`.docs/09_heuristic-learning.md`](.docs/09_heuristic-learning.md).
+
+### Inference-Time Review Metrics
+
+Based on arXiv:2604.27233 — tracks whether reviewer intervention is net-positive via **Helpfulness/Harmfulness** metrics and a **benefit-to-risk ratio** (paper found 3.1:1 for o3-mini). Gates `AbsorbCompress` when ratio drops below threshold.
+
+| Ratio | Interpretation |
+|:-----:|:---------------|
+| > 3.0 | Excellent reviewer (paper quality) |
+| 2.0–3.0 | Acceptable (default threshold) |
+| < 1.0 | Net-negative — stop reviewing |
+
+Run: `cargo run --example review_01_metrics --features bandit`
 
 ## 🎮 Bomberman HL Arena — ✅ HL Thesis Proven
 
@@ -382,5 +394,6 @@ Lessons from [NVIDIA Dynamo's agentic inference](https://developer.nvidia.com/bl
 - [Sparser, Faster, Lighter Transformers](https://arxiv.org/abs/2603.23198) — Sakana AI, 2025
 - [EMO: Mixture of Experts](https://arxiv.org/abs/2406.08732) — Document-level routing
 - [Probabilistic Programs of Thought](https://arxiv.org/abs/2604.17290) — Logit-parameterized CPU resampling
+- [Reinforced Agent: Inference-Time Feedback](https://arxiv.org/abs/2604.27233) — Review metrics, benefit-risk ratio
 - [Luce-Org/lucebox-hub](https://github.com/Luce-Org/lucebox-hub/) — Per-chip LLM inference
 - [Learning Beyond Gradients](https://trinkle23897.github.io/learning-beyond-gradients/) — Heuristic Learning paradigm

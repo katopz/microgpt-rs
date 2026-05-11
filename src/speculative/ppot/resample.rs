@@ -26,6 +26,10 @@ use super::types::{PpotConfig, TokenRule};
 use super::knowledge::{RejectionInsight, SessionKnowledge};
 use super::rank::rank_by_consistency;
 
+// Plan 036 import
+#[cfg(feature = "bandit")]
+use crate::pruners::review_metrics::ReviewMetrics;
+
 // ── Low-level Sampling Helpers ─────────────────────────────────
 
 /// Sample a token from a probability distribution restricted to a support set.
@@ -482,6 +486,86 @@ pub fn ppot_rescue_adaptive<P: ScreeningPruner>(
                 .map(|(idx, _)| valid_variants[idx].clone())
         }
     }
+}
+
+// ── Structured Review Loop (Plan 036) ──────────────────────────
+
+/// Structured review loop rescue with benefit-ratio gating.
+///
+/// Wraps [`ppot_rescue`] with ProgressiveFeedback (paper's rN):
+/// iteratively attempt rescue up to `config.max_review_loops` times.
+///
+/// # Benefit-Ratio Gate
+///
+/// When `metrics` are provided and `config.min_review_benefit_ratio > 0.0`,
+/// rescue is skipped if the reviewer's benefit-to-risk ratio is below threshold.
+/// This prevents wasting compute on a net-negative reviewer.
+///
+/// # Rejection Feedback
+///
+/// When `config.inject_rejection_feedback` is true, the entropy threshold
+/// is lowered by 0.05 per failed loop, making subsequent attempts more
+/// aggressive at finding valid paths.
+///
+/// # Arguments
+///
+/// Same as [`ppot_rescue`], plus:
+/// * `metrics` — optional review metrics for benefit-ratio gating
+///
+/// Returns `None` when disabled (`max_review_loops == 0`) or all loops fail.
+#[cfg(feature = "bandit")]
+pub fn ppot_rescue_reviewed<P: ScreeningPruner>(
+    marginals: &[&[f32]],
+    base_path: &[usize],
+    pruner: &P,
+    config: &PpotConfig,
+    metrics: Option<&ReviewMetrics>,
+    scratch: &mut [f32],
+    rng: &mut Rng,
+) -> Option<Vec<usize>> {
+    // Disabled when max_review_loops == 0
+    if config.max_review_loops == 0 {
+        return None;
+    }
+
+    if marginals.is_empty() || base_path.is_empty() {
+        return None;
+    }
+
+    // Benefit-ratio gate: skip if reviewer is net-negative
+    if let Some(m) = metrics
+        && config.min_review_benefit_ratio > 0.0
+        && m.benefit_ratio() < config.min_review_benefit_ratio
+    {
+        return None;
+    }
+
+    // Effective config for feedback injection (mutable copy for threshold lowering)
+    let mut effective_config = config.clone();
+
+    // Structured review loop (paper's rN)
+    for loop_idx in 0..config.max_review_loops {
+        let result = ppot_rescue(
+            marginals,
+            base_path,
+            pruner,
+            &effective_config,
+            scratch,
+            rng,
+        );
+
+        if result.is_some() {
+            return result;
+        }
+
+        // Inject rejection feedback: lower entropy threshold for next attempt
+        if config.inject_rejection_feedback && loop_idx + 1 < config.max_review_loops {
+            effective_config.entropy_threshold =
+                (effective_config.entropy_threshold - 0.05).max(0.1);
+        }
+    }
+
+    None
 }
 
 // ── Tests ──────────────────────────────────────────────────────

@@ -17,8 +17,11 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Result, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+
+use super::review_metrics::{ReviewMetrics, ReviewSummary};
 
 // ── Record ──────────────────────────────────────────────────────
 
@@ -44,6 +47,10 @@ pub struct TrialRecord {
     pub config: String,
     /// Free-form annotation (e.g., "compress triggered").
     pub note: String,
+    /// Whether the base pruner (without review) was correct (Plan 036).
+    pub base_correct: Option<bool>,
+    /// Whether the reviewed decision was correct (Plan 036).
+    pub reviewed_correct: Option<bool>,
 }
 
 // ── Summary ─────────────────────────────────────────────────────
@@ -71,6 +78,8 @@ pub struct TrialLog {
     writer: BufWriter<File>,
     path: std::path::PathBuf,
     count: usize,
+    /// Optional review metrics for inference-time feedback tracking (Plan 036).
+    review_metrics: Option<Arc<ReviewMetrics>>,
 }
 
 impl TrialLog {
@@ -83,7 +92,17 @@ impl TrialLog {
             writer: BufWriter::new(file),
             path: path.to_path_buf(),
             count: 0,
+            review_metrics: None,
         })
+    }
+
+    /// Enable review metrics tracking (builder pattern).
+    ///
+    /// When enabled, `append_with_review` updates both the log and metrics.
+    /// The same `Arc<ReviewMetrics>` can be shared across components.
+    pub fn with_review_metrics(mut self, metrics: Arc<ReviewMetrics>) -> Self {
+        self.review_metrics = Some(metrics);
+        self
     }
 
     /// Append a single trial record as one JSON line.
@@ -138,6 +157,33 @@ impl TrialLog {
         }
 
         Ok(records)
+    }
+
+    /// Append a trial record with review classification.
+    ///
+    /// Writes the record to the JSONL log AND updates review metrics
+    /// (if enabled via `with_review_metrics`).
+    pub fn append_with_review(
+        &mut self,
+        record: &TrialRecord,
+        base_correct: bool,
+        reviewed_correct: bool,
+    ) -> Result<()> {
+        // Update review metrics if enabled
+        if let Some(ref metrics) = self.review_metrics {
+            metrics.record(base_correct, reviewed_correct);
+        }
+        self.append(record)
+    }
+
+    /// Read-only access to review metrics (if enabled).
+    pub fn metrics(&self) -> Option<&ReviewMetrics> {
+        self.review_metrics.as_ref().map(|arc| arc.as_ref())
+    }
+
+    /// Convenience: compute review metrics summary (if enabled).
+    pub fn metrics_summary(&self) -> Option<ReviewSummary> {
+        self.review_metrics.as_ref().map(|m| m.summary())
     }
 
     /// Compute aggregate summary over a slice of trial records.
@@ -209,6 +255,8 @@ mod tests {
             cumulative_regret: (1.0 - reward) * episode as f32,
             config: "test".into(),
             note: format!("ep{episode}"),
+            base_correct: None,
+            reviewed_correct: None,
         }
     }
 

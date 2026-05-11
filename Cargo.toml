@@ -74,6 +74,12 @@ required-features = ["bandit"]
 name = "hl_02_hotswap"
 required-features = ["bandit"]
 
+# ── Inference-Time Review Metrics ─────────────────────────────
+
+[[example]]
+name = "review_01_metrics"
+required-features = ["bandit"]
+
 # ── Bomberman HL Arena ────────────────────────────────────────
 
 [[example]]

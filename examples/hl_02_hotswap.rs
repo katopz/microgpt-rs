@@ -211,6 +211,8 @@ fn main() {
             cumulative_regret,
             config: "UCB1".to_string(),
             note,
+            base_correct: None,
+            reviewed_correct: None,
         };
         if let Err(e) = trial_log.append(&record) {
             eprintln!("Trial log error: {e}");

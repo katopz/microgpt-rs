@@ -1,5 +1,7 @@
 # microgpt-rs: Heuristic Learning
 
+> **Status (Plan 036):** ReviewMetrics, ReviewStrategy, and benefit-ratio gating are implemented behind `--features bandit`. AbsorbCompress gates compression by benefit-risk ratio. `ppot_rescue_reviewed` provides structured review loops behind `--features bandit,ppot`. See example `review_01_metrics`.
+>
 > **Status (Plan 032):** TrialLog, AbsorbCompress, HotSwapPruner, and RegressionSuite are implemented behind `--features bandit`. See examples `hl_01_trial_log` and `hl_02_hotswap`.
 
 ## What is Heuristic Learning?
@@ -346,12 +348,88 @@ Run: `cargo run --example bandit_06_resolver --features bandit`
 
 ---
 
+## Inference-Time Review Metrics (Plan 036)
+
+Based on arXiv:2604.27233 — "Reinforced Agent: Inference-Time Feedback for Tool-Calling Agents". The paper proves that inference-time review improves tool-calling accuracy by +5.5% on irrelevance detection and +7.1% on multi-turn tasks. The key insight is the **measurement framework**, not the reviewer itself.
+
+### Classification Matrix
+
+Each (base_correct, reviewed_correct) pair is classified into one of four categories:
+
+| Base Correct | Reviewed Correct | Classification | Meaning |
+|:---:|:---:|:---:|:---|
+| false | true | **Helpful** | Reviewer fixed a wrong answer |
+| true | false | **Harmful** | Reviewer broke a correct answer |
+| true | true | Both Correct | Both agreed (no effect) |
+| false | false | Both Wrong | Both failed (no effect) |
+
+### Benefit-Risk Ratio
+
+```
+Benefit-Risk Ratio = Helpfulness ÷ Harmfulness
+```
+
+- **Helpfulness** = `helpful / (helpful + both_wrong)` — % of base-wrong cases the reviewer fixed
+- **Harmfulness** = `harmful / (harmful + both_correct)` — % of base-correct cases the reviewer broke
+
+The paper found **3.1:1** for o3-mini. Our default threshold is **2.0:1** (conservative — allows slightly worse reviewers).
+
+### How It Connects to Existing Systems
+
+| Component | Review Metrics Integration |
+|---|---|
+| `ReviewMetrics` | Atomic counters tracking helpful/harmful/both_correct/both_wrong |
+| `BanditSession::with_metrics()` | Records whether bandit pick vs random pick was optimal |
+| `AbsorbCompress::should_compress_gated()` | Blocks compression when ratio < threshold |
+| `PpotConfig::with_review_loop(N)` | Structured review loop (paper's rN) |
+| `ppot_rescue_reviewed()` | PPoT rescue with benefit-ratio gate |
+| `TrialLog::append_with_review()` | Persist episode with review classification |
+
+### Benefit-Ratio Guidance
+
+| Ratio | Interpretation | Action |
+|:---:|:---|:---|
+| **> 3.0** | Excellent reviewer (paper quality) | Aggressively compress, trust reviewer |
+| **2.0–3.0** | Acceptable reviewer | Compress with normal caution |
+| **1.0–2.0** | Marginal reviewer | Gate compression, investigate failures |
+| **< 1.0** | Net-negative reviewer | Stop reviewing, revert to base |
+| **∞** | Perfect (never broke correct) | Trust fully, but monitor for overfitting |
+
+### Quick Start
+
+```rust,ignore
+use std::sync::Arc;
+use microgpt_rs::pruners::{BanditSession, BanditStrategy, BernoulliEnv, ReviewMetrics};
+
+let metrics = Arc::new(ReviewMetrics::new());
+
+let session = BanditSession::new(env, BanditStrategy::Ucb1)
+    .with_metrics(Arc::clone(&metrics));
+
+let (events, result) = session.run(1000, &mut rng);
+
+// Print review metrics
+println!("{metrics}"); // "helpful=83.5% harmful=20.5% ratio=4.1:1 n=1000"
+
+// Check if compression is safe
+let ratio = metrics.benefit_ratio();
+if ratio >= 2.0 {
+    absorb.compress(); // Safe to harden reviewer decisions
+}
+```
+
+Run: `cargo run --example review_01_metrics --features bandit`
+
+---
+
 ## References
 
 - [Learning Beyond Gradients](https://trinkle23897.github.io/learning-beyond-gradients/) — Jiayi Weng, 2026
+- [Reinforced Agent: Inference-Time Feedback](https://arxiv.org/abs/2604.27233) — arXiv:2604.27233
 - Plan 025: Model vs Modelless Bandit
 - Plan 030: Multi-Armed Bandit
 - Plan 031: Slot Machine Bandit
 - Plan 032: HL Infrastructure
 - Plan 033: Bomberman Arena
+- Plan 036: Inference-Time Review Metrics
 - Research 14: HL Distillation

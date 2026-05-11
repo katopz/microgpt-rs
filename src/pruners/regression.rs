@@ -121,7 +121,6 @@ impl RegressionSuite {
         let traces: Vec<GoldenTrace> = ranked
             .into_iter()
             .take(top_n)
-            
             .map(|record| GoldenTrace {
                 label: format!(
                     "ep_{episode:04}_arm{arm}",
@@ -326,6 +325,8 @@ mod tests {
                     cumulative_regret: 1.0 - reward,
                     config: String::new(),
                     note: String::new(),
+                    base_correct: None,
+                    reviewed_correct: None,
                 })
                 .unwrap();
             }

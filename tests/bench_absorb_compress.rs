@@ -165,6 +165,8 @@ fn bench_trial_log_throughput() {
         cumulative_regret: 10.0,
         config: "bench".to_string(),
         note: "test".to_string(),
+        base_correct: None,
+        reviewed_correct: None,
     };
 
     // Warmup
