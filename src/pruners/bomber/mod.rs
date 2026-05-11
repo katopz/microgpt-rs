@@ -7,8 +7,16 @@ pub mod arena;
 pub mod players;
 pub mod systems;
 
+#[cfg(feature = "bomber-wasm")]
+pub mod wasm_pruner;
+#[cfg(feature = "bomber-wasm")]
+pub mod wasm_state;
+
 pub use arena::ArenaGrid;
 pub use players::{BomberPlayer, GreedyPlayer, HLPlayer, RandomPlayer, ValidatorPlayer};
+
+#[cfg(feature = "bomber-wasm")]
+pub use players::{NNPlayer, create_players_with_wasm, is_safe_action};
 pub use systems::*;
 
 use std::fmt;
