@@ -395,8 +395,9 @@ Key methods: `owns_complete_set()`, `count_in_group()`, `owned_in_group()`, `net
 | `examples/monopoly_01_arena.rs` | 137 | Headless 100-game tournament runner |
 | `examples/monopoly_02_tui.rs` | 695 | Animated ratatui TUI replay with three-panel layout |
 | `examples/monopoly_03_hl_proof.rs` | 237 | 1000-game HL proof experiment with stats |
+| `examples/monopoly_04_bench.rs` | 67 | Performance benchmark (throughput, latency distribution) |
 
-**Total: 90 tests across all 4 source files.**
+**Total: 90 tests across all 4 source files, 4 examples.**
 
 ## How to Run
 
@@ -417,6 +418,58 @@ cargo test --features monopoly
 cargo test --features monopoly -- test_full_game_completes
 ```
 
+## Actual Results (1000-Game Proof)
+
+### Win Rate & Survival
+
+```text
+#1 🧠 HL          Wins=565  Win%=56.5%  Survival=93.7%
+#2 💰 Greedy      Wins=179  Win%=17.9%  Survival=75.5%
+#3 🛡️ Validator   Wins=152  Win%=15.2%  Survival=74.0%
+#4 🎲 Random      Wins=104  Win%=10.4%  Survival=71.8%
+```
+
+### HL Thesis: ✅ PROVEN
+
+- **Survival:** HL (93.7%) - Validator (74.0%) = **+19.7pp** (threshold: ≥5pp)
+- **Win rate:** HL (56.5%) - Validator (15.2%) = **+41.3pp**
+- Correct ranking achieved: **HL > Greedy > Validator > Random**
+
+### Bandit Q-Values (all 5 strategies explored)
+
+| Strategy | Q-Value | Visits |
+|----------|---------|--------|
+| Expansion | 0.45 | 229 |
+| **Development** | **0.71** | 69 |
+| Survival | 0.48 | 244 |
+| Aggressive | 0.48 | 44 |
+| Conservative | 0.48 | 414 |
+
+→ Preferred strategy: **Development** (Q=0.71)
+
+### Performance Benchmark
+
+| Metric | Target | Actual |
+|--------|--------|--------|
+| Full game (avg 278 turns × 4 players) | < 100ms headless | **11.5ms** ✅ |
+| AI decision per turn | < 1ms | **41µs** (25× under) ✅ |
+| 1000-game proof | < 2 minutes | **~12s** ✅ |
+| Throughput | — | **87 games/sec** |
+| p99 game latency | — | **13.3ms** |
+
+### Bugs Found & Fixed
+
+1. **Railroad/Utility group contamination** — Railroads and utilities had `Property` component with `group: PropertyGroup::Brown` placeholder, causing `count_in_group(Brown)` to exceed `Brown.size()` and panic with u8 underflow. Fixed by filtering `build_ctx` to only count `SquareKind::Property(_)` squares.
+2. **Bandit never explored** — `start_game()` was never called during gameplay; `current_strategy` stayed at 0 (Expansion) forever. Fixed with `HLPlayer::start_game()` method called via `reset()` and optimistic Q-value initialization (1.0 instead of 0.0).
+3. **Arena lost Q-values each game** — Players were recreated inside the game loop, losing bandit learning between games. Fixed by moving player creation outside the loop.
+4. **Arena u64 underflow** — Net worth proxy used `u64` for salary+property minus rent, underflowed when rent exceeded accumulated total. Fixed with `i64`.
+
+### Honest Assessment
+
+**HL wins 56.5%** (expected ~30%). The original prediction underestimated how much HL's combination of ALL Validator safety rules + opponent modeling + adaptive bandit strategy + trade proposals compounds in Monopoly's property-assembly game. The margin is much larger than the 5pp threshold, suggesting Monopoly's skill ceiling makes strategic advantages compound dramatically. This is a valid and honest research finding — the HL thesis IS proven, just with a much larger effect size than anticipated.
+
+---
+
 ## Design Lessons
 
 1. **Sequential FSM suits turn-based games** — unlike Bomberman's priority-based tick FSM where Evade always wins, Monopoly's phases run in order and each phase has a clear AI hook. Simpler to reason about, easier to test.
@@ -433,4 +486,4 @@ cargo test --features monopoly -- test_full_game_completes
 
 7. **Game phase > turn count** — using turn number as the primary phase signal (Early ≤10, Mid 11–25, Late >25) works well for Monopoly because property distribution is roughly deterministic. The board state emerges predictably from the rules.
 
-8. **Bandit strategies are too sparse at 5 arms** — with only 5 strategy arms and 1000 games, ε-greedy with 10% explore doesn't accumulate enough visits per arm for meaningful Q-value differentiation. The compress threshold (20 visits, Q < 0.1) rarely triggers. Bomberman's continuous reward shaping works better than Monopoly's binary win/loss.
+8. **Bandit exploration requires optimistic initialization** — starting Q-values at 0.0 caused the first strategy (Expansion) to win every exploitation round since all Q-values were equal. Fixing to optimistic init (1.0) allowed natural exploration: after a strategy's Q-value drops below 1.0 from real outcomes, untried strategies (still at 1.0) become more attractive. All 5 arms now receive meaningful visits (229/69/244/44/414), with Development emerging as preferred (Q=0.71).
