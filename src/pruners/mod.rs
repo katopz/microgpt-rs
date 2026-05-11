@@ -63,3 +63,15 @@ pub use bomber::{
     PlayerEntities, RandomPlayer, ScoreBoard, TickCounter, ValidatorPlayer, init_world, run_tick,
     spawn_players,
 };
+
+#[cfg(feature = "monopoly")]
+pub mod monopoly;
+
+#[cfg(feature = "monopoly")]
+pub use monopoly::{
+    Board, BoardSquare, CardDeck, CardEffect, DecisionContext, GameConfig, GameEvent, GamePhase,
+    GreedyPlayer, HLPlayer, JailDecision, JailReason, MonopolyPlayer, Owned, Player,
+    PlayerEntities, Property, PropertyGroup, RandomPlayer, ReleaseMethod, Statistics, Strategy,
+    TaxKind, TradeOffer, TradeResponse, TurnPhase, ValidatorPlayer, build_board, init_world,
+    shuffle_decks, square_kind, square_name,
+};

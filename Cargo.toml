@@ -27,11 +27,12 @@ sparse_mlp = []  # TwELL-inspired sparse MLP matmul (Plan 022)
 ppot = []  # PPoT logit-parameterized CPU resampling (Plan 026 + 027)
 bandit = []  # Multi-armed bandit adaptive ScreeningPruner (Plan 030)
 bomber = ["bevy_ecs", "bandit"]  # Bomberman HL Arena (Plan 033)
+monopoly = ["bevy_ecs", "bandit"]  # Monopoly Board Game Engine (Plan 034)
 rest = []  # REST API client via reqwest + tokio runtime (planned)
 embedding_router = []  # Semantic embedding retrieval from anyrag (Plan 024)
 gpu = []  # GPU compute via wgpu, safetensors model loading (planned)
 leviathan = []  # LeviathanVerifier real p/q rejection sampling (Algorithm 1)
-full = ["sudoku", "validator", "ppot", "bandit", "bomber", "rest", "embedding_router", "gpu", "leviathan"]
+full = ["sudoku", "validator", "ppot", "bandit", "bomber", "monopoly", "rest", "embedding_router", "gpu", "leviathan"]
 
 # ── Bandit (RL / Game Theory) ─────────────────────────────────
 
@@ -86,6 +87,20 @@ required-features = ["bomber"]
 [[example]]
 name = "bomber_03_hl_proof"
 required-features = ["bomber"]
+
+# ── Monopoly FSM Arena ────────────────────────────────────────
+
+[[example]]
+name = "monopoly_01_arena"
+required-features = ["monopoly"]
+
+[[example]]
+name = "monopoly_02_tui"
+required-features = ["monopoly"]
+
+[[example]]
+name = "monopoly_03_hl_proof"
+required-features = ["monopoly"]
 
 # ── Blue Bear ──────────────────────────────────────────────────
 
