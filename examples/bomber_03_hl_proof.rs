@@ -102,12 +102,13 @@ fn run_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng) ->
     let mut p4_actions: Vec<BomberAction> = Vec::new();
 
     for _tick in 0..TICK_LIMIT {
-        // Drain previous events
-        {
+        // Drain events from previous tick (tick-scoped for AI, accumulated for scoring)
+        let tick_events: Vec<GameEvent> = {
             use bevy_ecs::event::Events;
             let mut ev = world.resource_mut::<Events<GameEvent>>();
-            all_events.extend(ev.drain().collect::<Vec<GameEvent>>());
-        }
+            ev.drain().collect()
+        };
+        all_events.extend(tick_events.iter().cloned());
 
         // Each player selects an action
         let mut actions = [None; 4];
@@ -123,7 +124,7 @@ fn run_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng) ->
                 let grid = world
                     .resource::<microgpt_rs::pruners::bomber::ArenaGrid>()
                     .clone();
-                let action = player.select_action(&grid, pos, &all_events, rng);
+                let action = player.select_action(&grid, pos, &tick_events, rng);
                 if i == 3 {
                     p4_actions.push(action);
                 }

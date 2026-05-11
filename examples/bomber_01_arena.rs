@@ -126,13 +126,14 @@ fn run_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng) ->
 
     // Run tick loop
     for _tick in 0..TICK_LIMIT {
-        // Collect events from previous tick
-        {
+        // Drain events from previous tick (tick-scoped for AI, accumulated for scoring)
+        let tick_events: Vec<GameEvent> = {
             let mut event_reader = world.resource_mut::<bevy_ecs::event::Events<GameEvent>>();
-            round_events.extend(event_reader.drain().collect::<Vec<GameEvent>>());
-        }
+            event_reader.drain().collect()
+        };
+        round_events.extend(tick_events.iter().cloned());
 
-        // Each player selects an action
+        // Each player selects an action (only sees THIS tick's events)
         let mut actions = [None; 4];
         for (i, player) in players.iter_mut().enumerate() {
             let pos = world
@@ -149,7 +150,7 @@ fn run_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng) ->
                             .resource::<microgpt_rs::pruners::bomber::ArenaGrid>()
                             .clone(),
                         pos,
-                        &round_events,
+                        &tick_events,
                         rng,
                     ),
                 );
