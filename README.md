@@ -261,35 +261,36 @@ MicroGPT-RS is the **core inference library** — pure algorithms, zero side eff
 
 ### How It Flows
 
-1. **RAG Engine** — A self-improving knowledge base ingests documents, curates quality training data, and exports JSONL. Episodic memory accumulates edge cases per-translation, feeding back into the curation loop.
+1. **RAG Engine** (anyrag) — Self-improving knowledge base with plugin-based ingestion (`Ingestor` trait), episodic memory, catalog-driven domain shaping, slot management, inference budget API (β parameterization), Turso/SQLite storage, REST API + CLI, and Cloud Run deployment. Curates quality training data and exports JSONL. Episodic memory accumulates edge cases per-translation, feeding back into the curation loop.
 
-2. **Training Pipeline** — Takes curated JSONL and trains LoRA adapters (Python→Rust pairs for the RIIR use case). Produces compact `adapter.bin` with blake3 checksum. Uses unsloth/MLX for Gemma 4 training; Rust handles pack/verify.
+2. **Training Pipeline** (riir-burner) — LoRA fine-tuning for Gemma 4 E4B on Rust code corpus. Takes curated JSONL, trains LoRA adapters (Python→Rust pairs), produces compact `adapter.bin` with BLAKE3 checksum. Rust handles pack/verify; Python (unsloth/MLX) handles training. CLI subcommands: `pack`, `verify`, `train`, `pipeline`. Shell scripts: `lora.sh`, `pack.sh`.
 
-3. **Service Layer** — A private monorepo housing:
-   - **WASM Validator SDK** — Internal crate for writing domain-specific constraint validators. The `Validator` trait + `export_validator!` macro compile to sandboxed `.wasm` modules that plug into microgpt-rs's `WasmPruner`.
+3. **Service Layer** (riir-ai, private) — Monorepo housing:
+   - **WASM Validator SDK** (riir-validator-sdk) — WASM Validator trait + `export_validator!` macro + streaming events ABI. Compiles to sandboxed `.wasm` modules that plug into microgpt-rs's `WasmPruner`.
    - **WASM Runtime** — Host-side `WasmPruner` implementing `ConstraintPruner` + `ScreeningPruner`. Loads `.wasm`, calls `is_valid`/`relevance` in sandboxed wasmtime.
-   - **Domain Router** — `KeywordRouter` (V1) + `EmbeddingRouter` (V2 via RAG) + `ExpertRegistry` mapping domains to pruner + LoRA pairs. Config-driven via `domains.toml`.
-   - **GPU Training** — `wgpu` compute pipeline with 16 WGSL kernels. Forward, backward (LoRA grads only), AdamW optimizer, cross-entropy loss. Targets WebGPU, Metal, Vulkan, DX12.
-   - **REST Client** — HTTP client for vector search against the RAG engine. Retrieves historically successful token continuations merged into DDTree branches.
-   - **Transpiler** — Python→Rust transpilation service loading `.wasm` validators + `.bin` LoRA adapter. Exercises the full pipeline: BPE tokenize → WASM validate → DDTree prune → compiler feedback.
+   - **Prompt Router + Expert Registry** — `KeywordRouter` (V1) + `EmbeddingRouter` (V2, 3-tier fallback via RAG) + `ExpertRegistry` mapping domains to pruner + LoRA pairs. Config-driven via `domains.toml` with domain inference budget (β). Routing strategies: keyword, embedding, combined.
+   - **GPU Training** — `wgpu` compute pipeline with 16 WGSL kernels. Forward, backward (LoRA grads only), AdamW optimizer, cross-entropy loss. Targets WebGPU, Metal, Vulkan, DX12. LoRA export/load.
+   - **REST Client** — HTTP client for vector search against the RAG Engine. Retrieves historically successful token continuations merged into DDTree branches.
+   - **Transpiler** (riir-transpiler) — Python→Rust transpilation service loading `.wasm` validators + `.bin` LoRA adapter. Exercises the full pipeline: BPE tokenize → WASM validate → DDTree prune → compiler feedback.
 
 ### Architecture Split
 
-| Layer | What | Status | License |
-|-------|------|--------|---------|
-| **Engine** | microgpt-rs (DDTree, zero-alloc, ConstraintPruner, ScreeningPruner) | ✅ Working | MIT |
-| **Validator** | SynPruner + PartialParser + CompilerFeedback | ✅ Working | MIT |
-| **WASM SDK** | Validator trait + export macro + CLI checker | ✅ Working | Private |
-| **WASM Runtime** | WasmPruner + wasmtime sandbox | ✅ Working | Private |
-| **Router** | Keyword + Embedding routing, ExpertRegistry | ✅ Working | Private |
-| **GPU Training** | wgpu forward/backward/optimizer | ✅ Working | Private |
-| **REST Client** | Vector search, tokenization, agent hints | ✅ Working | Private |
-| **RAG Engine** | Ingestion, curation, episodic memory | ✅ Working | MIT |
-| **Training Pipeline** | LoRA fine-tuning, adapter packing | ✅ Working | MIT |
+| Layer | Repo | What | Status | License |
+|-------|------|------|--------|---------|
+| **Engine** | microgpt-rs | DDTree, zero-alloc, ConstraintPruner, ScreeningPruner | ✅ Working | MIT |
+| **Validator** | microgpt-rs | SynPruner + PartialParser + CompilerFeedback | ✅ Working | MIT |
+| **RAG Engine** | anyrag | Plugin ingestion (`Ingestor` trait), episodic memory, slot management, catalog-driven domain shaping, inference budget API (β), Turso/SQLite storage | ✅ Working | MIT |
+| **Training Pipeline** | riir-burner | LoRA fine-tuning (Gemma 4 E4B), adapter packing (BLAKE3), corpus dedup, pack/verify/train/pipeline CLI | ✅ Working | MIT |
+| **WASM SDK** | riir-ai | Validator trait + export macro + streaming events ABI + CLI checker | ✅ Working | Private |
+| **WASM Runtime** | riir-ai | WasmPruner + wasmtime sandbox | ✅ Working | Private |
+| **Router** | riir-ai | Keyword + Embedding routing (3-tier fallback), ExpertRegistry, domain inference budget (β) | ✅ Working | Private |
+| **GPU Training** | riir-ai | wgpu forward/backward/optimizer (16 WGSL kernels), LoRA export | ✅ Working | Private |
+| **REST Client** | riir-ai | Vector search, tokenization, agent hints | ✅ Working | Private |
+| **Transpiler** | riir-ai | Python→Rust transpilation, compiler feedback loop | ✅ Working | Private |
 
 ### Key Insight
 
-The engine is MIT and fully functional. But without trained LoRA adapters (the "fuel") and domain-specific WASM validators, it produces syntactically-valid-but-semantically-generic output. The private service layer holds the trained weights, validator SDK, and orchestration — the intelligence layer that makes the engine production-grade for specific domains like Python→Rust transpilation.
+The engine (microgpt-rs) is MIT and fully functional. But without trained LoRA adapters from riir-burner (the "fuel") and domain-specific WASM validators from riir-ai, it produces syntactically-valid-but-semantically-generic output. The private riir-ai monorepo holds the trained weights, validator SDK, and orchestration — the intelligence layer that makes the engine production-grade for specific domains like Python→Rust transpilation. anyrag's episodic memory accumulates edge cases per-translation, creating a data flywheel that improves accuracy over time.
 
 ## 🛠️ Getting Started
 
