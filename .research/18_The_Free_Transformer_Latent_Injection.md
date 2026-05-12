@@ -164,6 +164,8 @@ Instead of one-hot Z (65536-dim, requires trained model), we could use a **learn
 
 This gives us the "explicit structural decision" benefit of Z without needing to train from scratch. It's essentially **domain-conditioned LoRA** — inject a domain signal, let the LoRA adapter learn to use it.
 
+> **This is NOT a VAE.** The Free Transformer paper uses a full VAE pipeline (encoder, reparameterization trick, KL divergence loss, stochastic sampling). Our Plan 038 adaptation replaces ALL of that with a deterministic supervised embedding lookup. No encoder, no latent distribution, no sampling, no KL loss. Just a `Vec<f32>` per domain, added to K/V at mid-layer. This trades the paper's "discover structure unsupervised" for "inject known structure explicitly" — which works with existing models and our LoRA pipeline. The mid-layer injection *mechanism* is borrowed from the paper; the VAE *method* is discarded entirely. See Plan 038 for full design rationale.
+
 ### Insight 2: Multi-Sample Inference with Z (When Model Available)
 
 If a Free Transformer base model becomes available, the inference-time Z sampling enables a powerful technique: **sample multiple Z values, generate with each, pick the best**. This is cheap (Z sampling is free, only 1 forward pass per Z) and gives diversity similar to best-of-N sampling but with structured diversity (Z controls global properties, not individual tokens).
