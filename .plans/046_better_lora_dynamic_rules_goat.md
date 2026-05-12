@@ -39,7 +39,7 @@ Plan 045 showed HL (+475) >> LoRA+WASM (-15). The gap exists because:
 
 ### Phase 1: Data Quality Fix (microgpt-rs)
 
-- [ ] **T1: `bomber_06_replay_gen_v2.rs` — Balanced replay generator**
+- [x] **T1: `bomber_06_replay_gen_v2.rs` — Balanced replay generator**
   - Include ALL player types (Random, Greedy, Validator, HL)
   - Include losers AND winners (quality reflects outcome)
   - Add per-tick danger signal: `is_in_danger` bool
@@ -48,13 +48,13 @@ Plan 045 showed HL (+475) >> LoRA+WASM (-15). The gap exists because:
   - Filter: quality >= 0.3 (not just winners) for positive set
   - Filter: quality < 0.3 for negative set (what NOT to do)
 
-- [ ] **T2: Enhance `ReplaySample` with richer features**
+- [x] **T2: Enhance `ReplaySample` with richer features**
   - Add `danger_level: u8` (0=safe, 1=adjacent blast, 2=in blast zone)
   - Add `nearest_opponent_dist: u8` (manhattan distance, 255=none visible)
   - Add `escape_routes: u8` (count of safe adjacent cells)
   - Keep backward compat (old JSONL still loads, new fields default)
 
-- [ ] **T3: Run replay gen v2, produce `output/replays_v2/`**
+- [x] **T3: Run replay gen v2, produce `output/replays_v2/`**
   - 2000 rounds (2x previous) for more data
   - Verify quality distribution: ~40% high, ~30% mid, ~30% low
   - Verify action distribution: reasonable spread, not dominated by moves
@@ -62,7 +62,7 @@ Plan 045 showed HL (+475) >> LoRA+WASM (-15). The gap exists because:
 
 ### Phase 2: Better LoRA Training (riir-ai)
 
-- [ ] **T4: Update `train_bomber.rs` — better training config**
+- [x] **T4: Update `train_bomber.rs` — better training config**
   - Accept v2 replay format with new features
   - Increase epochs: 2 → 10 (with early stopping)
   - Increase learning rate warmup
@@ -70,13 +70,13 @@ Plan 045 showed HL (+475) >> LoRA+WASM (-15). The gap exists because:
   - Add per-epoch action accuracy reporting
   - Target: `final_loss < 5.0`, `action_accuracy > 0.3` on at least 2 actions
 
-- [ ] **T5: Train new LoRA on v2 data**
+- [x] **T5: Train new LoRA on v2 data**
   - Run training with new data
   - Compare loss curves: v1 (flat @17) vs v2 (converging)
   - Save as `game_lora_v2.bin`
   - Keep `game_lora.bin` as v1 baseline
 
-- [ ] **T6: Validate LoRA v2 quality**
+- [x] **T6: Validate LoRA v2 quality**
   - Run inference on held-out samples
   - Check action distribution matches training data
   - Check dangerous states → model predicts safe actions
