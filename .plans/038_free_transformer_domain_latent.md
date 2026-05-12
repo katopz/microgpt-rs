@@ -125,12 +125,18 @@ Cost: 2 × kv_dim additions. Zero allocations, zero RNG calls.
   - Unit test: `test_domain_latent_prefill_changes_logits` — prefill output differs with latent
   - Unit test: `test_domain_latent_prefill_then_decode` — prefill→decode pipeline works
 
-- [ ] **Task 5: riir-burner training support** (`riir-burner` repo) — deferred
-  - Extend `train_lora.py` to also train domain_latent embedding
-  - Training objective: cross-entropy + L2 regularization on embedding
-  - Export domain_latent alongside adapter.safetensors
-  - Extend `pack.sh` to pack domain_latent into binary format
-  - Deferred until training pipeline matures
+- [x] **Task 5a: riir-gpu training support (game domain)** (`riir-ai/crates/riir-gpu`) ✅
+  - `GpuDomainLatent` — GPU buffers for trainable domain latent (params, grads, m, v)
+  - `export_domain_latent()` — download from GPU, save as `.dlat` binary (DLAT format)
+  - `DomainLatentAdamWStep` + `adamw_step_cpu()` — CPU AdamW step for domain latent
+  - `AdamWOptimizer::step_domain_latent()` — GPU AdamW dispatch for domain latent
+  - `train_bomber.rs` updated to train LoRA + domain latent together, export both
+  - CPU fallback when no GPU available
+  - 4 tests: zeros init, from_vec roundtrip, export format, AdamW convergence
+
+- [ ] **Task 5b: riir-burner training support (language domain)** — deferred
+  - For larger language models (4B+ params) that need Python training pipeline
+  - Deferred until language model LoRA training pipeline matures
 
 - [ ] **Task 6: Expert Registry integration** (`src/router/registry.rs`) — deferred
   - No `src/router/registry.rs` exists yet — Expert Registry (Plan 023) not implemented
@@ -149,8 +155,10 @@ Cost: 2 × kv_dim additions. Zero allocations, zero RNG calls.
 | `src/transformer.rs` | `forward_base` + `forward_prefill`: mid-layer injection, 5 tests | ✅ Done |
 | `Cargo.toml` | `domain_latent` feature flag + added to `full` | ✅ Done |
 | `src/router/registry.rs` | `ExpertBundle` includes `DomainLatent` | ⏳ Deferred |
-| `riir-burner/train_lora.py` | Train domain latent embedding | ⏳ Deferred |
-| `riir-burner/pack.rs` | Pack domain latent binary | ⏳ Deferred |
+| `riir-gpu/src/domain_latent.rs` | `GpuDomainLatent`, export, CPU AdamW, 4 tests | ✅ Done |
+| `riir-gpu/src/optimizer.rs` | `step_domain_latent()` method | ✅ Done |
+| `riir-gpu/examples/train_bomber.rs` | Train LoRA + domain latent, export both | ✅ Done |
+| `riir-burner/train_lora.py` | Language model training (future) | ⏳ Deferred |
 
 **Tests:** 260 pass (with `domain_latent`), 255 pass (without). 5 new domain_latent tests.
 

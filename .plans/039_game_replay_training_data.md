@@ -278,7 +278,8 @@ The replay dump is opt-in (`--replay-dir` flag). Without it, the arena runs exac
 |---------|------|-------------|
 | `microgpt-rs` | Plan 033 (Bomberman Arena) | ✅ Complete — arena runs games, produces events |
 | `microgpt-rs` | Plan 034 (Bomber WASM Validator) | ✅ T1-T10 done — WASM validator ready, NNPlayer ready |
-| `microgpt-rs` | Plan 038 (Free Transformer Domain Latent) | Future — domain_latent could condition on game domain |
+| `microgpt-rs` | Plan 038 (Free Transformer Domain Latent) | ✅ Done — `DomainLatent` type + mid-layer injection; `train_bomber` exports `.dlat` |
+| `riir-ai` | Plan 038 (riir-gpu domain_latent) | ✅ Done — `GpuDomainLatent` + `export_domain_latent()` + CPU AdamW fallback |
 | `riir-ai` | Plan 034 T2/T3 (replay.rs, train_bomber) | Scaffolding exists — this plan unblocks it |
 | `riir-ai` | Plan 026 (AutoTTS) | ✅ Complete — early exit + dynamic budget for game inference |
 | `riir-burner` | N/A | Not used — game model too small for Python pipeline |
