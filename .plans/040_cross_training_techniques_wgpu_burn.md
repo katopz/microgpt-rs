@@ -317,15 +317,18 @@ pub struct GameTrainingReport {
   - This is the game-domain analog of Leviathan verification (Plan 004)
   - Tests: draft distribution approximates target (KL < threshold), draft is smaller rank
 
-- [ ] **Task 6: Screening-guided LoRA target probe** (`riir-gpu`)
-  - Before full training, do a short probe (10 steps) with LoRA on all targets
-  - Measure per-target gradient magnitude during probe
-  - Rank targets by gradient magnitude (high gradient = high learning signal)
-  - Select top-K targets for full training (skip low-signal targets)
-  - Research 07 applied to training: relevance = gradient signal → prune → focus compute
-  - Config: `--lora-top-k 3` (only train top 3 targets)
-  - Default: all targets (backward compatible)
-  - Tests: probe produces gradient ranking, top-K selection is correct, full training still works
+- [x] **Task 6: Screening-guided LoRA target probe** (`riir-gpu`) ✅
+  - Before full training, do a short probe (10 steps) with LoRA on all targets ✅
+  - Measure per-target gradient magnitude during probe ✅
+  - Rank targets by gradient magnitude (high gradient = high learning signal) ✅
+  - Select top-K targets for full training (skip low-signal targets) ✅
+  - Research 07 applied to training: relevance = gradient signal → prune → focus compute ✅
+  - Config: `--lora-top-k 3` (only train top 3 targets) ✅
+  - Default: all targets (backward compatible) ✅
+  - `screening.rs` module: `ScreeningConfig`, `ScreeningResult`, `TargetGradRank`, `target_key()` ✅
+  - `TrainingConfig.lora_target_filter` — zero-out gradients for non-selected targets ✅
+  - Wired in `train_bomber.rs` Phase 4a with `--lora-top-k` CLI flag ✅
+  - Tests: 17 tests — ranking, top-K, savings, JSON roundtrip, parsing, CompressReport conversion ✅
 
 - [x] **Task 7: GameTrainingReport and JSON export** (`riir-gpu`) ✅
   - Consolidate `TrainingReport`, `ReviewMetrics`, `GameMetrics`, `CompressReport`, `DistillReport` into `GameTrainingReport` ✅
@@ -358,22 +361,22 @@ pub struct GameTrainingReport {
 | File | Change | Target |
 |------|--------|--------|
 | `riir-gpu/src/training_config.rs` | New: `BetaConfig`, `ReviewMetrics`, `GameMetrics`, `CompressReport`, `DistillReport`, `GameTrainingReport` | riir-gpu |
-| `riir-gpu/src/lib.rs` | Export new types + game trainer encoding + compress types | riir-gpu |
-| `riir-gpu/src/training_loop.rs` | Add `Serialize`/`Deserialize` to `TrainingReport`, epoch-end gradient norm snapshots | riir-gpu |
-| `riir-gpu/src/compress.rs` | New: `GradNormTracker`, `CompressConfig`, `snapshot_grad_norms()`, `compress_analysis()` | riir-gpu |
+| `riir-gpu/src/lib.rs` | Export new types + game trainer encoding + compress + screening types | riir-gpu |
+| `riir-gpu/src/training_loop.rs` | `Serialize`/`Deserialize` on `TrainingReport`, epoch-end grad norm snapshots, `lora_target_filter` | riir-gpu |
+| `riir-gpu/src/compress.rs` | New: `GradNormTracker`, `CompressConfig`, `snapshot_grad_norms()`, `compress_analysis()` (Task 4) | riir-gpu |
+| `riir-gpu/src/screening.rs` | New: `ScreeningConfig`, `ScreeningResult`, `TargetGradRank`, gradient ranking (Task 6) | riir-gpu |
 | `riir-gpu/src/game/replay.rs` | `parse_jsonl()`, `parse_jsonl_filtered()`, `parse_jsonl_dir()` | riir-gpu |
 | `riir-gpu/src/game/trainer.rs` | `encode_game_samples()`, `decode_action_token()`, `BOARD_VOCAB`, `ACTION_OFFSET`, `GAME_SEQ_LEN` | riir-gpu |
-| `riir-gpu/examples/train_bomber.rs` | Real pipeline (Plan 041), BetaConfig, ReviewMetrics, compress analysis Phase 6 | riir-gpu |
+| `riir-gpu/examples/train_bomber.rs` | Real pipeline (Plan 041), BetaConfig, ReviewMetrics, compress Phase 6, screening Phase 4a (`--lora-top-k`) | riir-gpu |
 | `microgpt-rs/src/types.rs` | `Config::game()` for Bomberman LoRA training (Plan 041) | microgpt-rs |
 | `microgpt-rs/Cargo.toml` | Add `game_domain` and `language_domain` feature flags | microgpt-rs |
 
-### Remaining (Tasks 5-6, 9)
+### Remaining (Tasks 5, 9)
 
 | File | Change | Target |
 |------|--------|--------|
 | `riir-gpu/src/training_loop.rs` | Add `validate_game()` for game-specific validation | riir-gpu |
-| `riir-gpu/src/lora.rs` | Add gradient norm tracking for screening probe | riir-gpu |
-| `riir-gpu/examples/train_bomber.rs` | `--lora-top-k` flag, distillation, game validation | riir-gpu |
+| `riir-gpu/examples/train_bomber.rs` | Distillation, game validation | riir-gpu |
 
 ---
 
@@ -433,7 +436,7 @@ Different scales, different pipelines, different feature flags.
 | **P1** | Task 8: Feature flags | Separate game from language concerns | Small | ✅ Done |
 | **P2** | Task 5: Draft distillation | Enables Plan 004 at runtime | Medium | ⬜ Pending |
 | **P2** | Task 4: Absorb+Compress | Post-training analysis | Small | ✅ Done |
-| **P3** | Task 6: Screening probe | Reduces training time by skipping low-signal targets | Medium | ⬜ Pending |
+| **P3** | Task 6: Screening probe | Reduces training time by skipping low-signal targets | Medium | ✅ Done |
 | **P3** | Task 7: JSON report | Cross-run comparison | Small | ✅ Done (real loss history via Plan 041) |
 | **P4** | Task 9: Benchmarks | Validate all techniques | Small | ⬜ Pending |
 
