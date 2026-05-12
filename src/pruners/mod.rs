@@ -65,8 +65,7 @@ pub use trial_log::{TrialLog, TrialRecord, TrialSummary};
 
 #[cfg(feature = "bomber")]
 pub use bomber::{
-    ArenaGrid, BomberAction, BomberPlayer, GameEvent, GreedyPlayer, GridPos, HLPlayer,
-    PlayerEntities, RandomPlayer, ScoreBoard, TickCounter, ValidatorPlayer, init_world, run_tick,
+    ArenaGrid, BomberAction, BomberPlayer, GridPos, ScoreBoard, TickCounter, run_tick,
     spawn_players,
 };
 
@@ -75,9 +74,8 @@ pub mod monopoly;
 
 #[cfg(feature = "monopoly")]
 pub use monopoly::{
-    Board, BoardSquare, CardDeck, CardEffect, DecisionContext, GameConfig, GameEvent, GamePhase,
-    GreedyPlayer, HLPlayer, JailDecision, JailReason, MonopolyPlayer, Owned, Player,
-    PlayerEntities, Property, PropertyGroup, RandomPlayer, ReleaseMethod, Statistics, Strategy,
-    TaxKind, TradeOffer, TradeResponse, TurnPhase, ValidatorPlayer, build_board, init_world,
-    shuffle_decks, square_kind, square_name,
+    Board, BoardSquare, CardDeck, CardEffect, DecisionContext, GameConfig, GamePhase, JailDecision,
+    JailReason, MonopolyPlayer, Owned, Player, Property, PropertyGroup, ReleaseMethod, Statistics,
+    Strategy, TaxKind, TradeOffer, TradeResponse, TurnPhase, build_board, shuffle_decks,
+    square_kind, square_name,
 };

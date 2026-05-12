@@ -22,7 +22,7 @@ Inspired by [microgpt-c](https://github.com/nicholasgasior/microgpt-c), [talos-v
 - **Monopoly FSM Arena** — 4-player turn-based FSM: sequential phase AI (PreTurn→Rolling→Resolving→Strategic→EndTurn) with bandit strategy adaptation across 1000 games.
 - **Bandit + WASM Pruners** — `BanditPruner` wraps any `ScreeningPruner` with exploration. `WasmPruner` loads sandboxed `.wasm` validators.
 
-📖 **Deep dives:** See [`.docs/`](.docs/) for architecture, speculative decoding, performance, sudoku, validator, HL, and bomber arena details.
+📖 **Deep dives:** See [`.docs/`](.docs/) for architecture, speculative decoding, performance, sudoku, validator, HL, bomber arena, and monopoly FSM details.
 
 ## 🏗️ Architecture
 
@@ -217,9 +217,9 @@ Run: `cargo run --example review_01_metrics --features bandit`
 | Validator 🛡️ | Safety rules ($200 reserve, no opponent monopolies) | Strategic buys + efficient building |
 | Random 🎲 | Square-parity pseudo-random | Baseline |
 
-**1000-game proof:** HL 56.5% win rate, 93.7% survival, +41.3pp over Validator. ✅ HL Thesis PROVEN (threshold: ≥5pp). Bandit explores all 5 strategies. Performance: 87 games/sec, 41µs/turn (25× under target).
+**1000-game proof:** HL 56.5% win rate, 93.7% survival, +41.3pp over Validator. ✅ HL Thesis PROVEN (threshold: ≥5pp). Bandit explores all 5 strategies. Performance: 84.5 games/sec, 41µs/turn (24.4× under target).
 
-90+ tests, 4 examples (headless arena, TUI replay, 1000-game proof, benchmark).
+4 examples (headless arena, TUI replay, 1000-game proof, benchmark).
 
 📖 See [`.docs/11_monopoly_fsm.md`](.docs/11_monopoly_fsm.md).
 
@@ -312,7 +312,7 @@ cargo run --release --features sudoku
 # Run everything
 cargo run --release --all-features
 
-# Run all tests (276 total)
+# Run all tests (674 total)
 cargo test --quiet --workspace --all-features
 
 # Run Sudoku solver example
@@ -338,8 +338,12 @@ cargo clippy --all-targets --all-features --quiet
 | `ppot` | PPoT logit-parameterized CPU resampling + adaptive rescue |
 | `bandit` | Multi-armed bandit + HL infrastructure (TrialLog, AbsorbCompress, HotSwapPruner) |
 | `bomber` | Bomberman HL arena (bevy_ecs + bandit) |
+| `bomber-wasm` | WASM bomber validator loader (bomber + wasmtime) |
 | `monopoly` | Monopoly FSM arena (bevy_ecs + bandit) |
 | `rest` | REST client for RAG-augmented speculative decoding |
+| `embedding_router` | Semantic embedding retrieval from anyrag |
+| `gpu` | GPU compute via wgpu, safetensors model loading (planned) |
+| `leviathan` | LeviathanVerifier real p/q rejection sampling |
 | `full` | Enable all features |
 
 ## 📁 Project Structure
@@ -357,19 +361,30 @@ src/
     verifier.rs     SpeculativeVerifier, SimulatedVerifier, LeviathanVerifier
     step.rs         High-level step functions (speculative, rollback, conditioned)
     prefill.rs      Speculative prefill scoring + prompt compression
+    sampling.rs     Temperature, top-k, top-p sampling strategies
     ppot/           PPoT CPU resampling (entropy, resample, knowledge, rank)
+  pruners/          Pruner & HL infrastructure:
     bandit.rs       BanditPruner, BanditSession, BanditEnv, strategies
     trial_log.rs    TrialLog JSONL persistence
     absorb_compress.rs  Q-value → hard block promotion
     hot_swap.rs     Runtime pruner reload via blake3
     regression.rs   Golden trace replay
+    review_metrics.rs   Helpfulness/Harmfulness metrics + benefit-risk ratio
+    sudoku_pruner.rs    Path-aware Sudoku constraint pruning
+    tactical_pruner.rs  Tactical pathfinding pruner
+    dungeon_pruner.rs   Dungeon map pruner
+    dungeon_pathfinder.rs  Dungeon pathfinder
+    map_generator.rs    Procedural map generation
+    pathfinder.rs      A* pathfinding
+    bomber/          Bomberman HL arena (bevy_ecs)
+    monopoly/        Monopoly FSM arena (bevy_ecs)
   tokenizer/        BPE tokenizer (encode/decode/train)
   validator/        SynPruner + PartialParser + CompilerFeedback
   percepta.rs       O(log N) convex hull attention, Sudoku solvers, StreamingSolver
   benchmark.rs      BenchResult, run_all, save_results_csv
   plot.rs           PNG horizontal bar chart
-examples/           20+ examples (sudoku, validator, bandit, bomber, raven, prefill)
-tests/              80 integration tests
+examples/           36 examples (sudoku, validator, bandit, bomber, monopoly, tactical, dungeon, raven, prefill)
+tests/              88 integration tests + 7 benchmark suites
 bench/              Auto-numbered PNG + CSV benchmark output
 ```
 
