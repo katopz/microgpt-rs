@@ -95,14 +95,14 @@ Each line is one `(board_state, action, quality)` sample:
 
 ## Tasks
 
-- [ ] **Task 1: `ReplaySample` type** (`src/pruners/bomber/replay.rs` — NEW)
+- [x] **Task 1: `ReplaySample` type** (`src/pruners/bomber/replay.rs` — NEW)
   - `struct ReplaySample { board: [u8; 169], player_pos: [u8; 2], ... }` matching JSONL format
   - `ReplaySample::from_game_state(grid, pos, bombs, powerups, action, player_id, player_type) -> Self`
   - `ReplaySample::to_json(&self) -> String` — serialize to JSON line
   - `ReplaySample::quality(survived, winner, powerups, kills) -> f32` — compute quality score
   - Unit tests: roundtrip serialization, quality computation
 
-- [ ] **Task 2: `ReplayWriter`** (`src/pruners/bomber/replay.rs`)
+- [x] **Task 2: `ReplayWriter`** (`src/pruners/bomber/replay.rs`)
   - `struct ReplayWriter { file: BufWriter<File>, round: u32, sample_count: u64 }`
   - `ReplayWriter::create(path: &Path) -> Result<Self>` — open JSONL file
   - `ReplayWriter::write_sample(&mut self, sample: &ReplaySample) -> Result<()>`
@@ -110,14 +110,14 @@ Each line is one `(board_state, action, quality)` sample:
   - `ReplayWriter::sample_count(&self) -> u64`
   - Unit tests: write N samples, read back, verify format
 
-- [ ] **Task 3: Game state serialization** (`src/pruners/bomber/replay.rs`)
+- [x] **Task 3: Game state serialization** (`src/pruners/bomber/replay.rs`)
   - `fn serialize_board(grid: &ArenaGrid) -> [u8; 169]` — extract grid cells
   - `fn serialize_bombs(world: &World) -> Vec<[u8; 4]>` — extract active bombs from ECS
   - `fn serialize_powerups(world: &World) -> Vec<[u8; 2]>` — extract powerup positions
   - These functions read from the existing ECS world — no game logic changes
   - Unit tests: verify against known grid states
 
-- [ ] **Task 4: Modify arena to dump replays** (`examples/bomber_01_arena.rs`)
+- [x] **Task 4: Modify arena to dump replays** (`examples/bomber_01_arena.rs`)
   - Add `--replay-dir <path>` CLI argument (default: none = no replay dump)
   - When set, create `ReplayWriter` for each round
   - Inside `run_round()`, after each player's `select_action()`:
@@ -126,13 +126,13 @@ Each line is one `(board_state, action, quality)` sample:
   - Close writer, move to next round
   - Print replay stats at end: total samples, per-player breakdown
 
-- [ ] **Task 5: Modify HL proof to dump filtered replays** (`examples/bomber_03_hl_proof.rs`)
+- [x] **Task 5: Modify HL proof to dump filtered replays** (`examples/bomber_03_hl_proof.rs`)
   - Add `--replay-dir output/replays` (default: `output/replays`)
   - Only dump samples from P3 (Validator) and P4 (HL) — these produce quality play
   - Only dump winning episodes (score > threshold) or top-N by score
   - This is the primary data source for training — 1000 rounds, filtered quality
 
-- [ ] **Task 6: Standalone replay generator** (`examples/bomber_04_replay_gen.rs` — NEW)
+- [x] **Task 6: Standalone replay generator** (`examples/bomber_04_replay_gen.rs` — NEW)
   - Dedicated example for generating training data
   - Runs 1000 rounds with default 4 players
   - Filters: only dump P3/P4 winning episodes
@@ -140,14 +140,14 @@ Each line is one `(board_state, action, quality)` sample:
   - Prints sample statistics: total, per-action distribution, avg quality
   - ~150 lines
 
-- [ ] **Task 7: Wire `parse_replay()` in riir-ai** (`riir-ai/crates/riir-gpu/src/game/replay.rs`)
+- [x] **Task 7: Wire `parse_replay()` in riir-ai** (`riir-ai/crates/riir-gpu/src/game/replay.rs`)
   - Replace stub `parse_replay()` with actual JSONL parsing
   - Read JSONL file → deserialize to `GameSample`
   - Map `ReplaySample` → `GameSample` (board, action, quality)
   - Filter by `player_type` and `quality` threshold
   - Unit tests: parse a small JSONL file, verify sample count and content
 
-- [ ] **Task 8: Wire `train_bomber.rs`** (`riir-ai/crates/riir-gpu/examples/train_bomber.rs`)
+- [x] **Task 8: Wire `train_bomber.rs`** (`riir-ai/crates/riir-gpu/examples/train_bomber.rs`)
   - Replace stub with actual training loop
   - Load JSONL from `output/replays/` via `parse_replay()`
   - Convert `GameSample` → training batches for wgpu
@@ -156,14 +156,14 @@ Each line is one `(board_state, action, quality)` sample:
   - Print training report: loss curve, sample count, epochs
   - ~200 lines
 
-- [ ] **Task 9: End-to-end validation**
+- [x] **Task 9: End-to-end validation**
   - Run `bomber_04_replay_gen` → produce JSONL
   - Run `train_bomber` → produce `game_lora.bin`
   - Verify `game_lora.bin` loads in `LoraAdapter::load_from_bin()`
   - Verify `NNPlayer` can use it for action selection
   - Compare NNPlayer win rate vs RandomPlayer (should be > 0%)
 
-- [ ] **Task 10: Update docs**
+- [x] **Task 10: Update docs**
   - Update `microgpt-rs/.docs/10_bomber_arena.md` with replay pipeline
   - Update `riir-ai/.docs/09_training_data_pipeline.md` with game training section
   - Update `riir-ai/.plans/034_bomber_wasm_validator.md` — unblock T3
@@ -249,13 +249,13 @@ The replay dump is opt-in (`--replay-dir` flag). Without it, the arena runs exac
 
 ## Success Criteria
 
-- [ ] `bomber_04_replay_gen` produces JSONL with >50K samples from 1000 rounds
-- [ ] JSONL contains only P3/P4 winning episodes, quality > 0.5
-- [ ] `train_bomber` loads JSONL and trains for 3+ epochs with decreasing loss
-- [ ] `output/game_lora.bin` loads successfully via `LoraAdapter::load_from_bin()`
-- [ ] NNPlayer with trained adapter wins more rounds than RandomPlayer
-- [ ] Arena without `--replay-dir` runs identically to before (zero regression)
-- [ ] All existing tests pass (`cargo test --features bomber`)
+- [x] `bomber_04_replay_gen` produces JSONL with >50K samples from 1000 rounds
+- [x] JSONL contains only P3/P4 winning episodes, quality > 0.5
+- [x] `train_bomber` loads JSONL and trains for 3+ epochs with decreasing loss
+- [x] `output/game_lora.bin` loads successfully via `LoraAdapter::load_from_bin()`
+- [x] NNPlayer with trained adapter wins more rounds than RandomPlayer
+- [x] Arena without `--replay-dir` runs identically to before (zero regression)
+- [x] All existing tests pass (`cargo test --features bomber`)
 
 ---
 

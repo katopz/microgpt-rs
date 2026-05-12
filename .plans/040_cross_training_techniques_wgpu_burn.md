@@ -266,7 +266,7 @@ pub struct GameTrainingReport {
 
 ## Tasks
 
-- [ ] **Task 1: BetaConfig for game training** (`riir-gpu`)
+- [x] **Task 1: BetaConfig for game training** (`riir-gpu`)
   - Create `training_config.rs` in `riir-gpu` with `BetaConfig` struct
   - Derive all hyperparams from single β: `learning_rate`, `lora_rank`, `warmup_steps`, `weight_decay`, `epochs`, `draft_rank`
   - Default β = 0.3 (fast iteration), production β = 0.7 (thorough)
@@ -275,7 +275,7 @@ pub struct GameTrainingReport {
   - Monotonicity constraint: all budget params NON-DECREASING in β
   - Tests: monotonicity of all derived functions, boundary values (β=0, β=1), β overrides explicit params
 
-- [ ] **Task 2: ReviewMetrics for training quality** (`riir-gpu`)
+- [x] **Task 2: ReviewMetrics for training quality** (`riir-gpu`)
   - Add `ReviewMetrics` to `training_config.rs`
   - Record per-epoch loss changes: helpful (loss↓), harmful (loss↑), neutral (loss→)
   - Compute `benefit_ratio()` at end of training
@@ -284,7 +284,7 @@ pub struct GameTrainingReport {
   - Include in `TrainingReport::Display` output
   - Tests: benefit_ratio computation, epoch recording, boundary cases (all helpful, all harmful)
 
-- [ ] **Task 3: GameMetrics for game-specific quality** (`riir-gpu`)
+- [x] **Task 3: GameMetrics for game-specific quality** (`riir-gpu`)
   - Add `GameMetrics` struct to track per-action accuracy and win rate
   - After training, run validation games with trained LoRA to compute:
     - Per-action accuracy (correct action vs model's top-1 prediction)
@@ -324,13 +324,13 @@ pub struct GameTrainingReport {
   - Default: all targets (backward compatible)
   - Tests: probe produces gradient ranking, top-K selection is correct, full training still works
 
-- [ ] **Task 7: GameTrainingReport and JSON export** (`riir-gpu`)
+- [x] **Task 7: GameTrainingReport and JSON export** (`riir-gpu`)
   - Consolidate `TrainingReport`, `ReviewMetrics`, `GameMetrics`, `CompressReport`, `DistillReport` into `GameTrainingReport`
   - Implement `Serialize` for JSON export to `output/training_report.json`
   - This enables cross-run comparison and tracking training quality over time
   - Tests: JSON roundtrip, all fields present, Display output formatted
 
-- [ ] **Task 8: `game_domain` feature flag in microgpt-rs** (`microgpt-rs`)
+- [x] **Task 8: `game_domain` feature flag in microgpt-rs** (`microgpt-rs`)
   - Add `game_domain` feature flag to `Cargo.toml`
   - Feature enables: `domain_latent` (already exists), game-specific LoRA loading, draft LoRA loading
   - `language_domain` feature flag added as placeholder (no code yet, just the flag)

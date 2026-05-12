@@ -3,10 +3,18 @@
 //! Runs N rounds of 4-player Bomberman with progressively more HL technology.
 //! Output: per-round results and cumulative standings.
 //!
+//! With `--replay-dir <path>`, dumps per-round JSONL replay files for all players.
+//!
 //! Run: `cargo run --example bomber_01_arena --features bomber`
+//! Replay: `cargo run --example bomber_01_arena --features bomber -- --replay-dir output/replays`
+
+use std::path::PathBuf;
 
 use fastrand::Rng;
 
+use microgpt_rs::pruners::bomber::replay::{
+    ReplaySample, ReplayWriter, serialize_board, serialize_bombs, serialize_powerups,
+};
 use microgpt_rs::pruners::bomber::{
     BomberPlayer, GameEvent, GreedyPlayer, HLPlayer, RandomPlayer, ValidatorPlayer, init_world,
     run_tick, spawn_players,
@@ -17,9 +25,25 @@ use microgpt_rs::pruners::bomber::{
 const ROUNDS: usize = 100;
 const TICK_LIMIT: u32 = 200;
 
+// ── Pending Capture ────────────────────────────────────────────
+
+struct PendingCapture {
+    sample: ReplaySample,
+}
+
 // ── Main ───────────────────────────────────────────────────────
 
 fn main() {
+    // Parse --replay-dir <path>
+    let replay_dir: Option<PathBuf> = std::env::args()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|w| w[0] == "--replay-dir")
+        .map(|w| PathBuf::from(&w[1]));
+    if let Some(ref dir) = replay_dir {
+        std::fs::create_dir_all(dir).ok();
+    }
+
     let mut rng = Rng::with_seed(42);
     let mut players: Vec<Box<dyn BomberPlayer>> = vec![
         Box::new(RandomPlayer::new(0)),
@@ -30,16 +54,38 @@ fn main() {
 
     println!("╔═══ Bomberman HL Arena ═══════════════════════════════════╗");
     println!("║  P1 🐰 Random  |  P2 🐱 Greedy  |  P3 🐶 Validator  |  P4 🐵 HL  ║");
+    if let Some(ref dir) = replay_dir {
+        println!("║  Replay dir: {:<42}║", dir.display());
+    }
     println!("╚═════════════════════════════════════════════════════════╝");
     println!();
 
     let mut scores = [0i32; 4];
     let mut wins = [0u32; 4];
     let mut deaths = [0u32; 4];
+    let mut total_replay_samples: u64 = 0;
 
     for round in 0..ROUNDS {
+        // Create per-round replay writer
+        let mut replay_writer: Option<ReplayWriter> = None;
+        if let Some(ref dir) = replay_dir {
+            let path = dir.join(format!("bomber_replay_{round:04}.jsonl"));
+            replay_writer = ReplayWriter::create(&path, round as u32).ok();
+        }
+
         let seed = 42 + round as u64;
-        let result = run_round(seed, &mut players, &mut rng);
+        let result = run_round(
+            seed,
+            &mut players,
+            &mut rng,
+            round as u32,
+            &mut replay_writer,
+        );
+
+        // Accumulate replay samples
+        if let Some(writer) = replay_writer {
+            total_replay_samples += writer.sample_count();
+        }
 
         // Update stats
         for (i, s) in result.scores.iter().enumerate() {
@@ -100,6 +146,12 @@ fn main() {
             deaths[*idx],
         );
     }
+
+    // Replay stats
+    if replay_dir.is_some() {
+        println!();
+        println!("  Replay: {total_replay_samples} total samples written");
+    }
 }
 
 // ── Round Runner ────────────────────────────────────────────────
@@ -113,7 +165,13 @@ struct RoundResult {
     ticks: u32,
 }
 
-fn run_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng) -> RoundResult {
+fn run_round(
+    seed: u64,
+    players: &mut [Box<dyn BomberPlayer>],
+    rng: &mut Rng,
+    round_num: u32,
+    replay_writer: &mut Option<ReplayWriter>,
+) -> RoundResult {
     let mut world = init_world(seed);
     let entities = spawn_players(&mut world);
 
@@ -123,6 +181,9 @@ fn run_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng) ->
     }
 
     let mut round_events: Vec<GameEvent> = Vec::new();
+    let mut pending: Vec<PendingCapture> = Vec::new();
+    let player_names = ["Random", "Greedy", "Validator", "HL"];
+    let capture_replay = replay_writer.is_some();
 
     // Run tick loop
     for _tick in 0..TICK_LIMIT {
@@ -154,6 +215,43 @@ fn run_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng) ->
                         rng,
                     ),
                 );
+            }
+        }
+
+        // Capture replay data for all alive players
+        if capture_replay {
+            let board =
+                serialize_board(world.resource::<microgpt_rs::pruners::bomber::ArenaGrid>());
+            let bombs = serialize_bombs(&mut world);
+            let powerups = serialize_powerups(&mut world);
+            let tick = world
+                .resource::<microgpt_rs::pruners::bomber::TickCounter>()
+                .tick;
+
+            for i in 0..4 {
+                let pos = world
+                    .get::<microgpt_rs::pruners::bomber::GridPos>(entities[i])
+                    .copied()
+                    .unwrap_or_default();
+                let alive = world
+                    .get::<microgpt_rs::pruners::bomber::Alive>(entities[i])
+                    .is_some();
+                if alive && actions[i].is_some() {
+                    pending.push(PendingCapture {
+                        sample: ReplaySample {
+                            board: board.clone(),
+                            player_pos: [pos.x as u8, pos.y as u8],
+                            player_id: i as u8,
+                            bombs: bombs.clone(),
+                            powerups: powerups.clone(),
+                            action: actions[i].map(|a| a.as_usize() as u8).unwrap_or(0),
+                            quality: 0.0, // backfilled later
+                            tick,
+                            round: 0, // backfilled later
+                            player_type: player_names[i].to_string(),
+                        },
+                    });
+                }
             }
         }
 
@@ -220,6 +318,26 @@ fn run_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng) ->
     let ticks = world
         .resource::<microgpt_rs::pruners::bomber::TickCounter>()
         .tick;
+
+    // Compute quality and write replay samples
+    if let Some(writer) = replay_writer {
+        for mut cap in pending {
+            let survived = survivors.contains(&cap.sample.player_id);
+            let is_winner = survivors.len() == 1 && survivors[0] == cap.sample.player_id;
+            let pu_count = powerups
+                .iter()
+                .filter(|(p, _)| *p == cap.sample.player_id)
+                .count() as u32;
+            let kill_count = kills
+                .iter()
+                .filter(|(k, _)| *k == cap.sample.player_id)
+                .count() as u32;
+            cap.sample.quality = ReplaySample::quality(survived, is_winner, pu_count, kill_count);
+            cap.sample.round = round_num;
+            writer.write_sample(&cap.sample).ok();
+        }
+        writer.flush().ok();
+    }
 
     RoundResult {
         scores,

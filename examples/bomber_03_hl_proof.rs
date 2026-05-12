@@ -9,9 +9,13 @@
 //! Run: `cargo run --example bomber_03_hl_proof --features bomber`
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use fastrand::Rng;
 
+use microgpt_rs::pruners::bomber::replay::{
+    ReplaySample, ReplayWriter, serialize_board, serialize_bombs, serialize_powerups,
+};
 use microgpt_rs::pruners::bomber::{
     BomberAction, BomberPlayer, GameEvent, GreedyPlayer, GridPos, HLPlayer, RandomPlayer,
     ValidatorPlayer, init_world, run_tick, spawn_players,
@@ -23,6 +27,13 @@ const ROUNDS: usize = 1000;
 const TICK_LIMIT: u32 = 200;
 const COMPRESS_INTERVAL: usize = 100;
 const TOP_TRACES: usize = 10;
+const QUALITY_THRESHOLD: f32 = 0.5;
+
+// ── Pending Capture ────────────────────────────────────────────
+
+struct PendingCapture {
+    sample: ReplaySample,
+}
 
 // ── Stats ──────────────────────────────────────────────────────
 
@@ -90,7 +101,13 @@ struct RoundResult {
     p4_actions: Vec<BomberAction>,
 }
 
-fn run_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng) -> RoundResult {
+fn run_round(
+    seed: u64,
+    players: &mut [Box<dyn BomberPlayer>],
+    rng: &mut Rng,
+    round_num: u32,
+    replay_writer: &mut Option<ReplayWriter>,
+) -> RoundResult {
     let mut world = init_world(seed);
     let entities = spawn_players(&mut world);
 
@@ -100,6 +117,8 @@ fn run_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng) ->
 
     let mut all_events: Vec<GameEvent> = Vec::new();
     let mut p4_actions: Vec<BomberAction> = Vec::new();
+    let mut pending: Vec<PendingCapture> = Vec::new();
+    let capture_replay = replay_writer.is_some();
 
     for _tick in 0..TICK_LIMIT {
         // Drain events from previous tick (tick-scoped for AI, accumulated for scoring)
@@ -129,6 +148,44 @@ fn run_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng) ->
                     p4_actions.push(action);
                 }
                 actions[i] = Some(action);
+            }
+        }
+
+        // Capture replay data for P3 (index 2) and P4 (index 3) only
+        if capture_replay {
+            let board =
+                serialize_board(world.resource::<microgpt_rs::pruners::bomber::ArenaGrid>());
+            let bombs = serialize_bombs(&mut world);
+            let powerups = serialize_powerups(&mut world);
+            let tick = world
+                .resource::<microgpt_rs::pruners::bomber::TickCounter>()
+                .tick;
+            let player_names = ["Random", "Greedy", "Validator", "HL"];
+
+            for i in [2usize, 3] {
+                let pos = world
+                    .get::<GridPos>(entities[i])
+                    .copied()
+                    .unwrap_or_default();
+                let alive = world
+                    .get::<microgpt_rs::pruners::bomber::Alive>(entities[i])
+                    .is_some();
+                if alive && actions[i].is_some() {
+                    pending.push(PendingCapture {
+                        sample: ReplaySample {
+                            board: board.clone(),
+                            player_pos: [pos.x as u8, pos.y as u8],
+                            player_id: i as u8,
+                            bombs: bombs.clone(),
+                            powerups: powerups.clone(),
+                            action: actions[i].map(|a| a.as_usize() as u8).unwrap_or(0),
+                            quality: 0.0, // backfilled later
+                            tick,
+                            round: 0, // backfilled later
+                            player_type: player_names[i].to_string(),
+                        },
+                    });
+                }
             }
         }
 
@@ -192,6 +249,28 @@ fn run_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng) ->
         .resource::<microgpt_rs::pruners::bomber::TickCounter>()
         .tick;
 
+    // Compute quality and write filtered replay samples
+    if let Some(writer) = replay_writer {
+        for mut cap in pending {
+            let survived = survivors.contains(&cap.sample.player_id);
+            let is_winner = survivors.len() == 1 && survivors[0] == cap.sample.player_id;
+            let pu_count = powerups
+                .iter()
+                .filter(|(p, _)| *p == cap.sample.player_id)
+                .count() as u32;
+            let kill_count = kills
+                .iter()
+                .filter(|(k, _)| *k == cap.sample.player_id)
+                .count() as u32;
+            cap.sample.quality = ReplaySample::quality(survived, is_winner, pu_count, kill_count);
+            cap.sample.round = round_num;
+            if cap.sample.quality > QUALITY_THRESHOLD {
+                writer.write_sample(&cap.sample).ok();
+            }
+        }
+        writer.flush().ok();
+    }
+
     RoundResult {
         scores,
         survivors,
@@ -206,6 +285,16 @@ fn run_round(seed: u64, players: &mut [Box<dyn BomberPlayer>], rng: &mut Rng) ->
 // ── Main ───────────────────────────────────────────────────────
 
 fn main() {
+    // Parse --replay-dir <path>
+    let replay_dir: Option<PathBuf> = std::env::args()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|w| w[0] == "--replay-dir")
+        .map(|w| PathBuf::from(&w[1]));
+    if let Some(ref dir) = replay_dir {
+        std::fs::create_dir_all(dir).ok();
+    }
+
     let mut rng = Rng::with_seed(42);
     let mut players: Vec<Box<dyn BomberPlayer>> = vec![
         Box::new(RandomPlayer::new(0)),
@@ -223,10 +312,29 @@ fn main() {
     let mut traces: Vec<RoundTrace> = Vec::new();
     let mut _p4_survived_count: u32 = 0;
     let mut _p3_survived_count: u32 = 0;
+    let mut total_replay_samples: u64 = 0;
 
     for round in 0..ROUNDS {
+        // Create per-round replay writer
+        let mut replay_writer: Option<ReplayWriter> = None;
+        if let Some(ref dir) = replay_dir {
+            let path = dir.join(format!("bomber_replay_{round:04}.jsonl"));
+            replay_writer = ReplayWriter::create(&path, round as u32).ok();
+        }
+
         let seed = 42 + round as u64;
-        let result = run_round(seed, &mut players, &mut rng);
+        let result = run_round(
+            seed,
+            &mut players,
+            &mut rng,
+            round as u32,
+            &mut replay_writer,
+        );
+
+        // Accumulate replay samples
+        if let Some(writer) = replay_writer {
+            total_replay_samples += writer.sample_count();
+        }
 
         // Update stats
         for (i, s) in result.scores.iter().enumerate() {
@@ -278,8 +386,8 @@ fn main() {
         traces.push(trace);
 
         // Absorb-compress cycle every 100 rounds
-        if (round + 1) % COMPRESS_INTERVAL == 0 {
-            if let Some(hl) = players[3].as_any_mut().downcast_mut::<HLPlayer>() {
+        if (round + 1) % COMPRESS_INTERVAL == 0
+            && let Some(hl) = players[3].as_any_mut().downcast_mut::<HLPlayer>() {
                 let compressed = hl.compress_cycle();
                 if !compressed.is_empty() {
                     println!(
@@ -291,7 +399,6 @@ fn main() {
                     );
                 }
             }
-        }
 
         // Progress every 200 rounds
         if (round + 1) % 200 == 0 {
@@ -436,6 +543,20 @@ fn main() {
         println!("  {report}");
     } else {
         println!("  (P4 not available for report)");
+    }
+
+    // Replay stats
+    if replay_dir.is_some() {
+        println!();
+        println!("═══════════════════════════════════════════════════════════════");
+        println!("  REPLAY DUMP");
+        println!("═══════════════════════════════════════════════════════════════");
+        println!(
+            "  Total samples written: {total_replay_samples} (P3+P4, quality > {QUALITY_THRESHOLD})"
+        );
+        if let Some(ref dir) = replay_dir {
+            println!("  Output: {}", dir.display());
+        }
     }
 
     println!();

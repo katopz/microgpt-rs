@@ -174,13 +174,15 @@ These utility functions are used by multiple player types:
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/pruners/bomber/mod.rs` | 308 | Module index: enums, components, resources, events, constants |
+| `src/pruners/bomber/mod.rs` | 310 | Module index: enums, components, resources, events, constants |
 | `src/pruners/bomber/arena.rs` | 195 | Procedural 13×13 grid generation with `ArenaGrid::generate(seed)` |
+| `src/pruners/bomber/replay.rs` | 290 | `ReplaySample`, `ReplayWriter`, board/bomb/powerup serialization (Plan 039) |
 | `src/pruners/bomber/systems.rs` | 559 | World-based ECS systems: `init_world`, `spawn_players`, `run_tick` |
 | `src/pruners/bomber/players.rs` | 1447 | `BomberPlayer` trait + 4 implementations + shared AI functions |
-| `examples/bomber_01_arena.rs` | 232 | Headless 100-round tournament runner |
+| `examples/bomber_01_arena.rs` | 350 | Headless 100-round tournament runner + `--replay-dir` dump |
 | `examples/bomber_02_tui.rs` | 509 | Animated ratatui TUI replay with emoji rendering |
-| `examples/bomber_03_hl_proof.rs` | 458 | 1000-round HL proof experiment with golden traces |
+| `examples/bomber_03_hl_proof.rs` | 580 | 1000-round HL proof with golden traces + `--replay-dir` filtered dump |
+| `examples/bomber_04_replay_gen.rs` | 309 | Dedicated replay generator for training data (Plan 039) |
 | `tests/bench_bomber_arena.rs` | ~100 | 4 benchmark tests |
 
 ## Results
@@ -230,6 +232,92 @@ cargo test --features bomber bench_bomber_arena -- --nocapture
 
 # Tests
 cargo test --features bomber
+```
+
+## Replay Training Data Pipeline (Plan 039)
+
+The arena can dump tick-level training data as JSONL for downstream LoRA training in `riir-gpu`.
+
+### Data Flow
+
+```text
+bomber_04_replay_gen (1000 rounds)
+  │  At each tick, for P3/P4 alive players:
+  │    serialize(board_state, action_taken, player_type)
+  │
+  ▼
+output/replays/bomber_replay_{timestamp}.jsonl
+  │  Filter: quality > 0.5 (survived/won only)
+  │
+  ▼
+riir-gpu/examples/train_bomber.rs
+  │  Loads JSONL → GameSample → wgpu LoRA training
+  │
+  ▼
+output/game_lora.bin → NNPlayer (trained policy adapter)
+```
+
+### ReplaySample Format (JSONL)
+
+Each line is one `(board_state, action, quality)` sample:
+
+```json
+{
+  "board": [0,0,1,2,0,...],
+  "player_pos": [3, 5],
+  "player_id": 3,
+  "bombs": [[3,5,3,8],[7,2,3,4]],
+  "powerups": [[10,10],[5,8]],
+  "action": 4,
+  "quality": 0.85,
+  "tick": 42,
+  "round": 7,
+  "player_type": "HL"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `board` | `Vec<u8>` | 13×13 grid flattened. Floor=0, FixedWall=1, DestructibleWall=2, PowerUpHidden=3 |
+| `player_pos` | `[u8; 2]` | Player position (x, y) |
+| `player_id` | `u8` | Player index (0-3) |
+| `bombs` | `Vec<[u8; 4]>` | Active bombs: (x, y, blast_range, fuse_ticks) |
+| `powerups` | `Vec<[u8; 2]>` | Active powerup positions: (x, y) |
+| `action` | `u8` | 0=Up, 1=Down, 2=Left, 3=Right, 4=Bomb, 5=Wait |
+| `quality` | `f32` | 0.0 (death) → 0.5 (survived) → 1.0 (winner) + bonuses |
+| `player_type` | `String` | "Random", "Greedy", "Validator", "HL" |
+
+### Quality Scoring
+
+| Outcome | Base | Bonus |
+|---------|------|-------|
+| Death | 0.0 | — |
+| Survived | 0.5 | +0.05/powerup (cap +0.2), +0.1/kill (cap +0.3) |
+| Winner | 1.0 | +0.05/powerup (cap +0.2), +0.1/kill (cap +0.3) |
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/pruners/bomber/replay.rs` | `ReplaySample`, `ReplayWriter`, board/bomb/powerup serialization |
+| `examples/bomber_04_replay_gen.rs` | Dedicated replay generator (1000 rounds, filtered P3/P4) |
+| `examples/bomber_01_arena.rs` | `--replay-dir` flag for optional replay dump |
+| `examples/bomber_03_hl_proof.rs` | `--replay-dir` flag with P3/P4 quality filtering |
+
+### Commands
+
+```bash
+# Generate replay data (1000 rounds, filtered P3/P4 winning episodes)
+cargo run --example bomber_04_replay_gen --features bomber
+
+# Generate with custom output dir
+cargo run --example bomber_04_replay_gen --features bomber -- output/my_replays
+
+# Arena with optional replay dump (all players, all samples)
+cargo run --example bomber_01_arena --features bomber -- --replay-dir output/replays
+
+# HL proof with filtered replay dump
+cargo run --example bomber_03_hl_proof --features bomber -- --replay-dir output/replays
 ```
 
 ## Design Lessons

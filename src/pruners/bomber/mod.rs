@@ -5,6 +5,7 @@
 
 pub mod arena;
 pub mod players;
+pub mod replay;
 pub mod systems;
 
 #[cfg(feature = "bomber-wasm")]
