@@ -1,6 +1,6 @@
 # Plan 038: Free Transformer — Domain Latent Mid-Layer Injection
 
-**Branch:** `develop/feature/038_free_tf_domain_latent`
+**Branch:** `feature/038_free_tf_domain_latent`
 **Depends on:** Plan 025 (Bidirectional Prefill + LoRA), Plan 023 (Expert Registry)
 **Research:** `.research/18_The_Free_Transformer_Latent_Injection.md`
 
@@ -93,56 +93,66 @@ Cost: 2 × kv_dim additions. Zero allocations, zero RNG calls.
 
 ## Tasks
 
-- [ ] **Task 1: DomainLatent type** (`src/types.rs`)
+- [x] **Task 1: DomainLatent type** (`src/types.rs`) ✅
   - `pub struct DomainLatent { pub embedding: Vec<f32> }` — shape `[kv_dim]`
   - `pub fn load(path: &Path) -> Result<Self>` — load from binary file
-  - Binary format: `[MAGIC: "DLAT" 4B][VERSION: 1B][KV_DIM: 4B LE][EMBEDDING: kv_dim × f32][BLAKE3: 32B]`
-  - Unit tests for load roundtrip
+  - `pub fn save(&self, path: &Path) -> Result<()>` — save to binary file
+  - `pub fn zeros(kv_dim: usize) -> Self` — zero-initialized constructor
+  - `pub fn from_vec(embedding: Vec<f32>) -> Self` — from raw vector
+  - Binary format: `[MAGIC: "DLAT" 4B][VERSION: 1B][KV_DIM: 4B LE][EMBEDDING: kv_dim × f32 LE][BLAKE3: 32B]`
+  - Unit tests: roundtrip, invalid magic, checksum mismatch, file too small, zeros
 
-- [ ] **Task 2: Mid-layer injection in forward_base** (`src/transformer.rs`)
-  - Add `domain_latent: Option<&DomainLatent>` parameter to `forward_base`
-  - At `layer_idx == config.n_layer / 2`, after K/V projections, add domain_latent to `ctx.k` and `ctx.v` before cache write
+- [x] **Task 2: Mid-layer injection in forward_base** (`src/transformer.rs`) ✅
+  - Added `#[cfg(feature = "domain_latent")] domain_latent: Option<&DomainLatent>` parameter to `forward_base`
+  - At `layer_idx == config.n_layer / 2`, after K/V projections + LoRA, add domain_latent to `ctx.k` and `ctx.v` before cache write
   - Gate behind `#[cfg(feature = "domain_latent")]` feature flag
-  - Update `forward()` wrapper to pass through domain_latent
-  - Unit test: verify logits change when domain_latent is present vs absent
-  - Unit test: verify domain_latent has no effect at non-mid layers
+  - Updated `forward()` wrapper to dispatch with cfg-gated args
+  - Added `forward_with_domain_latent()` public wrapper (feature-gated)
+  - Unit test: `test_domain_latent_changes_logits` — non-zero embedding changes output
+  - Unit test: `test_domain_latent_zero_embedding_same_logits` — zero embedding is identity
+  - Unit test: `test_forward_with_domain_latent_wrapper` — public API works
 
-- [ ] **Task 3: DomainLatent in Config** (`src/types.rs`)
-  - Add `domain_latent_path: Option<PathBuf>` to `Config` (or runtime config, not model config)
-  - Loaded lazily, stored alongside `LoraAdapter`
-  - Integration test: load domain_latent + lora, verify both apply correctly
+- [ ] **Task 3: DomainLatent in Config** (`src/types.rs`) — partial
+  - ✅ `DomainLatent` type exists with `load()`, `save()`, `zeros()`, `from_vec()`
+  - ⏳ `domain_latent_path: Option<PathBuf>` in Config skipped — deferred to runtime config
+  - ⏳ Lazy loading alongside `LoraAdapter` deferred — no runtime config system yet
+  - ⏳ Integration test with lora + domain_latent deferred
 
-- [ ] **Task 4: Prefill integration** (`src/transformer.rs`)
-  - `forward_prefill` also needs domain_latent injection at mid-layer
-  - Same pattern: at layer L/2, add to K/V before cache write
-  - Bidirectional prefill + domain_latent conditioning are orthogonal — both should work together
-  - Integration test: prefill with domain_latent, then decode with domain_latent
+- [x] **Task 4: Prefill integration** (`src/transformer.rs`) ✅
+  - `forward_prefill` gained `#[cfg(feature = "domain_latent")] domain_latent` parameter
+  - Injection at layer L/2 Phase A (K/V computation), same pattern as `forward_base`
+  - Bidirectional prefill + domain_latent conditioning work together
+  - Unit test: `test_domain_latent_prefill_changes_logits` — prefill output differs with latent
+  - Unit test: `test_domain_latent_prefill_then_decode` — prefill→decode pipeline works
 
-- [ ] **Task 5: riir-burner training support** (`riir-burner` repo)
+- [ ] **Task 5: riir-burner training support** (`riir-burner` repo) — deferred
   - Extend `train_lora.py` to also train domain_latent embedding
   - Training objective: cross-entropy + L2 regularization on embedding
   - Export domain_latent alongside adapter.safetensors
   - Extend `pack.sh` to pack domain_latent into binary format
-  - This is a separate task — can be deferred until training pipeline matures
+  - Deferred until training pipeline matures
 
-- [ ] **Task 6: Expert Registry integration** (`src/router/registry.rs`)
+- [ ] **Task 6: Expert Registry integration** (`src/router/registry.rs`) — deferred
+  - No `src/router/registry.rs` exists yet — Expert Registry (Plan 023) not implemented
   - `ExpertBundle` gains optional `domain_latent: Option<DomainLatent>`
   - When router resolves a domain, load the corresponding domain_latent
   - Pass to `forward()` and `forward_prefill()` via new parameter
-  - Integration test: route to domain with latent, verify injection occurs
+  - Deferred until Expert Registry is built
 
 ---
 
 ## File Change Summary
 
-| File | Change |
-|------|--------|
-| `src/types.rs` | Add `DomainLatent` struct, `load()`, binary format |
-| `src/transformer.rs` | `forward_base` + `forward_prefill`: mid-layer injection |
-| `src/router/registry.rs` | `ExpertBundle` includes `DomainLatent` |
-| `Cargo.toml` | Add `domain_latent` feature flag |
-| `riir-burner/train_lora.py` | Train domain latent embedding (deferred) |
-| `riir-burner/pack.rs` | Pack domain latent binary (deferred) |
+| File | Change | Status |
+|------|--------|--------|
+| `src/types.rs` | `DomainLatent` struct, `load()`, `save()`, binary format, 5 tests | ✅ Done |
+| `src/transformer.rs` | `forward_base` + `forward_prefill`: mid-layer injection, 5 tests | ✅ Done |
+| `Cargo.toml` | `domain_latent` feature flag + added to `full` | ✅ Done |
+| `src/router/registry.rs` | `ExpertBundle` includes `DomainLatent` | ⏳ Deferred |
+| `riir-burner/train_lora.py` | Train domain latent embedding | ⏳ Deferred |
+| `riir-burner/pack.rs` | Pack domain latent binary | ⏳ Deferred |
+
+**Tests:** 260 pass (with `domain_latent`), 255 pass (without). 5 new domain_latent tests.
 
 ---
 

@@ -837,6 +837,135 @@ impl LoraPair {
     }
 }
 
+/// Domain latent embedding for mid-layer conditioning (Plan 038).
+///
+/// Injected at layer `n_layer / 2` by adding to K and V projections before cache write.
+/// Inspired by the Free Transformer's mid-layer latent injection, adapted for
+/// supervised domain conditioning via LoRA fine-tuning.
+///
+/// Shape: `[kv_dim]` — one embedding per domain, matching K/V dimension for GQA.
+///
+/// # Binary format
+///
+/// ```text
+/// [MAGIC: "DLAT" 4B][VERSION: 1B][KV_DIM: 4B LE][EMBEDDING: kv_dim × f32 LE][BLAKE3: 32B]
+/// ```
+///
+/// BLAKE3 checksum covers everything before it (magic through embedding).
+#[cfg(feature = "domain_latent")]
+#[derive(Debug)]
+pub struct DomainLatent {
+    /// Domain embedding vector, shape `[kv_dim]`.
+    pub embedding: Vec<f32>,
+}
+
+#[cfg(feature = "domain_latent")]
+impl DomainLatent {
+    const MAGIC: &[u8; 4] = b"DLAT";
+    const VERSION: u8 = 1;
+
+    /// Load domain latent from binary file.
+    ///
+    /// Format: `[MAGIC 4B][VERSION 1B][KV_DIM 4B LE][EMBEDDING kv_dim×f32 LE][BLAKE3 32B]`
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        let data =
+            std::fs::read(path).map_err(|e| format!("Failed to read domain_latent file: {e}"))?;
+
+        // Minimum: magic(4) + version(1) + kv_dim(4) + hash(32) = 41
+        if data.len() < 41 {
+            return Err("File too small for domain_latent header".into());
+        }
+
+        // Validate BLAKE3 checksum — last 32 bytes cover everything before them
+        let payload_end = data.len() - 32;
+        let stored_checksum = &data[payload_end..];
+        let computed = blake3::hash(&data[..payload_end]);
+        if computed.as_bytes() != stored_checksum {
+            return Err("Domain latent file checksum mismatch".into());
+        }
+
+        let mut offset = 0usize;
+
+        // Magic
+        if &data[offset..offset + 4] != Self::MAGIC {
+            return Err("Invalid domain_latent magic bytes".into());
+        }
+        offset += 4;
+
+        // Version
+        let version = data[offset];
+        if version != Self::VERSION {
+            return Err(format!("Unsupported domain_latent version: {version}"));
+        }
+        offset += 1;
+
+        // KV_DIM
+        let kv_dim = u32::from_le_bytes(
+            data[offset..offset + 4]
+                .try_into()
+                .map_err(|e: std::array::TryFromSliceError| format!("kv_dim parse: {e}"))?,
+        ) as usize;
+        offset += 4;
+
+        // Embedding data
+        let embed_bytes = kv_dim * std::mem::size_of::<f32>();
+        if offset + embed_bytes > payload_end {
+            return Err(format!(
+                "Truncated embedding data: expected {embed_bytes} bytes at offset {offset}, payload ends at {payload_end}"
+            ));
+        }
+
+        let embedding: Vec<f32> = data[offset..offset + embed_bytes]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().expect("chunk is 4 bytes")))
+            .collect();
+
+        if embedding.len() != kv_dim {
+            return Err(format!(
+                "Embedding length mismatch: got {}, expected {kv_dim}",
+                embedding.len()
+            ));
+        }
+
+        Ok(Self { embedding })
+    }
+
+    /// Save domain latent to binary file (for tests and training export).
+    pub fn save(&self, path: &std::path::Path) -> Result<(), String> {
+        let kv_dim = self.embedding.len();
+        let embed_bytes = kv_dim * std::mem::size_of::<f32>();
+        let payload_len = 4 + 1 + 4 + embed_bytes;
+        let mut buf = Vec::with_capacity(payload_len + 32);
+
+        buf.extend_from_slice(Self::MAGIC);
+        buf.push(Self::VERSION);
+        buf.extend_from_slice(&(kv_dim as u32).to_le_bytes());
+        for &val in &self.embedding {
+            buf.extend_from_slice(&val.to_le_bytes());
+        }
+
+        let hash = blake3::hash(&buf);
+        buf.extend_from_slice(hash.as_bytes());
+
+        std::fs::write(path, &buf)
+            .map_err(|e| format!("Failed to write domain_latent file: {e}"))?;
+
+        Ok(())
+    }
+
+    /// Create a zero-initialized domain latent of the given kv_dim.
+    pub fn zeros(kv_dim: usize) -> Self {
+        Self {
+            embedding: vec![0.0; kv_dim],
+        }
+    }
+
+    /// Create a domain latent from a raw embedding vector.
+    pub fn from_vec(embedding: Vec<f32>) -> Self {
+        Self { embedding }
+    }
+}
+
 fn read_u32_le(data: &[u8], offset: &mut usize) -> Result<u32, String> {
     if *offset + 4 > data.len() {
         return Err("Unexpected end of data reading u32".into());
@@ -940,5 +1069,119 @@ mod tests_types {
         let config = Config::draft();
         assert_eq!(config.early_exit_patience, 0);
         assert_eq!(config.early_exit_gap, 0.0);
+    }
+
+    // ── DomainLatent (Plan 038) ────────────────────────────────────
+
+    #[cfg(feature = "domain_latent")]
+    #[test]
+    fn test_domain_latent_save_load_roundtrip() {
+        let original = DomainLatent::from_vec(vec![0.1, 0.2, 0.3, 0.4]);
+        let dir = std::env::temp_dir().join(format!(
+            "microgpt_test_dlat_roundtrip_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test.dlat");
+
+        original.save(&path).unwrap();
+        let loaded = DomainLatent::load(&path).unwrap();
+
+        assert_eq!(loaded.embedding.len(), 4);
+        for (i, (&o, &l)) in original.embedding.iter().zip(&loaded.embedding).enumerate() {
+            assert!(
+                (o - l).abs() < 1e-6,
+                "embedding[{i}] mismatch: saved {o}, loaded {l}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "domain_latent")]
+    #[test]
+    fn test_domain_latent_zeros() {
+        let dl = DomainLatent::zeros(8);
+        assert_eq!(dl.embedding.len(), 8);
+        assert!(dl.embedding.iter().all(|&v| v == 0.0));
+    }
+
+    #[cfg(feature = "domain_latent")]
+    #[test]
+    fn test_domain_latent_invalid_magic() {
+        let dir = std::env::temp_dir().join(format!(
+            "microgpt_test_dlat_badmagic_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("bad_magic.dlat");
+
+        // Write file with wrong magic
+        let mut buf = b"XLAT".to_vec(); // wrong magic
+        buf.push(1); // version
+        buf.extend_from_slice(&4u32.to_le_bytes()); // kv_dim
+        buf.extend_from_slice(&[0u8; 16]); // 4 x f32 zeros
+        let hash = blake3::hash(&buf);
+        buf.extend_from_slice(hash.as_bytes());
+        std::fs::write(&path, &buf).unwrap();
+
+        let result = DomainLatent::load(&path);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("magic"),
+            "expected magic error"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "domain_latent")]
+    #[test]
+    fn test_domain_latent_checksum_mismatch() {
+        let dir = std::env::temp_dir().join(format!(
+            "microgpt_test_dlat_checksum_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("bad_checksum.dlat");
+
+        let dl = DomainLatent::from_vec(vec![1.0, 2.0, 3.0]);
+        dl.save(&path).unwrap();
+
+        // Corrupt one byte in the file
+        let mut data = std::fs::read(&path).unwrap();
+        let corrupt_idx = 10.min(data.len() - 33); // corrupt a payload byte
+        data[corrupt_idx] ^= 0xFF;
+        std::fs::write(&path, &data).unwrap();
+
+        let result = DomainLatent::load(&path);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("checksum"),
+            "expected checksum error"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "domain_latent")]
+    #[test]
+    fn test_domain_latent_file_too_small() {
+        let dir = std::env::temp_dir().join(format!(
+            "microgpt_test_dlat_toosmall_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("too_small.dlat");
+
+        std::fs::write(&path, b"DLAT").unwrap(); // only 4 bytes, need >= 41
+        let result = DomainLatent::load(&path);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("too small"),
+            "expected too small error"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

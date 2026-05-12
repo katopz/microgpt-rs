@@ -329,12 +329,37 @@ pub fn forward<'a>(
     pos: usize,
     config: &Config,
 ) -> &'a mut [f32] {
-    forward_base(ctx, weights, cache, token, pos, config, None)
+    #[cfg(not(feature = "domain_latent"))]
+    {
+        forward_base(ctx, weights, cache, token, pos, config, None)
+    }
+    #[cfg(feature = "domain_latent")]
+    {
+        forward_base(ctx, weights, cache, token, pos, config, None, None)
+    }
 }
 
-/// Internal forward with optional LoRA (writer LoRA during decode).
+/// Forward with optional LoRA and domain latent (Plan 038).
+/// Convenience wrapper for callers that need both conditioning signals.
+#[cfg(feature = "domain_latent")]
+#[allow(clippy::too_many_arguments)]
+pub fn forward_with_domain_latent<'a>(
+    ctx: &'a mut ForwardContext,
+    weights: &TransformerWeights,
+    cache: &mut MultiLayerKVCache,
+    token: usize,
+    pos: usize,
+    config: &Config,
+    lora: Option<&crate::types::LoraAdapter>,
+    domain_latent: Option<&crate::types::DomainLatent>,
+) -> &'a mut [f32] {
+    forward_base(ctx, weights, cache, token, pos, config, lora, domain_latent)
+}
+
+/// Internal forward with optional LoRA and domain latent (writer LoRA during decode).
 /// Zero-alloc forward pass. Writes logits into `ctx.logits` and returns &mut to it.
 /// Multi-layer: RMSNorm → Attn → Res → RMSNorm → MLP → Res per layer, then LM Head.
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn forward_base<'a>(
     ctx: &'a mut ForwardContext,
@@ -344,6 +369,7 @@ fn forward_base<'a>(
     pos: usize,
     config: &Config,
     lora: Option<&crate::types::LoraAdapter>,
+    #[cfg(feature = "domain_latent")] domain_latent: Option<&crate::types::DomainLatent>,
 ) -> &'a mut [f32] {
     let n = config.n_embd;
     let hd = config.head_dim;
@@ -381,6 +407,19 @@ fn forward_base<'a>(
         matmul(&mut ctx.v, &layer_weights.attn_wv, &ctx.x, kvd, n);
         if let Some(lora) = lora {
             crate::types::lora_apply(&mut ctx.v, lora, &ctx.x, &mut ctx.lora_buf);
+        }
+
+        // Domain latent injection at mid-layer (Plan 038: Free Transformer adaptation)
+        #[cfg(feature = "domain_latent")]
+        if layer_idx == config.n_layer / 2
+            && let Some(dl) = domain_latent
+        {
+            for i in 0..kvd {
+                unsafe {
+                    *ctx.k.get_unchecked_mut(i) += *dl.embedding.get_unchecked(i);
+                    *ctx.v.get_unchecked_mut(i) += *dl.embedding.get_unchecked(i);
+                }
+            }
         }
 
         // Store K,V in per-layer cache (kv_dim elements per position)
@@ -517,6 +556,7 @@ fn forward_base<'a>(
 /// Zero-copy: no allocations. Reuses ForwardContext buffers per-position,
 /// PrefillContext::hidden for multi-layer inter-layer state.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub fn forward_prefill<'a>(
     ctx: &'a mut ForwardContext,
     prefill: &mut PrefillContext,
@@ -525,6 +565,7 @@ pub fn forward_prefill<'a>(
     tokens: &[usize],
     config: &Config,
     lora: Option<&crate::types::LoraAdapter>,
+    #[cfg(feature = "domain_latent")] domain_latent: Option<&crate::types::DomainLatent>,
 ) -> &'a mut [f32] {
     let prompt_len = tokens.len().min(prefill.max_prompt_len);
     let n = config.n_embd;
@@ -586,6 +627,19 @@ pub fn forward_prefill<'a>(
             crate::types::matmul(&mut ctx.v, &layer_weights.attn_wv, &ctx.x, kvd, n);
             if let Some(lora) = lora {
                 crate::types::lora_apply(&mut ctx.v, lora, &ctx.x, &mut prefill.lora_buf);
+            }
+
+            // Domain latent injection at mid-layer (Plan 038: Free Transformer adaptation)
+            #[cfg(feature = "domain_latent")]
+            if layer_idx == config.n_layer / 2
+                && let Some(dl) = domain_latent
+            {
+                for i in 0..kvd {
+                    unsafe {
+                        *ctx.k.get_unchecked_mut(i) += *dl.embedding.get_unchecked(i);
+                        *ctx.v.get_unchecked_mut(i) += *dl.embedding.get_unchecked(i);
+                    }
+                }
             }
 
             // Store K/V in cache
@@ -754,15 +808,33 @@ pub fn generate_with_prefill(
     lora_pair: &crate::types::LoraPair,
 ) -> Vec<usize> {
     // 1. Bidirectional prefill with reader LoRA
-    let logits = forward_prefill(
-        ctx,
-        prefill,
-        weights,
-        cache,
-        prompt_tokens,
-        config,
-        lora_pair.reader.as_ref(),
-    );
+    let logits = {
+        #[cfg(not(feature = "domain_latent"))]
+        {
+            forward_prefill(
+                ctx,
+                prefill,
+                weights,
+                cache,
+                prompt_tokens,
+                config,
+                lora_pair.reader.as_ref(),
+            )
+        }
+        #[cfg(feature = "domain_latent")]
+        {
+            forward_prefill(
+                ctx,
+                prefill,
+                weights,
+                cache,
+                prompt_tokens,
+                config,
+                lora_pair.reader.as_ref(),
+                None,
+            )
+        }
+    };
 
     // 2. Sample first generation token from prefill output
     let mut p_dist = logits.to_vec();
@@ -781,15 +853,33 @@ pub fn generate_with_prefill(
             break;
         }
 
-        let logits = forward_base(
-            ctx,
-            weights,
-            cache,
-            token,
-            pos,
-            config,
-            lora_pair.writer.as_ref(),
-        );
+        let logits = {
+            #[cfg(not(feature = "domain_latent"))]
+            {
+                forward_base(
+                    ctx,
+                    weights,
+                    cache,
+                    token,
+                    pos,
+                    config,
+                    lora_pair.writer.as_ref(),
+                )
+            }
+            #[cfg(feature = "domain_latent")]
+            {
+                forward_base(
+                    ctx,
+                    weights,
+                    cache,
+                    token,
+                    pos,
+                    config,
+                    lora_pair.writer.as_ref(),
+                    None,
+                )
+            }
+        };
         for logit in logits.iter_mut() {
             *logit /= config.temperature;
         }
@@ -2720,6 +2810,7 @@ mod tests {
             let mut prefill = PrefillContext::new(&config);
             let mut cache = MultiLayerKVCache::new(&config);
             let tokens: Vec<usize> = (0..8).collect();
+            #[cfg(not(feature = "domain_latent"))]
             let logits = forward_prefill(
                 &mut ctx,
                 &mut prefill,
@@ -2727,6 +2818,17 @@ mod tests {
                 &mut cache,
                 &tokens,
                 &config,
+                None,
+            );
+            #[cfg(feature = "domain_latent")]
+            let logits = forward_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &tokens,
+                &config,
+                None,
                 None,
             );
             assert_eq!(logits.len(), config.vocab_size);
@@ -2745,6 +2847,7 @@ mod tests {
             let mut prefill = PrefillContext::new(&config);
             let mut cache = MultiLayerKVCache::new(&config);
             let tokens: Vec<usize> = (0..5).collect();
+            #[cfg(not(feature = "domain_latent"))]
             forward_prefill(
                 &mut ctx,
                 &mut prefill,
@@ -2752,6 +2855,17 @@ mod tests {
                 &mut cache,
                 &tokens,
                 &config,
+                None,
+            );
+            #[cfg(feature = "domain_latent")]
+            forward_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &tokens,
+                &config,
+                None,
                 None,
             );
             // All 5 positions should have K/V in cache
@@ -2773,6 +2887,7 @@ mod tests {
             let mut prefill = PrefillContext::new(&config);
             let mut cache = MultiLayerKVCache::new(&config);
             let tokens: Vec<usize> = vec![0, 1, 2];
+            #[cfg(not(feature = "domain_latent"))]
             let logits = forward_prefill(
                 &mut ctx,
                 &mut prefill,
@@ -2780,6 +2895,17 @@ mod tests {
                 &mut cache,
                 &tokens,
                 &config,
+                None,
+            );
+            #[cfg(feature = "domain_latent")]
+            let logits = forward_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &tokens,
+                &config,
+                None,
                 None,
             );
             assert_eq!(logits.len(), config.vocab_size);
@@ -2794,6 +2920,7 @@ mod tests {
             let mut prefill = PrefillContext::new(&config);
             let mut cache = MultiLayerKVCache::new(&config);
             let tokens = vec![5];
+            #[cfg(not(feature = "domain_latent"))]
             let logits = forward_prefill(
                 &mut ctx,
                 &mut prefill,
@@ -2801,6 +2928,17 @@ mod tests {
                 &mut cache,
                 &tokens,
                 &config,
+                None,
+            );
+            #[cfg(feature = "domain_latent")]
+            let logits = forward_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &tokens,
+                &config,
+                None,
                 None,
             );
             assert_eq!(logits.len(), config.vocab_size);
@@ -2823,6 +2961,7 @@ mod tests {
 
             // Prefill with 4 tokens
             let prompt: Vec<usize> = (0..4).collect();
+            #[cfg(not(feature = "domain_latent"))]
             let logits = forward_prefill(
                 &mut ctx,
                 &mut prefill,
@@ -2830,6 +2969,17 @@ mod tests {
                 &mut cache,
                 &prompt,
                 &config,
+                None,
+            );
+            #[cfg(feature = "domain_latent")]
+            let logits = forward_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &prompt,
+                &config,
+                None,
                 None,
             );
             assert_eq!(logits.len(), config.vocab_size);
@@ -2859,7 +3009,10 @@ mod tests {
             // New forward_base with None (should be identical)
             let mut ctx2 = ForwardContext::new(&config);
             let mut cache2 = MultiLayerKVCache::new(&config);
+            #[cfg(not(feature = "domain_latent"))]
             let logits2 = forward_base(&mut ctx2, &weights, &mut cache2, 0, 0, &config, None);
+            #[cfg(feature = "domain_latent")]
+            let logits2 = forward_base(&mut ctx2, &weights, &mut cache2, 0, 0, &config, None, None);
 
             for i in 0..config.vocab_size {
                 let diff = (logits1[i] - logits2[i]).abs();
@@ -2919,6 +3072,7 @@ mod tests {
             let mut prefill = PrefillContext::new(&config);
             let mut cache = MultiLayerKVCache::new(&config);
             let tokens: Vec<usize> = (0..8).collect();
+            #[cfg(not(feature = "domain_latent"))]
             let logits = forward_prefill(
                 &mut ctx,
                 &mut prefill,
@@ -2926,6 +3080,17 @@ mod tests {
                 &mut cache,
                 &tokens,
                 &config,
+                None,
+            );
+            #[cfg(feature = "domain_latent")]
+            let logits = forward_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &tokens,
+                &config,
+                None,
                 None,
             );
             assert_eq!(logits.len(), config.vocab_size);
@@ -2947,6 +3112,7 @@ mod tests {
             let mut prefill = PrefillContext::new(&config);
             let mut cache = MultiLayerKVCache::new(&config);
             let tokens: Vec<usize> = (0..4).collect();
+            #[cfg(not(feature = "domain_latent"))]
             forward_prefill(
                 &mut ctx,
                 &mut prefill,
@@ -2954,6 +3120,17 @@ mod tests {
                 &mut cache,
                 &tokens,
                 &config,
+                None,
+            );
+            #[cfg(feature = "domain_latent")]
+            forward_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &tokens,
+                &config,
+                None,
                 None,
             );
             // Both layers should have K/V populated
@@ -2971,6 +3148,215 @@ mod tests {
                         "layer {layer} V cache at pos {p} should be populated"
                     );
                 }
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Domain Latent injection (Plan 038)
+        // -----------------------------------------------------------------------
+
+        #[cfg(feature = "domain_latent")]
+        #[test]
+        fn test_domain_latent_changes_logits() {
+            let config = small_target_2layer(); // 2 layers, mid-layer = layer 1
+            let mut rng = Rng::new(42);
+            let weights = TransformerWeights::new(&config, &mut rng);
+            let kvd = crate::types::kv_dim(&config);
+
+            // Without domain latent
+            let mut ctx1 = ForwardContext::new(&config);
+            let mut cache1 = MultiLayerKVCache::new(&config);
+            let logits1 = forward_base(&mut ctx1, &weights, &mut cache1, 0, 0, &config, None, None);
+
+            // With domain latent (non-zero embedding)
+            let mut ctx2 = ForwardContext::new(&config);
+            let mut cache2 = MultiLayerKVCache::new(&config);
+            let dl = crate::types::DomainLatent::from_vec(vec![0.5; kvd]);
+            let logits2 = forward_base(
+                &mut ctx2,
+                &weights,
+                &mut cache2,
+                0,
+                0,
+                &config,
+                None,
+                Some(&dl),
+            );
+
+            // Logits should differ — domain latent modulates K/V at mid-layer
+            let mut any_diff = false;
+            for (i, (&a, &b)) in logits1.iter().zip(logits2.iter()).enumerate() {
+                if (a - b).abs() > 1e-6 {
+                    any_diff = true;
+                    break;
+                }
+            }
+            assert!(any_diff, "domain latent should change logits");
+        }
+
+        #[cfg(feature = "domain_latent")]
+        #[test]
+        fn test_domain_latent_zero_embedding_same_logits() {
+            let config = small_target_2layer();
+            let mut rng = Rng::new(42);
+            let weights = TransformerWeights::new(&config, &mut rng);
+            let kvd = crate::types::kv_dim(&config);
+
+            // Without domain latent
+            let mut ctx1 = ForwardContext::new(&config);
+            let mut cache1 = MultiLayerKVCache::new(&config);
+            let logits1 = forward_base(&mut ctx1, &weights, &mut cache1, 0, 0, &config, None, None);
+
+            // With zero domain latent — should be identical
+            let mut ctx2 = ForwardContext::new(&config);
+            let mut cache2 = MultiLayerKVCache::new(&config);
+            let dl = crate::types::DomainLatent::zeros(kvd);
+            let logits2 = forward_base(
+                &mut ctx2,
+                &weights,
+                &mut cache2,
+                0,
+                0,
+                &config,
+                None,
+                Some(&dl),
+            );
+
+            for (i, (&a, &b)) in logits1.iter().zip(logits2.iter()).enumerate() {
+                let diff = (a - b).abs();
+                assert!(
+                    diff < 1e-6,
+                    "zero domain latent should not change logits, diff at {i}: {diff}"
+                );
+            }
+        }
+
+        #[cfg(feature = "domain_latent")]
+        #[test]
+        fn test_domain_latent_prefill_changes_logits() {
+            let config = small_target_2layer();
+            let mut rng = Rng::new(42);
+            let weights = TransformerWeights::new(&config, &mut rng);
+            let kvd = crate::types::kv_dim(&config);
+            let tokens: Vec<usize> = (0..4).collect();
+
+            // Without domain latent
+            let mut ctx1 = ForwardContext::new(&config);
+            let mut prefill1 = PrefillContext::new(&config);
+            let mut cache1 = MultiLayerKVCache::new(&config);
+            let logits1 = forward_prefill(
+                &mut ctx1,
+                &mut prefill1,
+                &weights,
+                &mut cache1,
+                &tokens,
+                &config,
+                None,
+                None,
+            );
+
+            // With domain latent
+            let mut ctx2 = ForwardContext::new(&config);
+            let mut prefill2 = PrefillContext::new(&config);
+            let mut cache2 = MultiLayerKVCache::new(&config);
+            let dl = crate::types::DomainLatent::from_vec(vec![0.3; kvd]);
+            let logits2 = forward_prefill(
+                &mut ctx2,
+                &mut prefill2,
+                &weights,
+                &mut cache2,
+                &tokens,
+                &config,
+                None,
+                Some(&dl),
+            );
+
+            let mut any_diff = false;
+            for (&a, &b) in logits1.iter().zip(logits2.iter()) {
+                if (a - b).abs() > 1e-6 {
+                    any_diff = true;
+                    break;
+                }
+            }
+            assert!(any_diff, "domain latent in prefill should change logits");
+        }
+
+        #[cfg(feature = "domain_latent")]
+        #[test]
+        fn test_domain_latent_prefill_then_decode() {
+            let config = small_target_2layer();
+            let mut rng = Rng::new(42);
+            let weights = TransformerWeights::new(&config, &mut rng);
+            let kvd = crate::types::kv_dim(&config);
+            let dl = crate::types::DomainLatent::from_vec(vec![0.2; kvd]);
+
+            // Prefill with domain latent
+            let mut ctx = ForwardContext::new(&config);
+            let mut prefill = PrefillContext::new(&config);
+            let mut cache = MultiLayerKVCache::new(&config);
+            let prompt: Vec<usize> = (0..3).collect();
+            let logits_prefill = forward_prefill(
+                &mut ctx,
+                &mut prefill,
+                &weights,
+                &mut cache,
+                &prompt,
+                &config,
+                None,
+                Some(&dl),
+            );
+            assert_eq!(logits_prefill.len(), config.vocab_size);
+            for (i, &l) in logits_prefill.iter().enumerate() {
+                assert!(
+                    l.is_finite(),
+                    "prefill with domain_latent logit {i} not finite: {l}"
+                );
+            }
+
+            // Decode with domain latent (position 3)
+            let logits_decode = forward_base(
+                &mut ctx,
+                &weights,
+                &mut cache,
+                0,
+                3,
+                &config,
+                None,
+                Some(&dl),
+            );
+            assert_eq!(logits_decode.len(), config.vocab_size);
+            for (i, &l) in logits_decode.iter().enumerate() {
+                assert!(
+                    l.is_finite(),
+                    "decode after prefill with domain_latent logit {i} not finite: {l}"
+                );
+            }
+        }
+
+        #[cfg(feature = "domain_latent")]
+        #[test]
+        fn test_forward_with_domain_latent_wrapper() {
+            let config = Config::micro();
+            let mut rng = Rng::new(42);
+            let weights = TransformerWeights::new(&config, &mut rng);
+            let kvd = crate::types::kv_dim(&config);
+            let dl = crate::types::DomainLatent::from_vec(vec![0.1; kvd]);
+
+            let mut ctx = ForwardContext::new(&config);
+            let mut cache = MultiLayerKVCache::new(&config);
+            let logits = forward_with_domain_latent(
+                &mut ctx,
+                &weights,
+                &mut cache,
+                0,
+                0,
+                &config,
+                None,
+                Some(&dl),
+            );
+            assert_eq!(logits.len(), config.vocab_size);
+            for (i, &l) in logits.iter().enumerate() {
+                assert!(l.is_finite(), "logit {i} not finite: {l}");
             }
         }
     }

@@ -27,6 +27,7 @@ sudoku = []
 validator = ["syn", "proc-macro2"]
 sparse_mlp = []  # TwELL-inspired sparse MLP matmul (Plan 022)
 ppot = []  # PPoT logit-parameterized CPU resampling (Plan 026 + 027)
+domain_latent = []  # Free Transformer mid-layer domain conditioning (Plan 038)
 bandit = []  # Multi-armed bandit adaptive ScreeningPruner (Plan 030)
 bomber = ["bevy_ecs", "bandit"]  # Bomberman HL Arena (Plan 033)
 bomber-wasm = ["bomber", "wasmtime", "papaya"]  # WASM bomber validator loader (Plan 034) + batch pool (Plan 037)
@@ -35,7 +36,7 @@ rest = []  # REST API client via reqwest + tokio runtime (planned)
 embedding_router = []  # Semantic embedding retrieval from anyrag (Plan 024)
 gpu = []  # GPU compute via wgpu, safetensors model loading (planned)
 leviathan = []  # LeviathanVerifier real p/q rejection sampling (Algorithm 1)
-full = ["sudoku", "validator", "ppot", "bandit", "bomber", "bomber-wasm", "monopoly", "rest", "embedding_router", "gpu", "leviathan"]
+full = ["sudoku", "validator", "ppot", "domain_latent", "bandit", "bomber", "bomber-wasm", "monopoly", "rest", "embedding_router", "gpu", "leviathan"]
 
 # ── Bandit (RL / Game Theory) ─────────────────────────────────
 
