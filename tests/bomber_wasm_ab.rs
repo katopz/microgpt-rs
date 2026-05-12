@@ -29,7 +29,7 @@
 
 use std::path::Path;
 
-use microgpt_rs::pruners::bomber::wasm_pruner::BomberWasmPruner;
+use microgpt_rs::pruners::bomber::wasm_pruner::{BatchResult, BomberWasmPruner};
 use microgpt_rs::pruners::bomber::{ArenaGrid, BomberAction, Cell, GridPos, is_safe_action};
 
 // ── Constants ──────────────────────────────────────────────────
@@ -1085,4 +1085,138 @@ fn empty_grid() -> ArenaGrid {
         width: 13,
         height: 13,
     }
+}
+
+// ── Batch API Correctness Tests ────────────────────────────────
+
+#[test]
+fn test_batch_matches_individual() {
+    let Some(pruner) = load_pruner() else { return };
+
+    let grid = ArenaGrid::generate(42);
+    let walkable = find_walkable_positions(&grid);
+    if walkable.len() < 3 {
+        return;
+    }
+
+    let bombs = vec![((5, 5), 2, 3), ((7, 3), 1, 2)];
+
+    // Pick 3 players at walkable positions
+    let players: Vec<(u8, i32, i32)> = vec![
+        (0, walkable[0].0, walkable[0].1),
+        (1, walkable[1].0, walkable[1].1),
+        (2, walkable[2].0, walkable[2].1),
+    ];
+
+    let batch_result = pruner.batch_validate(&grid, &players, &bombs);
+
+    assert_eq!(
+        batch_result.player_count(),
+        players.len(),
+        "Batch result should have {} players",
+        players.len()
+    );
+
+    for (pidx, &(pid, px, py)) in players.iter().enumerate() {
+        for action_idx in 0..6usize {
+            let individual = pruner.is_safe_action(action_idx, &grid, px, py, pid, &bombs);
+            let batch = batch_result.is_valid(pidx, action_idx);
+            assert_eq!(
+                batch, individual,
+                "Batch/individual mismatch: player {pidx} (id={pid}) at ({px},{py}) \
+                 action {action_idx}: batch={batch} individual={individual}"
+            );
+        }
+    }
+
+    println!(
+        "✅ PASSED: batch matches individual for {} players × 6 actions",
+        players.len()
+    );
+}
+
+#[test]
+fn test_batch_empty_players() {
+    let Some(pruner) = load_pruner() else { return };
+
+    let grid = empty_grid();
+    let bombs: [((i32, i32), u32, u32); 0] = [];
+
+    let result = pruner.batch_validate(&grid, &[], &bombs);
+
+    assert_eq!(
+        result.player_count(),
+        0,
+        "Empty players should return 0 player count"
+    );
+    assert!(
+        !result.is_valid(0, 0),
+        "Empty result should return false for any query"
+    );
+
+    println!("✅ PASSED: batch with empty players returns empty result");
+}
+
+#[test]
+fn test_batch_all_walkable_positions() {
+    let Some(pruner) = load_pruner() else { return };
+
+    let mut total_checks = 0usize;
+    let mut mismatches = 0usize;
+
+    for i in 0..NUM_RANDOM_GRIDS {
+        let seed = 2000 + i as u64;
+        let grid = ArenaGrid::generate(seed);
+        let walkable = find_walkable_positions(&grid);
+
+        if walkable.len() < 4 {
+            continue;
+        }
+
+        let mut rng = fastrand::Rng::with_seed(seed);
+        let bomb_configs = generate_bomb_configs(&grid, seed);
+
+        for bombs in &bomb_configs {
+            // Pick 4 random walkable positions for players
+            let mut players = Vec::with_capacity(4);
+            for pid in 0u8..4 {
+                let idx = rng.usize(0..walkable.len());
+                let (px, py) = walkable[idx];
+                players.push((pid, px, py));
+            }
+
+            let batch_result = pruner.batch_validate(&grid, &players, bombs);
+            assert_eq!(
+                batch_result.player_count(),
+                4,
+                "Batch should have 4 players (seed={seed})"
+            );
+
+            for (pidx, &(pid, px, py)) in players.iter().enumerate() {
+                for &action_idx in &ALL_ACTION_INDICES {
+                    total_checks += 1;
+                    let individual = pruner.is_safe_action(action_idx, &grid, px, py, pid, bombs);
+                    let batch = batch_result.is_valid(pidx, action_idx);
+                    if batch != individual {
+                        mismatches += 1;
+                        eprintln!(
+                            "  ⚠ Mismatch seed={seed} player={pidx}(id={pid}) \
+                             pos=({px},{py}) action={action_idx}: \
+                             batch={batch} individual={individual}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        mismatches, 0,
+        "❌ {mismatches}/{total_checks} batch vs individual mismatches"
+    );
+
+    println!(
+        "✅ PASSED: {total_checks} batch vs individual comparisons \
+         across {NUM_RANDOM_GRIDS} grids, 4 players × 6 actions"
+    );
 }

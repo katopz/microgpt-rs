@@ -21,8 +21,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use microgpt_rs::pruners::bomber::wasm_pruner::BomberWasmPruner;
-use microgpt_rs::pruners::bomber::wasm_state::serialize_game_state;
-use microgpt_rs::pruners::bomber::{ArenaGrid, BomberAction, Cell, GridPos, is_safe_action};
+use microgpt_rs::pruners::bomber::wasm_state::{ZeroCopyStateBuffer, serialize_game_state};
+use microgpt_rs::pruners::bomber::{ArenaGrid, BomberAction, GridPos, is_safe_action};
 
 // ── Config ──────────────────────────────────────────────────────
 
@@ -59,7 +59,7 @@ fn bench_bombs() -> Vec<((i32, i32), u32, u32)> {
 }
 
 /// Micro-benchmark: time a closure over N iterations, return ns/iter.
-fn bench_ns(label: &str, warmup: u64, iters: u64, f: impl Fn()) -> f64 {
+fn bench_ns(label: &str, warmup: u64, iters: u64, mut f: impl FnMut()) -> f64 {
     for _ in 0..warmup {
         black_box(f());
     }
@@ -267,7 +267,7 @@ fn bench_full_game_simulation() {
     println!("\n═══ Benchmark: Full Game Simulation (200 ticks × 6 actions) ═══");
 
     let pruner = BomberWasmPruner::load_from_file(WASM_PATH).unwrap();
-    let no_bombs: Vec<((i32, i32), u32, u32)> = vec![];
+    let _no_bombs: Vec<((i32, i32), u32, u32)> = vec![];
     let bombs = bench_bombs();
 
     // Simulate: for each tick, check all 6 actions for all players
@@ -375,4 +375,226 @@ fn bench_summary() {
     println!("    Full game:       < 50ms (200 ticks × 6 calls)");
     println!();
     println!("  Results to be recorded in .benchmarks/003_bomber_wasm_validator.md");
+}
+
+// ── Batch API Benchmarks ───────────────────────────────────────
+
+#[test]
+fn bench_batch_vs_individual() {
+    if !wasm_available() {
+        println!("{}", skip_msg());
+        return;
+    }
+
+    println!("\n═══ Benchmark: Batch API vs Individual Calls (1 tick, 4 players × 6 actions) ═══");
+
+    let pruner = BomberWasmPruner::load_from_file(WASM_PATH).unwrap();
+    let grid = bench_grid();
+    let bombs = bench_bombs();
+
+    let players: [(u8, i32, i32); 4] = [(0, 3, 3), (1, 6, 6), (2, 9, 3), (3, 3, 9)];
+
+    // Individual: 24 FFI calls per tick
+    let individual_ns = bench_ns("Individual (24 × is_safe_action)", WARMUP, ITERS, || {
+        for &(pid, px, py) in &players {
+            for action_idx in 0..6usize {
+                let _ = black_box(pruner.is_safe_action(action_idx, &grid, px, py, pid, &bombs));
+            }
+        }
+    });
+
+    // Batch: 1 FFI call per tick
+    let batch_ns = bench_ns("Batch (1 × batch_validate)", WARMUP, ITERS, || {
+        let _ = black_box(pruner.batch_validate(&grid, &players, &bombs));
+    });
+
+    let speedup = individual_ns / batch_ns;
+    println!("  → Batch speedup:      {:.1}× faster", speedup);
+    println!(
+        "  → Per-tick: individual={:.2}µs  batch={:.2}µs",
+        individual_ns / 1000.0,
+        batch_ns / 1000.0,
+    );
+}
+
+#[test]
+fn bench_zero_copy_vs_vec() {
+    if !wasm_available() {
+        println!("{}", skip_msg());
+        return;
+    }
+
+    println!("\n═══ Benchmark: Zero-Copy vs Vec Serialization (3 bombs) ═══");
+
+    let grid = bench_grid();
+    let bombs = bench_bombs();
+    let mut zerocopy = ZeroCopyStateBuffer::new();
+
+    let vec_ns = bench_ns("Vec-based serialize_game_state", WARMUP, ITERS, || {
+        let _ = black_box(serialize_game_state(&grid, 3, 3, 0, &bombs));
+    });
+
+    let zerocopy_ns = bench_ns(
+        "Zero-copy ZeroCopyStateBuffer::serialize",
+        WARMUP,
+        ITERS,
+        || {
+            let _ = black_box(zerocopy.serialize(&grid, 3, 3, 0, &bombs));
+        },
+    );
+
+    let speedup = vec_ns / zerocopy_ns;
+    println!("  → Zero-copy speedup:  {:.1}× faster", speedup);
+    println!(
+        "  → Vec: {:.0} ns/call   Zero-copy: {:.0} ns/call",
+        vec_ns, zerocopy_ns,
+    );
+}
+
+#[test]
+fn bench_full_game_batch() {
+    if !wasm_available() {
+        println!("{}", skip_msg());
+        return;
+    }
+
+    println!(
+        "\n═══ Benchmark: Full Game — Batch API vs Individual (200 ticks × 4 players × 6 actions) ═══"
+    );
+
+    let pruner = BomberWasmPruner::load_from_file(WASM_PATH).unwrap();
+    let bombs = bench_bombs();
+
+    let players: [(u8, i32, i32); 4] = [(0, 3, 3), (1, 6, 6), (2, 9, 3), (3, 3, 9)];
+
+    let simulate_game_batch = |seed: u64, pruner: &BomberWasmPruner| {
+        let grid = ArenaGrid::generate(seed);
+        let mut total_checks = 0u64;
+        for _tick in 0..GAME_TICKS {
+            let result = pruner.batch_validate(&grid, &players, &bombs);
+            for pidx in 0..4usize {
+                for action_idx in 0..6usize {
+                    let _ = black_box(result.is_valid(pidx, action_idx));
+                    total_checks += 1;
+                }
+            }
+        }
+        total_checks
+    };
+
+    let simulate_game_individual = |seed: u64, pruner: &BomberWasmPruner| {
+        let grid = ArenaGrid::generate(seed);
+        let mut total_checks = 0u64;
+        for _tick in 0..GAME_TICKS {
+            for &(pid, px, py) in &players {
+                for action_idx in 0..6usize {
+                    let _ =
+                        black_box(pruner.is_safe_action(action_idx, &grid, px, py, pid, &bombs));
+                    total_checks += 1;
+                }
+            }
+        }
+        total_checks
+    };
+
+    // Warmup
+    for seed in 0..2u64 {
+        black_box(simulate_game_batch(seed, &pruner));
+        black_box(simulate_game_individual(seed, &pruner));
+    }
+
+    // Batch game
+    let start = Instant::now();
+    let mut batch_total_checks = 0u64;
+    for round in 0..GAME_ROUNDS {
+        batch_total_checks += simulate_game_batch(round as u64, &pruner);
+    }
+    let batch_elapsed = start.elapsed();
+
+    // Individual game
+    let start = Instant::now();
+    let mut individual_total_checks = 0u64;
+    for round in 0..GAME_ROUNDS {
+        individual_total_checks += simulate_game_individual(round as u64, &pruner);
+    }
+    let individual_elapsed = start.elapsed();
+
+    let batch_per_game = batch_elapsed.as_micros() as f64 / GAME_ROUNDS as f64;
+    let individual_per_game = individual_elapsed.as_micros() as f64 / GAME_ROUNDS as f64;
+    let speedup = individual_elapsed.as_secs_f64() / batch_elapsed.as_secs_f64();
+    let checks_per_game = batch_total_checks / GAME_ROUNDS as u64;
+
+    println!(
+        "  Checks per game: {} ({} ticks × 4 players × 6 actions)",
+        checks_per_game, GAME_TICKS,
+    );
+    println!(
+        "  Individual per game: {:.2} ms",
+        individual_per_game / 1000.0
+    );
+    println!("  Batch     per game: {:.2} ms", batch_per_game / 1000.0);
+    println!("  Batch speedup:      {:.1}×", speedup);
+    println!(
+        "  Individual per check: {:.0} ns",
+        individual_elapsed.as_nanos() as f64 / individual_total_checks as f64,
+    );
+    println!(
+        "  Batch     per check: {:.0} ns",
+        batch_elapsed.as_nanos() as f64 / batch_total_checks as f64,
+    );
+
+    assert!(
+        batch_per_game < 50_000.0,
+        "Full batch game should be < 50ms, got {:.2}ms",
+        batch_per_game / 1000.0,
+    );
+}
+
+#[test]
+fn bench_batch_relevance() {
+    if !wasm_available() {
+        println!("{}", skip_msg());
+        return;
+    }
+
+    println!("\n═══ Benchmark: Batch Relevance Scoring ═══");
+
+    let pruner = BomberWasmPruner::load_from_file(WASM_PATH).unwrap();
+    let grid = bench_grid();
+    let bombs = bench_bombs();
+
+    let players: [(u8, i32, i32); 4] = [(0, 3, 3), (1, 6, 6), (2, 9, 3), (3, 3, 9)];
+
+    // Individual relevance baseline (24 calls)
+    let individual_ns = bench_ns("Individual (24 × action_relevance)", WARMUP, ITERS, || {
+        for &(pid, px, py) in &players {
+            for action_idx in 0..6usize {
+                let _ = black_box(pruner.action_relevance(action_idx, &grid, px, py, pid, &bombs));
+            }
+        }
+    });
+
+    // Batch relevance (1 call)
+    let batch_ns = bench_ns("Batch (1 × batch_relevance)", WARMUP, ITERS, || {
+        let _ = black_box(pruner.batch_relevance(&grid, &players, &bombs));
+    });
+
+    let speedup = individual_ns / batch_ns;
+    println!("  → Batch relevance speedup: {:.1}× faster", speedup);
+    println!(
+        "  → Individual: {:.2}µs   Batch: {:.2}µs",
+        individual_ns / 1000.0,
+        batch_ns / 1000.0,
+    );
+
+    // Verify batch relevance produces results
+    if let Some(result) = pruner.batch_relevance(&grid, &players, &bombs) {
+        println!(
+            "  → Batch relevance: {} players × {} actions",
+            result.player_count(),
+            6, // action_count
+        );
+    } else {
+        println!("  ⚠ batch_relevance not available in this WASM build");
+    }
 }
