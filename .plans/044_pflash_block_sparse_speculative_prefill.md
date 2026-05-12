@@ -9,16 +9,16 @@
 
 ## Tasks
 
-- [ ] **Task 1: Benchmark baseline prefill scoring (CPU token-level `AttentionScorer` + GPU `attention_score.wgsl`)**
+- [x] **Task 1: Benchmark baseline prefill scoring (CPU token-level `AttentionScorer` + GPU `attention_score.wgsl`)**
 - [x] **Task 2: Add `FlashPrefillConfig` struct to `types.rs`**
 - [x] **Task 3: Implement block selection logic in Rust (sink + window + last_n_full + alpha threshold)**
 - [x] **Task 4: Write `flashprefill_mean_k.wgsl` — GPU kernel: per-block mean K-vector**
 - [x] **Task 5: Write `flashprefill_block_score.wgsl` — GPU kernel: Q_tail × mean_K block scores**
 - [x] **Task 6: Write `flashprefill_block_select.wgsl` — GPU kernel: threshold + rule-based selection**
 - [x] **Task 7: Write `flashprefill_sparse_forward.wgsl` — GPU kernel: block-sparse attention forward**
-- [ ] **Task 8: Wire GPU PFlash pipeline in `riir-gpu/src/forward.rs` + CPU fallback in `prefill.rs`**
-- [ ] **Task 9: Add NIAH needle-retrieval quality benchmarks (CPU + GPU paths)**
-- [ ] **Task 10: Update `.docs/08_lucebox_techniques.md` and commit**
+- [x] **Task 8: Wire GPU PFlash pipeline in `riir-gpu/src/forward.rs` + CPU fallback in `prefill.rs`**
+- [x] **Task 9: Add NIAH needle-retrieval quality benchmarks (CPU + GPU paths)**
+- [x] **Task 10: Update `.docs/08_lucebox_techniques.md` and commit**
 
 ---
 
