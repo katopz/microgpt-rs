@@ -9,6 +9,7 @@
 //! cargo test --test bench_review_metrics --features bandit,ppot -- --nocapture
 //! ```
 
+#[cfg(feature = "bandit")]
 use std::sync::Arc;
 
 #[cfg(feature = "bandit")]
@@ -19,10 +20,12 @@ use microgpt_rs::types::Rng;
 // ── Helpers ──────────────────────────────────────────────────────
 
 /// Simple wall-clock timer for microbenchmarks.
+#[cfg(feature = "bandit")]
 struct Timer {
     start: std::time::Instant,
 }
 
+#[cfg(feature = "bandit")]
 impl Timer {
     fn new() -> Self {
         Self {

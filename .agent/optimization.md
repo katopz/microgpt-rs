@@ -50,6 +50,15 @@ Hot-path Rust optimization patterns. Apply to any microsecond-sensitive code.
 - Reorder struct fields to eliminate padding (group by alignment: u64 → u32 → u8)
 - Use `#[repr(u8)]` on field-less enums to guarantee 1-byte size
 
+### WASM FFI / Sandboxed Execution
+
+- **Batch API**: Serialize shared state once, validate all N×M combinations in one FFI call (amortize ~250ns FFI floor across 24 pairs → 5–6× speedup)
+- **Zero-copy serialization**: Use fixed-size stack buffers (`[u8; 1024]`) instead of `Vec::with_capacity()` — eliminates allocator overhead in tight loops (~3.6× faster)
+- **Fuel budgeting**: Set WASM fuel proportional to worst-case algorithmic complexity, not average case. BFS on bounded grids with N entities can spike 4–5× above typical. Fuzz-test with max inputs to find the ceiling.
+- **Lock-free instance pools**: Use `papaya::HashMap<ThreadId, T>` for per-thread WASM stores — lock-free reads on existing entries, uncontended `Mutex` per thread. Better than a single global `Mutex` for multi-threaded servers.
+- **Batch state layout**: Omit per-item data from shared state; pass player/entity arrays separately. Grid(169) + bombs(N×4) shared once, then per-entity `(id, x, y)` array alongside action indices and output results buffer.
+- **TypedFunc clone**: `wasmtime::TypedFunc` is cheap to clone (handle index). Clone it to release `&self` borrow before calling mutable `Store` methods — avoids borrow-checker conflicts with zero cost.
+
 ### Caching
 
 - Compute once per position/context, not per-sample-per-position (N×M → M calls)
@@ -145,6 +154,42 @@ Mitigation:
 - Compare no-feature vs with-feature on the same commit, back-to-back
 - If regressions appear only with feature enabled and code is properly gated, it's binary bloat, not a bug
 
+### Don't: Under-budget WASM fuel for complex algorithms
+
+WASM fuel limits prevent infinite loops but can silently trap legitimate computation.
+Complex BFS/graph algorithms with N entities on bounded domains can spike well above average:
+
+```text
+// BAD: fuel based on average case, traps on worst case
+const FUEL_PER_CALL: u64 = 10_000;  // sufficient for 1–2 bombs
+// BFS with 4+ bombs × 4 directions × range × 169 cells = ~40K ops → SILENT TRAP
+
+// GOOD: fuel based on worst-case analysis + headroom
+const FUEL_PER_CALL: u64 = 50_000;  // 16 bombs × 4 dirs × range 3 × 169 cells ≈ 40K + margin
+```
+
+Symptom: WASM returns `false` for valid inputs that should return `true`. Only manifests with complex inputs. Batch APIs may mask this if they use higher fuel multipliers. Fuzz-test with maximum entity counts to catch fuel traps.
+
+### Don't: Serialize per-item when state is shared across a batch
+
+When validating N items against the same state (e.g., N players on one game grid), serializing the state N times wastes both allocation and FFI overhead:
+
+```text
+// BAD: 24 × (serialize + FFI + compute) = ~12µs/tick
+for player in 0..4 {
+    for action in 0..6 {
+        let state = serialize(grid, player, action);  // 24 serializations!
+        wasm.is_valid(state);                          // 24 FFI calls!
+    }
+}
+
+// GOOD: 1 × (serialize + FFI + batch compute) = ~1.7µs/tick
+let state = serialize_grid(grid, bombs);               // 1 serialization
+wasm.batch_validate(state, players, actions, results);  // 1 FFI call
+```
+
+The batch API turns N×M individual calls into 1 call. The WASM module internally loops over all combinations, reusing the parsed state. For 4 players × 6 actions, this gives ~5.8× speedup.
+
 ### Don't: Compare benchmarks across different CPU thermal states
 
 Laptop CPUs throttle aggressively. A 30% "regression" may just be heat.
@@ -169,4 +214,52 @@ fn prof_components() {
     
     println!("  Component A: {:.2} μs", t_a.as_micros() as f64 / iters as f64);
     println!("  Total Δ:     {:.2} μs", total.as_micros() as f64 / iters as f64);
+}
+```
+
+## WASM FFI Batch Template
+
+```text
+// Pattern: batch validate N items × M actions in one FFI call
+//
+// Memory layout written to WASM:
+//   [0..state_end)         shared state (grid + bombs, no per-entity data)
+//   [players_off..+N×12)   entity array: N × (id, x, y) as u32 LE
+//   [actions_off..+M×4)    action indices as u32 LE
+//   [results_off..+N×M×4)  output: u32 LE results (0/1 or Q16.16)
+//
+// WASM export signature:
+//   batch_is_valid(state_ptr, state_len, players_ptr, player_count,
+//                  actions_ptr, action_count, results_ptr) -> u32
+
+const MAX_ENTITIES: usize = 4;
+const ACTION_COUNT: usize = 6;
+const ACTIONS_BYTES: [u8; ACTION_COUNT * 4] = [0,0,0,0, 1,0,0,0, 2,0,0,0, 3,0,0,0, 4,0,0,0, 5,0,0,0];
+
+fn batch_validate(&self, grid: &Grid, players: &[(u8,i32,i32)], bombs: &[Bomb]) -> BatchResult {
+    self.with_inner(|inner| {
+        // 1. Serialize shared state once (zero-copy stack buffer)
+        let (state_bytes, state_tokens) = inner.state_buf.serialize_grid(grid, bombs);
+        let mut tmp = [0u8; 1024];
+        tmp[..state_bytes].copy_from_slice(inner.state_buf.as_bytes(state_bytes));
+
+        // 2. Compute aligned offsets
+        let players_off = (state_bytes + 7) & !7;  // align8
+        let actions_off = players_off + players.len() * 12;
+        let results_off = actions_off + ACTION_COUNT * 4;
+
+        // 3. Write to WASM memory
+        inner.write_memory(0, &tmp[..state_bytes])?;
+        inner.write_memory(players_off, &players_to_bytes(players))?;
+        inner.write_memory(actions_off, &ACTIONS_BYTES)?;
+
+        // 4. Call batch export
+        let batch_fn = inner.batch_fn.as_ref()?.clone();
+        batch_fn.call(&mut inner.store, (0, state_tokens, players_off as u32,
+            players.len() as u32, actions_off as u32, ACTION_COUNT as u32,
+            results_off as u32))?;
+
+        // 5. Read results
+        Some(BatchResult::from_memory(inner, results_off, players.len(), ACTION_COUNT))
+    })
 }

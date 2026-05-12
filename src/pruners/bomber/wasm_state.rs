@@ -153,6 +153,207 @@ pub fn serialize_game_state(
     (buf, token_count)
 }
 
+// ── Zero-Copy / Batch Helpers ──────────────────────────────────
+
+/// Batch state layout: bomb_count offset (no player data).
+///
+/// Used by [`serialize_grid_only`] for the batch API where player
+/// positions are passed separately.
+#[allow(dead_code)]
+const BATCH_OFF_BOMB_COUNT: usize = GRID_TOKENS; // 169
+
+/// Batch state layout: bombs offset.
+const BATCH_OFF_BOMBS: usize = GRID_TOKENS + 1; // 170
+
+/// Maximum buffer size for zero-copy serialization (bytes).
+/// 237 tokens × 4 bytes = 948 bytes + margin.
+const ZEROCOPY_BUF_SIZE: usize = 1024;
+
+/// Write a u8 value as a u32 LE token (4 bytes) directly to a byte slice.
+///
+/// # Panics
+///
+/// Panics if `offset + 4 > buf.len()`.
+#[inline]
+fn write_token(buf: &mut [u8], offset: usize, value: u8) {
+    let token = value as u32;
+    buf[offset..offset + BYTES_PER_TOKEN].copy_from_slice(&token.to_le_bytes());
+}
+
+/// Zero-copy serialization of game state into a fixed-size stack buffer.
+///
+/// Avoids heap allocation by writing u32 LE tokens directly into a
+/// fixed `[u8; 1024]` buffer. Suitable for repeated calls in tight
+/// loops (e.g., per-tick batch validation).
+///
+/// Returns `(bytes_written, token_count)`.
+///
+/// # Buffer Layout
+///
+/// Same as [`serialize_game_state`]:
+/// ```text
+/// [0..676]      grid: 13×13 cells, 4 bytes each (row-major)
+/// [676..692]    player_x, player_y, player_id, bomb_count
+/// [692..]       bombs: N × (x, y, range, fuse) × 4 bytes
+/// ```
+pub fn serialize_into_buffer(
+    buf: &mut [u8; ZEROCOPY_BUF_SIZE],
+    grid: &ArenaGrid,
+    player_x: i32,
+    player_y: i32,
+    player_id: u8,
+    bombs: &[((i32, i32), u32, u32)],
+) -> (usize, u32) {
+    let bomb_count = bombs.len().min(MAX_BOMBS);
+    let token_count = (HEADER_TOKENS + bomb_count * 4) as u32;
+    let total_bytes = token_count as usize * BYTES_PER_TOKEN;
+    let mut off = 0usize;
+
+    // Grid: 13×13 cells, each as one u32 token (row-major)
+    for y in 0..ARENA_H {
+        for x in 0..ARENA_W {
+            write_token(buf, off, cell_to_token(&grid.cells[y][x]));
+            off += BYTES_PER_TOKEN;
+        }
+    }
+
+    // Player position + ID + bomb count
+    write_token(buf, off, clamp_to_u8(player_x));
+    off += BYTES_PER_TOKEN;
+    write_token(buf, off, clamp_to_u8(player_y));
+    off += BYTES_PER_TOKEN;
+    write_token(buf, off, player_id);
+    off += BYTES_PER_TOKEN;
+    write_token(buf, off, bomb_count as u8);
+    off += BYTES_PER_TOKEN;
+
+    // Bombs: each bomb is 4 tokens (x, y, range, fuse)
+    for &((bx, by), blast_range, fuse) in &bombs[..bomb_count] {
+        write_token(buf, off, clamp_to_u8(bx));
+        off += BYTES_PER_TOKEN;
+        write_token(buf, off, clamp_to_u8(by));
+        off += BYTES_PER_TOKEN;
+        write_token(buf, off, blast_range as u8);
+        off += BYTES_PER_TOKEN;
+        write_token(buf, off, fuse as u8);
+        off += BYTES_PER_TOKEN;
+    }
+
+    debug_assert_eq!(off, total_bytes);
+    (total_bytes, token_count)
+}
+
+/// Serialize grid + bombs only (no player data) for batch WASM API.
+///
+/// The batch API shares the grid across all players, so player position
+/// and ID are omitted. The layout is:
+///
+/// ```text
+/// [0..676]      grid: 13×13 cells, 4 bytes each (row-major)
+/// [676..680]    bomb_count: u32 LE
+/// [680..]       bombs: N × (x, y, range, fuse) × 4 bytes
+/// ```
+///
+/// Returns `(bytes_written, token_count)`.
+pub fn serialize_grid_only(
+    buf: &mut [u8; ZEROCOPY_BUF_SIZE],
+    grid: &ArenaGrid,
+    bombs: &[((i32, i32), u32, u32)],
+) -> (usize, u32) {
+    let bomb_count = bombs.len().min(MAX_BOMBS);
+    let batch_header = BATCH_OFF_BOMBS; // 170 tokens (169 grid + 1 bomb_count)
+    let token_count = (batch_header + bomb_count * 4) as u32;
+    let total_bytes = token_count as usize * BYTES_PER_TOKEN;
+    let mut off = 0usize;
+
+    // Grid: 13×13 cells
+    for y in 0..ARENA_H {
+        for x in 0..ARENA_W {
+            write_token(buf, off, cell_to_token(&grid.cells[y][x]));
+            off += BYTES_PER_TOKEN;
+        }
+    }
+
+    // Bomb count (at token 169)
+    write_token(buf, off, bomb_count as u8);
+    off += BYTES_PER_TOKEN;
+
+    // Bombs (at tokens 170+)
+    for &((bx, by), blast_range, fuse) in &bombs[..bomb_count] {
+        write_token(buf, off, clamp_to_u8(bx));
+        off += BYTES_PER_TOKEN;
+        write_token(buf, off, clamp_to_u8(by));
+        off += BYTES_PER_TOKEN;
+        write_token(buf, off, blast_range as u8);
+        off += BYTES_PER_TOKEN;
+        write_token(buf, off, fuse as u8);
+        off += BYTES_PER_TOKEN;
+    }
+
+    debug_assert_eq!(off, total_bytes);
+    (total_bytes, token_count)
+}
+
+/// Fixed-size stack buffer for zero-copy WASM state serialization.
+///
+/// Wraps a `[u8; 1024]` buffer that can be reused across multiple
+/// `serialize_into_buffer` or `serialize_grid_only` calls without
+/// any heap allocation.
+///
+/// # Capacity
+///
+/// Holds up to 237 tokens (948 bytes), which covers the maximum
+/// state size: 169 grid + 4 header + 16 bombs × 4 = 237 tokens.
+pub struct ZeroCopyStateBuffer {
+    buf: [u8; ZEROCOPY_BUF_SIZE],
+}
+
+impl ZeroCopyStateBuffer {
+    /// Create a new zero-copy buffer (uninitialized contents).
+    pub const fn new() -> Self {
+        Self {
+            buf: [0u8; ZEROCOPY_BUF_SIZE],
+        }
+    }
+
+    /// Serialize full game state into this buffer.
+    ///
+    /// Returns `(bytes_written, token_count)`. The buffer contents
+    /// are valid for `bytes_written` bytes.
+    pub fn serialize(
+        &mut self,
+        grid: &ArenaGrid,
+        player_x: i32,
+        player_y: i32,
+        player_id: u8,
+        bombs: &[((i32, i32), u32, u32)],
+    ) -> (usize, u32) {
+        serialize_into_buffer(&mut self.buf, grid, player_x, player_y, player_id, bombs)
+    }
+
+    /// Serialize grid + bombs only (for batch API).
+    ///
+    /// Returns `(bytes_written, token_count)`.
+    pub fn serialize_grid(
+        &mut self,
+        grid: &ArenaGrid,
+        bombs: &[((i32, i32), u32, u32)],
+    ) -> (usize, u32) {
+        serialize_grid_only(&mut self.buf, grid, bombs)
+    }
+
+    /// Get the serialized bytes.
+    pub fn as_bytes(&self, len: usize) -> &[u8] {
+        &self.buf[..len]
+    }
+}
+
+impl Default for ZeroCopyStateBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -352,5 +553,127 @@ mod tests {
         let bombs: Vec<((i32, i32), u32, u32)> = (0..16).map(|i| ((i, i), 2, 4)).collect();
         let (buf, token_count) = serialize_game_state(&grid, 0, 0, 0, &bombs);
         assert_eq!(buf.len(), token_count as usize * BYTES_PER_TOKEN);
+    }
+
+    // ── Zero-copy / batch tests ─────────────────────────────────
+
+    #[test]
+    fn serialize_into_buffer_matches_vec() {
+        let grid = empty_grid();
+        let bombs: [((i32, i32), u32, u32); 2] = [((3, 4), 2, 3), ((5, 6), 1, 1)];
+
+        // Vec-based
+        let (vec_buf, vec_tokens) = serialize_game_state(&grid, 5, 7, 2, &bombs);
+
+        // Zero-copy
+        let mut zbuf = ZeroCopyStateBuffer::new();
+        let (bytes_written, zc_tokens) = zbuf.serialize(&grid, 5, 7, 2, &bombs);
+
+        assert_eq!(vec_tokens, zc_tokens);
+        assert_eq!(vec_buf.len(), bytes_written);
+        assert_eq!(vec_buf, zbuf.as_bytes(bytes_written));
+    }
+
+    #[test]
+    fn serialize_into_buffer_empty() {
+        let grid = empty_grid();
+        let mut zbuf = ZeroCopyStateBuffer::new();
+        let (bytes_written, token_count) = zbuf.serialize(&grid, 1, 1, 0, &[]);
+
+        assert_eq!(token_count, 173);
+        assert_eq!(bytes_written, 173 * BYTES_PER_TOKEN);
+    }
+
+    #[test]
+    fn serialize_into_buffer_with_bombs() {
+        let grid = empty_grid();
+        let bombs: [((i32, i32), u32, u32); 3] = [((3, 4), 2, 3), ((5, 6), 3, 1), ((7, 8), 1, 4)];
+
+        let (vec_buf, vec_tokens) = serialize_game_state(&grid, 1, 1, 0, &bombs);
+        let mut zbuf = ZeroCopyStateBuffer::new();
+        let (bytes_written, zc_tokens) = zbuf.serialize(&grid, 1, 1, 0, &bombs);
+
+        assert_eq!(vec_tokens, zc_tokens);
+        assert_eq!(vec_buf.len(), bytes_written);
+        assert_eq!(vec_buf, zbuf.as_bytes(bytes_written));
+    }
+
+    #[test]
+    fn serialize_grid_only_layout() {
+        let grid = full_wall_grid();
+        let bombs: [((i32, i32), u32, u32); 2] = [((1, 2), 3, 4), ((5, 6), 1, 2)];
+
+        let mut zbuf = ZeroCopyStateBuffer::new();
+        let (bytes_written, token_count) = zbuf.serialize_grid(&grid, &bombs);
+
+        // Batch layout: 169 grid + 1 bomb_count + 2×4 bombs = 178 tokens
+        assert_eq!(token_count, 178);
+        assert_eq!(bytes_written, 178 * BYTES_PER_TOKEN);
+
+        let data = zbuf.as_bytes(bytes_written);
+
+        // Grid should be all FixedWall (1)
+        for i in 0..GRID_TOKENS {
+            assert_eq!(read_token(data, i), 1);
+        }
+
+        // bomb_count at token 169
+        assert_eq!(read_token(data, BATCH_OFF_BOMB_COUNT), 2);
+
+        // First bomb at tokens 170..173
+        assert_eq!(read_token(data, BATCH_OFF_BOMBS), 1); // x
+        assert_eq!(read_token(data, BATCH_OFF_BOMBS + 1), 2); // y
+        assert_eq!(read_token(data, BATCH_OFF_BOMBS + 2), 3); // range
+        assert_eq!(read_token(data, BATCH_OFF_BOMBS + 3), 4); // fuse
+
+        // Second bomb at tokens 174..177
+        assert_eq!(read_token(data, BATCH_OFF_BOMBS + 4), 5); // x
+        assert_eq!(read_token(data, BATCH_OFF_BOMBS + 5), 6); // y
+        assert_eq!(read_token(data, BATCH_OFF_BOMBS + 6), 1); // range
+        assert_eq!(read_token(data, BATCH_OFF_BOMBS + 7), 2); // fuse
+    }
+
+    #[test]
+    fn serialize_grid_only_no_bombs() {
+        let grid = empty_grid();
+        let mut zbuf = ZeroCopyStateBuffer::new();
+        let (bytes_written, token_count) = zbuf.serialize_grid(&grid, &[]);
+
+        // 169 grid + 1 bomb_count = 170 tokens
+        assert_eq!(token_count, 170);
+        assert_eq!(bytes_written, 170 * BYTES_PER_TOKEN);
+
+        let data = zbuf.as_bytes(bytes_written);
+        // Grid should be all Floor (0)
+        for i in 0..GRID_TOKENS {
+            assert_eq!(read_token(data, i), 0);
+        }
+        assert_eq!(read_token(data, BATCH_OFF_BOMB_COUNT), 0);
+    }
+
+    #[test]
+    fn zerocopy_buffer_reuse() {
+        let grid = empty_grid();
+        let mut zbuf = ZeroCopyStateBuffer::new();
+
+        // First use
+        let (len1, _) = zbuf.serialize(&grid, 1, 1, 0, &[]);
+        assert_eq!(read_token(zbuf.as_bytes(len1), OFF_PLAYER_X), 1);
+
+        // Second use overwrites
+        let (len2, _) = zbuf.serialize(&grid, 5, 3, 1, &[]);
+        assert_eq!(read_token(zbuf.as_bytes(len2), OFF_PLAYER_X), 5);
+        assert_eq!(read_token(zbuf.as_bytes(len2), OFF_PLAYER_Y), 3);
+        assert_eq!(read_token(zbuf.as_bytes(len2), OFF_PLAYER_ID), 1);
+    }
+
+    #[test]
+    fn serialize_into_buffer_clamps_coordinates() {
+        let grid = empty_grid();
+        let mut zbuf = ZeroCopyStateBuffer::new();
+
+        let (len, _) = zbuf.serialize(&grid, -5, 300, 0, &[]);
+        assert_eq!(read_token(zbuf.as_bytes(len), OFF_PLAYER_X), 0);
+        assert_eq!(read_token(zbuf.as_bytes(len), OFF_PLAYER_Y), 255);
     }
 }
