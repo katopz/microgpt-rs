@@ -143,7 +143,7 @@ riir-burner already reads JSONL. The only addition: optional `reward` field for 
 
 ## Tasks
 
-- [ ] **Task 1: `InferenceResult` type in microgpt-rs**
+- [x] **Task 1: `InferenceResult` type in microgpt-rs**
   - Add `InferenceResult` struct to `microgpt-rs/src/types.rs`
   - Fields: domain, reward, tree_budget_used, budget, prompt_hash, output, timestamp, screened
   - Derive `Serialize, Deserialize, Clone`
@@ -151,7 +151,7 @@ riir-burner already reads JSONL. The only addition: optional `reward` field for 
   - Test: serde roundtrip, default construction
   - ~30 lines
 
-- [ ] **Task 2: Reward capture in DDTree**
+- [x] **Task 2: Reward capture in DDTree**
   - After `extract_best_path_into()`, compute `InferenceResult` from:
     - `domain`: from config/router context (passed through)
     - `reward`: max score from best path (already computed in heap)
@@ -163,7 +163,7 @@ riir-burner already reads JSONL. The only addition: optional `reward` field for 
   - Minimal change to DDTree API: wrap return in `(String, InferenceResult)`
   - ~20 lines in `microgpt-rs/src/ddtree.rs`
 
-- [ ] **Task 3: Solution cache in anyrag**
+- [x] **Task 3: Solution cache in anyrag**
   - New module: `crates/lib/src/cache/mod.rs` + `crates/lib/src/cache/solution_cache.rs`
   - `SolutionCache` struct with:
     - `entries: papaya::HashMap<u64, CachedSolution>` (lock-free, per user's lib preference)
@@ -186,7 +186,7 @@ riir-burner already reads JSONL. The only addition: optional `reward` field for 
   - Behind `#[cfg(feature = "solution-cache")]` feature flag
   - ~60 lines in `crates/server/src/handlers/cache.rs`
 
-- [ ] **Task 5: JSONL export bridge**
+- [x] **Task 5: JSONL export bridge**
   - Export format: `{"instruction": prompt, "output": output, "reward": f32, "domain": str}`
   - Compatible with riir-burner's existing `--corpus input/train.jsonl`
   - riir-burner: add optional `--reward-weight` flag to sample proportionally to reward
@@ -194,7 +194,7 @@ riir-burner already reads JSONL. The only addition: optional `reward` field for 
   - Without flag, uniform sampling (backward compatible)
   - ~40 lines in `riir-burner/src/pipeline.rs`
 
-- [ ] **Task 6: Wire feedback in microgpt-rs**
+- [x] **Task 6: Wire feedback in microgpt-rs**
   - After inference, if `solution-cache` feature is enabled:
     1. Build `InferenceResult` from DDTree output
     2. POST to anyrag `/cache/ingest` (or direct call if embedded)
