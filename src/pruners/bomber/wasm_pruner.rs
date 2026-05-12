@@ -133,6 +133,10 @@ fn read_cstring(
 /// so the wrapping `Mutex` is never contended. The `Store` requires
 /// `&mut` for all operations, which is why we still need interior
 /// mutability — but the lock is per-thread and uncontended.
+#[expect(
+    clippy::type_complexity,
+    reason = "wasmtime TypedFunc API requires many params"
+)]
 struct BomberInner {
     store: Store<()>,
     is_valid_fn: TypedFunc<(u32, u32, u32, u32), u32>,
