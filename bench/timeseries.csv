@@ -19,23 +19,23 @@ run_date,commit,category,method,throughput,us_per_step,avg_accept_len
 2026-05-13T11:48:19,5e2667b,infrastructure,forward_paged,1012551,0.99,0.00
 2026-05-13T11:48:19,5e2667b,infrastructure,forward_raven (16 slots),1714744,0.58,0.00
 2026-05-13T11:48:19,5e2667b,infrastructure,raven_recall (1000 noise, slot 12=9.9→6.3 acc=63%),9720535,0.10,63.21
-2026-05-13T14:09:52,663f984,speculative,Transformer AR,1155951,0.87,1.00
-2026-05-13T14:09:52,663f984,tree_build,DFlash,434012,2.30,8.00
-2026-05-13T14:09:52,663f984,tree_build,DDTree Build,301085,3.32,0.00
-2026-05-13T14:09:52,663f984,speculative,Speculative (Simulated),686161,7.29,5.00
-2026-05-13T14:09:52,663f984,speculative,Speculative (AR Draft),669695,10.45,7.00
-2026-05-13T14:09:52,663f984,speculative,Leviathan (Algorithm 1),56741,20.78,1.18
-2026-05-13T14:09:52,663f984,speculative,Leviathan (no rollback),54014,21.82,1.18
-2026-05-13T14:09:52,663f984,speculative,Leviathan (w/ rollback),93498,12.57,1.18
-2026-05-13T14:09:52,663f984,speculative,Spec (unconditioned),512682,9.75,5.00
-2026-05-13T14:09:52,663f984,speculative,Spec (conditioned),530017,12.73,6.74
-2026-05-13T14:09:52,663f984,infrastructure,Prefill (no compress),125690,7.96,64.00
-2026-05-13T14:09:52,663f984,infrastructure,Prefill (compressed),125929,7.94,7.00
-2026-05-13T14:09:52,663f984,tree_build,DDTree (no chain),140324,7.13,16.00
-2026-05-13T14:09:52,663f984,tree_build,DDTree (chain-seed),158728,6.30,16.00
-2026-05-13T14:09:52,663f984,tree_build,DDTree (screened R=1.0),132643,7.54,16.00
-2026-05-13T14:09:52,663f984,tree_build,DDTree (screened adapter),129776,7.71,16.00
-2026-05-13T14:09:52,663f984,infrastructure,forward (flat),771116,1.30,0.00
-2026-05-13T14:09:52,663f984,infrastructure,forward_paged,614990,1.63,0.00
-2026-05-13T14:09:52,663f984,infrastructure,forward_raven (16 slots),979192,1.02,0.00
-2026-05-13T14:09:52,663f984,infrastructure,raven_recall (1000 noise, slot 12=9.9→6.3 acc=63%),5829476,0.17,63.21
+2026-05-13T15:54:16,0381784,speculative,Transformer AR,1103074,0.91,1.00
+2026-05-13T15:54:16,0381784,tree_build,DFlash,499652,2.00,8.00
+2026-05-13T15:54:16,0381784,tree_build,DDTree Build,359140,2.78,0.00
+2026-05-13T15:54:16,0381784,speculative,Speculative (Simulated),1003725,4.98,5.00
+2026-05-13T15:54:16,0381784,speculative,Speculative (AR Draft),1426834,4.90,7.00
+2026-05-13T15:54:16,0381784,speculative,Leviathan (Algorithm 1),108592,10.86,1.18
+2026-05-13T15:54:16,0381784,speculative,Leviathan (no rollback),107167,11.00,1.18
+2026-05-13T15:54:16,0381784,speculative,Leviathan (w/ rollback),180831,6.50,1.18
+2026-05-13T15:54:16,0381784,speculative,Spec (unconditioned),994052,5.03,5.00
+2026-05-13T15:54:16,0381784,speculative,Spec (conditioned),1083189,6.23,6.74
+2026-05-13T15:54:16,0381784,infrastructure,Prefill (no compress),296457,3.37,64.00
+2026-05-13T15:54:16,0381784,infrastructure,Prefill (compressed),268432,3.73,7.00
+2026-05-13T15:54:16,0381784,tree_build,DDTree (no chain),356269,2.81,16.00
+2026-05-13T15:54:16,0381784,tree_build,DDTree (chain-seed),371349,2.69,16.00
+2026-05-13T15:54:16,0381784,tree_build,DDTree (screened R=1.0),291212,3.43,16.00
+2026-05-13T15:54:16,0381784,tree_build,DDTree (screened adapter),286929,3.49,16.00
+2026-05-13T15:54:16,0381784,infrastructure,forward (flat),1146303,0.87,0.00
+2026-05-13T15:54:16,0381784,infrastructure,forward_paged,1017003,0.98,0.00
+2026-05-13T15:54:16,0381784,infrastructure,forward_raven (16 slots),1662986,0.60,0.00
+2026-05-13T15:54:16,0381784,infrastructure,raven_recall (1000 noise, slot 12=9.9→6.3 acc=63%),9623157,0.10,63.21
