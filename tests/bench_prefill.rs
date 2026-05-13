@@ -52,11 +52,13 @@ fn bench_block_select_rules() {
     println!("   ✅ Window rule: blocks q-1, q selected");
 
     // ── last_n rule: when q_block >= num_blocks - last_n_full, all kept ──
-    let mut cfg_ln = FlashPrefillConfig::default();
-    cfg_ln.last_n_full = 3;
-    cfg_ln.attention_sink = 0;
-    cfg_ln.window = 0;
-    cfg_ln.alpha = 1.0; // disable alpha
+    let cfg_ln = FlashPrefillConfig {
+        last_n_full: 3,
+        attention_sink: 0,
+        window: 0,
+        alpha: 1.0, // disable alpha
+        ..Default::default()
+    };
     let scores_ln = vec![0.0; 5];
     let sel_ln = block_select(&scores_ln, &cfg_ln);
     // q_block=4, num_blocks=5, last_n_full=3 → q >= 5-3=2 → last_full=true
@@ -64,11 +66,13 @@ fn bench_block_select_rules() {
     println!("   ✅ last_n_full rule: all blocks selected when q >= N-last_n");
 
     // ── Alpha rule: blocks with score >= max*alpha selected ──
-    let mut cfg_a = FlashPrefillConfig::default();
-    cfg_a.alpha = 0.5;
-    cfg_a.attention_sink = 0;
-    cfg_a.window = 0;
-    cfg_a.last_n_full = 0;
+    let cfg_a = FlashPrefillConfig {
+        alpha: 0.5,
+        attention_sink: 0,
+        window: 0,
+        last_n_full: 0,
+        ..Default::default()
+    };
     let scores_a = vec![0.1, 0.9, 0.2, 0.8, 1.0];
     let sel_a = block_select(&scores_a, &cfg_a);
     assert!(sel_a.contains(&1), "alpha: block 1 (0.9>=0.5) selected");
@@ -156,8 +160,10 @@ fn bench_compress_prompt_blocks() {
     println!("   {}", "-".repeat(40));
 
     for &alpha in alphas {
-        let mut cfg = FlashPrefillConfig::default();
-        cfg.alpha = alpha;
+        let cfg = FlashPrefillConfig {
+            alpha,
+            ..Default::default()
+        };
 
         let scores = deterministic_scores(prompt_len, 99);
         let iters = 1_000;
@@ -211,8 +217,10 @@ fn bench_niah_retrieval_rate() {
 
     for &prompt_len in prompt_lengths {
         for &alpha in alpha_values {
-            let mut cfg = FlashPrefillConfig::default();
-            cfg.alpha = alpha;
+            let cfg = FlashPrefillConfig {
+                alpha,
+                ..Default::default()
+            };
 
             // Build prompt: [hay×(N-1)] + [needle, secret] + [hay×(N-1)]
             let hay_per_side = (prompt_len - 2) / 2;

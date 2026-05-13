@@ -852,11 +852,13 @@ mod tests {
 
     #[test]
     fn test_block_select_alpha_rule() {
-        let mut cfg = FlashPrefillConfig::default();
-        cfg.alpha = 0.5;
-        cfg.attention_sink = 0;
-        cfg.window = 0;
-        cfg.last_n_full = 0;
+        let cfg = FlashPrefillConfig {
+            alpha: 0.5,
+            attention_sink: 0,
+            window: 0,
+            last_n_full: 0,
+            ..Default::default()
+        };
         let scores = vec![0.1, 0.9, 0.2, 0.8, 1.0]; // 5 blocks, q=4
         let selected = block_select(&scores, &cfg);
         // Should select blocks with score >= 0.5 (0.5 * max=1.0)
