@@ -258,6 +258,24 @@ Run: `cargo run --example review_01_metrics --features bandit`
 
 📖 See [`.docs/11_monopoly_fsm.md`](.docs/11_monopoly_fsm.md).
 
+## 🔄 Self-Improving Loop (Plan 048)
+
+The system closes the feedback → retrain → hot-swap cycle for continuous improvement:
+
+```text
+┌─────────────┐     ┌──────────────────┐     ┌──────────────┐     ┌───────────┐
+│  Inference   │────▸│  anyrag Cache     │────▸│  LoRA Retrain │────▸│  Hot-Swap  │
+│  + Feedback  │     │  episodic memory  │     │  (wgpu GPU)   │     │  zero-downtime │
+└─────────────┘     └──────────────────┘     └──────────────┘     └───────────┘
+```
+
+- **FeedbackConsumer** polls anyrag episodic cache for new feedback samples
+- **Retrain** triggers LoRA fine-tuning on accumulated samples via wgpu GPU pipeline
+- **Hot-Swap** signals inference layer to swap adapters without downtime
+- Feature-gated: `cargo build -p riir-gpu --features feedback-consumer`
+
+See [riir-ai `.docs/13_research_audit_results.md`](../riir-ai/.docs/13_research_audit_results.md) for the full research audit.
+
 ## 🏭 Productions
 
 MicroGPT-RS is the **core inference library** — pure algorithms, zero side effects. It powers a broader production ecosystem:
@@ -304,7 +322,7 @@ MicroGPT-RS is the **core inference library** — pure algorithms, zero side eff
    - **WASM Validator SDK** (riir-validator-sdk) — WASM Validator trait + `export_validator!` macro + streaming events ABI. Compiles to sandboxed `.wasm` modules that plug into microgpt-rs's `WasmPruner`.
    - **WASM Runtime** — Host-side `WasmPruner` implementing `ConstraintPruner` + `ScreeningPruner`. Loads `.wasm`, calls `is_valid`/`relevance` in sandboxed wasmtime.
    - **Prompt Router + Expert Registry** — `KeywordRouter` (V1) + `EmbeddingRouter` (V2, 3-tier fallback via RAG) + `ExpertRegistry` mapping domains to pruner + LoRA pairs. Config-driven via `domains.toml` with domain inference budget (β). Routing strategies: keyword, embedding, combined.
-   - **GPU Training** — `wgpu` compute pipeline with 16 WGSL kernels. Forward, backward (LoRA grads only), AdamW optimizer, cross-entropy loss. Targets WebGPU, Metal, Vulkan, DX12. LoRA export/load.
+   - **GPU Training** — ✅ Production-ready `wgpu` compute pipeline with 21 WGSL kernels. Forward, backward (LoRA grads only), AdamW optimizer, cross-entropy loss, PFlash block-sparse prefill (4 kernels), TurboQuant attention scoring, TTT feedback consumer. Targets WebGPU, Metal, Vulkan, DX12. LoRA export/load.
    - **REST Client** — HTTP client for vector search against the RAG Engine. Retrieves historically successful token continuations merged into DDTree branches.
    - **Transpiler** (riir-transpiler) — Python→Rust transpilation service loading `.wasm` validators + `.bin` LoRA adapter. Exercises the full pipeline: BPE tokenize → WASM validate → DDTree prune → compiler feedback.
 
@@ -319,7 +337,7 @@ MicroGPT-RS is the **core inference library** — pure algorithms, zero side eff
 | **WASM SDK** | riir-ai | Validator trait + export macro + streaming events ABI + CLI checker | ✅ Working | Private |
 | **WASM Runtime** | riir-ai | WasmPruner + wasmtime sandbox | ✅ Working | Private |
 | **Router** | riir-ai | Keyword + Embedding routing (3-tier fallback), ExpertRegistry, domain inference budget (β) | ✅ Working | Private |
-| **GPU Training** | riir-ai | wgpu forward/backward/optimizer (16 WGSL kernels), LoRA export | ✅ Working | Private |
+| **GPU Training** | riir-ai | ✅ Production-ready wgpu pipeline (21 WGSL kernels): forward/backward, PFlash, TurboQuant, feedback consumer, LoRA export | ✅ Working | Private |
 | **REST Client** | riir-ai | Vector search, tokenization, agent hints | ✅ Working | Private |
 | **Transpiler** | riir-ai | Python→Rust transpilation, compiler feedback loop | ✅ Working | Private |
 
