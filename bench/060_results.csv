@@ -1,0 +1,39 @@
+benchmark,metric,before,after,unit,status,notes
+distill-kl_divergence,placeholder_value,0.0,real,kl_value,FIXED,was hardcoded 0.0 placeholder (Plan 048 T2)
+distill-kl_divergence_size10,latency,N/A,275,ns/call,NEW,KL(p||q) computation for 10-element distributions
+distill-kl_divergence_size100,latency,N/A,2195,ns/call,NEW,KL(p||q) computation for 100-element distributions
+distill-kl_divergence_size1000,latency,N/A,21113,ns/call,NEW,KL(p||q) computation for 1000-element distributions
+distill-kl_divergence_size10000,latency,N/A,211235,ns/call,NEW,KL(p||q) computation for 10000-element distributions
+distill-kl_identical,kl_value,N/A,0.00000000,kl,FIXED,identical distributions → KL≈0
+distill-kl_different,kl_value,N/A,>0.0,kl,FIXED,different distributions → KL>0
+distill-kl_svd_better,quality,N/A,svd<=random,kl,FIXED,SVD truncation better than zeros baseline
+distill-svd_8x8_top4,latency,N/A,623.877,µs/call,UNCHANGED,power SVD 50 iterations
+distill-svd_16x8_top4,latency,N/A,1161.874,µs/call,UNCHANGED,power SVD 50 iterations
+distill-svd_32x16_top4,latency,N/A,4343.486,µs/call,UNCHANGED,power SVD 50 iterations
+distill-svd_64x32_top4,latency,N/A,16678.197,µs/call,UNCHANGED,power SVD 50 iterations
+distill-lora_forward_softmax,latency,N/A,12.675,µs/call,UNCHANGED,rank=4 dim=48 10000 calls
+backward-attention_grad,correctness,simplified,proper_softmax_jacobian,status,FIXED,Q/K/V gradients now flow through multi-head attention (Plan 048 T1)
+backward-grad_b_norm,finite_and_nonzero,N/A,0.028750,norm,FIXED,analytical gradient check passes
+backward-kv_cache_downloads,overhead,0,3,downloads_per_layer_per_pos,EXPECTED,Q + K_cache + V_cache GPU→CPU for attention backward
+backward-complexity,big_o,N/A,O(n_head*seq_len*head_dim),per_layer_per_pos,CORRECT,proper attention gradient complexity
+training-toy_3epochs,steps,N/A,30,steps,UNCHANGED,3 epochs × 5 batches × 2 samples
+training-toy_final_loss,finite,N/A,23.025848,loss,UNCHANGED,loss is finite (test only checks finiteness)
+training-toy_wall_time,latency,N/A,8.24,seconds,UNCHANGED,includes GPU forward+backward+optimizer
+replay-parse_replay,stub_returns_empty,0,samples,FIXED,was Vec::new() stub (Plan 048 T3)
+replay-parse_replay_winner_quality,value,N/A,1.0,quality,NEW,winner moves get quality=1.0
+replay-parse_replay_killed_quality,value,N/A,0.2,quality,NEW,killed player moves get quality=0.2
+replay-parse_replay_default_quality,value,N/A,0.5,quality,NEW,no winner/default moves get quality=0.5
+pflash-gpu-kernel_count,wired,0,4,kernels,NEW,4 WGSL kernels now connected via GpuFlashPrefillPass (Plan 048 T4)
+pflash-gpu-pipeline_count,added,0,4,pipelines,NEW,flashprefill_mean_k/block_score/block_select/sparse_forward
+pflash-gpu-config_size,bytes,N/A,64,bytes,VALIDATED,FlashPrefillConfig uniform struct matches WGSL
+tq-gpu-scoring,wired,orphaned,connected,status,FIXED,attention_score_tq.wgsl now dispatched (Plan 048 T5)
+tq-gpu-config_size,bytes,N/A,40,bytes,VALIDATED,TqConfig uniform struct matches WGSL
+tq-gpu-packed_words_2bit,formula,N/A,div_ceil,words_per_vec,VALIDATED,head_dim=64 → 4 u32 per vector
+tq-gpu-packed_words_3bit,formula,N/A,div_ceil,words_per_vec,VALIDATED,head_dim=64 → 6 u32 per vector
+tq-gpu-packed_words_4bit,formula,N/A,div_ceil,words_per_vec,VALIDATED,head_dim=64 → 8 u32 per vector
+feedback-consumer-config_defaults,min_samples,N/A,100,samples,NEW,FeedbackConfig default
+feedback-consumer-config_defaults,poll_interval,N/A,300,seconds,NEW,5 minute default poll interval
+feedback-consumer-feature_gate,reqwest_dep,N/A,optional,dependency,NEW,feature-gated behind feedback-consumer
+tests-total_count,count,111,124,tests,NEW,+13 new tests (7 without feedback-consumer feature)
+tests-regressions,count,0,0,failures,NO_REGRESSION,all existing tests continue to pass
+clippy-warnings,count,N/A,0,warnings,CLEAN,zero clippy warnings with --features feedback-consumer
