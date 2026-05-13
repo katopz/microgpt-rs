@@ -1,5 +1,7 @@
 # Issue 035: Monopoly FSM — Balance, Bandit & Benchmark Fixes
 
+**Status:** ✅ Closed — All tasks complete, results documented
+
 ## Regressions Found & Fixed
 
 1. **Arena underflow bug** — `monopoly_01_arena.rs` used `u64` for net worth proxy, underflowed on rent subtraction
