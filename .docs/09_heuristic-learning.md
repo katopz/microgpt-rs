@@ -1,5 +1,7 @@
 # microgpt-rs: Heuristic Learning
 
+> **Status (Plan 049):** G-Zero self-play distillation implemented behind `--features g_zero` (implies `bandit`). Hint-δ intrinsic reward signal, `DeltaGatedAbsorbCompress`, `DeltaBanditPruner`, and `TemplateProposer` provide modelless self-evolution — no gradient updates required. See `src/pruners/g_zero/`.
+>
 > **Status (Plan 036):** ReviewMetrics, ReviewStrategy, and benefit-ratio gating are implemented behind `--features bandit`. AbsorbCompress gates compression by benefit-risk ratio. `ppot_rescue_reviewed` provides structured review loops behind `--features bandit,ppot`. See example `review_01_metrics`.
 >
 > **Status (Plan 032):** TrialLog, AbsorbCompress, HotSwapPruner, and RegressionSuite are implemented behind `--features bandit`. See examples `hl_01_trial_log` and `hl_02_hotswap`.
@@ -35,6 +37,9 @@ microgpt-rs is uniquely positioned for HL because of its **trait-based pruner ar
 | Rule Compression | `AbsorbCompress` — promote stable Q-values to hard constraints |
 | Hot-reload | `HotSwapPruner` — runtime .wasm reload |
 | Regression Safety | `RegressionSuite` — replay golden episodes |
+| Self-Play Reward | `HintDelta` — intrinsic δ signal from model's own distribution (Plan 049) |
+| δ-Gated Compression | `DeltaGatedAbsorbCompress` — absorb only when hint reveals blind spot (Plan 049) |
+| δ-Reward Bandit | `DeltaBanditPruner` — δ as dense, immediate reward signal (Plan 049) |
 
 ---
 
@@ -422,6 +427,89 @@ Run: `cargo run --example review_01_metrics --features bandit`
 
 ---
 
+## G-Zero Self-Play Distillation (Plan 049)
+
+> **Source:** [G-Zero: Self-Play for Open-Ended Generation from Zero Data](https://arxiv.org/pdf/2605.09959) — Huang et al., 2026
+> **Feature:** `--features g_zero` (implies `bandit`)
+
+G-Zero replaces external LLM judges with an **intrinsic signal** (Hint-δ) derived from the model's own predictive distribution. It enables self-evolution for open-ended domains where verifiable rewards don't exist.
+
+### Hint-δ: The Core Signal
+
+```
+δ(q, h, a_hard) = (1/T) Σ [log πS(a_hard_t | q, a_hard_<t)
+                       − log πS(a_hard_t | q, h, a_hard_<t)]
+```
+
+Both terms score the **same** `a_hard` tokens — the difference is whether the hint `h` is in the prompt. Positive δ means the hint shifted the Solver's distribution away from its own unassisted response — the hint revealed a blind spot.
+
+```text
+High δ  → hint carries structural signal → blind spot found
+Low δ   → hint is redundant              → already known
+Neg δ   → hint hurt                      → ignore
+```
+
+### Modelless Path (Phase 1 — Implemented)
+
+No gradient updates. δ enhances existing HL infrastructure:
+
+| Component | Role | Source |
+|-----------|------|--------|
+| `HintDelta` | Core δ computation | `g_zero::types` |
+| `DeltaGatedAbsorbCompress` | Absorb only when δ reveals blind spot | `g_zero::delta_absorb` |
+| `DeltaBanditPruner` | δ as dense reward for bandit arms | `g_zero::delta_bandit` |
+| `TemplateProposer` | Rule-based (query, hint) generation | `g_zero::template_proposer` |
+
+### Why δ-Gating Beats Raw Reward
+
+- **Dense:** Every token scored, not just episode outcome
+- **Immediate:** No waiting for episode completion
+- **Intrinsic:** Derived from model's own distribution, no external oracle
+- **Targeted:** High δ = blind spot = exactly where exploration is needed
+
+### Template Categories
+
+Six categories from G-Zero paper Appendix A, with UCB1 bandit selection:
+
+| Category | Subtypes | Notes |
+|----------|----------|-------|
+| Writing | email, story, essay, pitch, review | |
+| Explanation | engineer, student, executive | |
+| Advice | career, travel, project | |
+| Analysis | argument, text, product | |
+| Coding | function, debug, design | |
+| Reasoning | logic, math | Capped at ≤1/6 of output |
+
+### Quick Start
+
+```rust,ignore
+use microgpt_rs::pruners::*;
+
+// 1. Create δ-gated absorb-compress
+let inner = AbsorbCompressLayer::new(NoScreeningPruner, 10, CompressConfig::default());
+let mut absorb = DeltaGatedAbsorbCompress::new(inner, 10, DeltaGatedConfig::default());
+
+// 2. Create δ-reward bandit
+let bandit_inner = BanditPruner::new(NoScreeningPruner, BanditStrategy::Ucb1, 10);
+let mut bandit = DeltaBanditPruner::new(bandit_inner, 10);
+
+// 3. Create template proposer
+let mut proposer = TemplateProposer::new(fastrand::Rng::new());
+
+// 4. Generate query-hint pair
+let pair = proposer.propose();
+
+// 5. (External) Run forward pass, compute δ
+let delta = HintDelta::compute(&logp_q_tokens, &logp_qh_tokens, &pair.query, &pair.hint, "a_hard", "");
+
+// 6. Feed δ to both systems
+absorb.observe_hint_delta(pair.template_id, &delta);
+bandit.observe_hint_delta(pair.template_id, &delta);
+proposer.observe_delta(pair.template_id, delta.value);
+```
+
+---
+
 ## References
 
 - [Learning Beyond Gradients](https://trinkle23897.github.io/learning-beyond-gradients/) — Jiayi Weng, 2026
@@ -432,4 +520,5 @@ Run: `cargo run --example review_01_metrics --features bandit`
 - Plan 032: HL Infrastructure
 - Plan 033: Bomberman Arena
 - Plan 036: Inference-Time Review Metrics
+- Plan 049: G-Zero Self-Play Distillation
 - Research 14: HL Distillation

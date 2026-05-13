@@ -63,6 +63,15 @@ pub use regression::{GoldenTrace, RegressionResult, RegressionSuite, ReplayRewar
 #[cfg(feature = "bandit")]
 pub use trial_log::{TrialLog, TrialRecord, TrialSummary};
 
+#[cfg(feature = "g_zero")]
+pub mod g_zero;
+
+#[cfg(feature = "g_zero")]
+pub use g_zero::{
+    DeltaBanditPruner, DeltaGatedAbsorbCompress, DeltaGatedConfig, GeneratedPair, HintDelta,
+    LogProbResult, QueryTemplate, TemplateProposer,
+};
+
 #[cfg(feature = "bomber")]
 pub use bomber::{
     ArenaGrid, BomberAction, BomberPlayer, GridPos, ScoreBoard, TickCounter, run_tick,

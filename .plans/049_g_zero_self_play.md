@@ -8,10 +8,10 @@
 
 ### Phase 1: Modelless (δ → existing HL infrastructure)
 
-- [ ] T1: Implement `HintDelta` computation (log-prob shift between assisted/unassisted responses)
-- [ ] T2: Implement `DeltaGatedAbsorbCompress` (use δ to gate heuristic promotion)
-- [ ] T3: Implement `DeltaBanditPruner` (use δ as reward signal for bandit arms)
-- [ ] T4: Implement `TemplateProposer` (rule-based query-hint generation, no neural model)
+- [x] T1: Implement `HintDelta` computation (log-prob shift between assisted/unassisted responses)
+- [x] T2: Implement `DeltaGatedAbsorbCompress` (use δ to gate heuristic promotion)
+- [x] T3: Implement `DeltaBanditPruner` (use δ as reward signal for bandit arms)
+- [x] T4: Implement `TemplateProposer` (rule-based query-hint generation, no neural model)
 - [ ] T5: Benchmark modelless G-Zero vs existing HL AbsorbCompress
 
 ### Phase 2: Model-Based (δ → DPO/GRPO weight updates)
@@ -24,8 +24,8 @@
 
 ### Feature Gate
 
-- [ ] T11: Add `g_zero = ["bandit"]` feature gate + `#[cfg(feature = "g_zero")]` on all new code — always gated, regardless of benchmark outcome
-- [ ] T12: Log-prob extraction via separate `logprobs()` function, NOT modifying `forward()` hot path
+- [x] T11: Add `g_zero = ["bandit"]` feature gate + `#[cfg(feature = "g_zero")]` on all new code — always gated, regardless of benchmark outcome
+- [x] T12: Log-prob extraction via separate `logprobs()` function, NOT modifying `forward()` hot path
 
 ---
 
