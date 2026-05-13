@@ -176,7 +176,7 @@ mod tests {
     }
 
     fn make_pruner(path: &Path) -> Result<HotSwapPruner<FileValuePruner>> {
-        HotSwapPruner::new(path, Box::new(|p| FileValuePruner::load(p)))
+        HotSwapPruner::new(path, Box::new(FileValuePruner::load))
     }
 
     #[test]

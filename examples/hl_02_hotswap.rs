@@ -170,7 +170,7 @@ fn main() {
     println!("📋 Phase 1: Initial Pruner (relevance=0.5)");
     fs::write(PRUNER_PATH, "0.5").expect("Failed to write pruner file");
 
-    let hot_swap = HotSwapPruner::new(Path::new(PRUNER_PATH), Box::new(|p| FilePruner::load(p)))
+    let hot_swap = HotSwapPruner::new(Path::new(PRUNER_PATH), Box::new(FilePruner::load))
         .expect("Failed to create HotSwapPruner");
 
     let mut absorb = AbsorbCompressLayer::new(hot_swap, env.num_arms(), compress_config);
@@ -295,7 +295,7 @@ fn main() {
     println!("🔄 Hot-Swap Reload Demo (standalone):");
     fs::write(PRUNER_PATH, "0.7").expect("Failed to write pruner v3");
 
-    let hs = HotSwapPruner::new(Path::new(PRUNER_PATH), Box::new(|p| FilePruner::load(p)))
+    let hs = HotSwapPruner::new(Path::new(PRUNER_PATH), Box::new(FilePruner::load))
         .expect("Failed to create HotSwapPruner");
 
     println!("   Created: version={}", hs.version());

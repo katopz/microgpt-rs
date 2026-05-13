@@ -48,15 +48,15 @@ fn bench_turboquant_zero_alloc_store_dequant() {
     let mut cache = TurboQuantKVCache::new(&config, 3, 3);
     for _ in 0..warmup {
         cache.reset();
-        for pos in 0..n_positions {
-            cache.store_key(0, pos, &keys[pos]);
+        for (pos, key) in keys.iter().enumerate() {
+            cache.store_key(0, pos, key);
         }
     }
     let start = Instant::now();
     for _ in 0..iters {
         cache.reset();
-        for pos in 0..n_positions {
-            cache.store_key(0, pos, &keys[pos]);
+        for (pos, key) in keys.iter().enumerate() {
+            cache.store_key(0, pos, key);
         }
     }
     let store_key_time = start.elapsed();
@@ -67,15 +67,15 @@ fn bench_turboquant_zero_alloc_store_dequant() {
     let mut cache = TurboQuantKVCache::new(&config, 3, 3);
     for _ in 0..warmup {
         cache.reset();
-        for pos in 0..n_positions {
-            cache.store_value(0, pos, &vals[pos]);
+        for (pos, val) in vals.iter().enumerate() {
+            cache.store_value(0, pos, val);
         }
     }
     let start = Instant::now();
     for _ in 0..iters {
         cache.reset();
-        for pos in 0..n_positions {
-            cache.store_value(0, pos, &vals[pos]);
+        for (pos, val) in vals.iter().enumerate() {
+            cache.store_value(0, pos, val);
         }
     }
     let store_value_time = start.elapsed();
@@ -85,8 +85,8 @@ fn bench_turboquant_zero_alloc_store_dequant() {
 
     let mut cache = TurboQuantKVCache::new(&config, 3, 3);
     cache.reset();
-    for pos in 0..n_positions {
-        cache.store_key(0, pos, &keys[pos]);
+    for (pos, key) in keys.iter().enumerate() {
+        cache.store_key(0, pos, key);
     }
     // Warmup
     for _ in 0..warmup {
@@ -107,8 +107,8 @@ fn bench_turboquant_zero_alloc_store_dequant() {
 
     let mut cache = TurboQuantKVCache::new(&config, 3, 3);
     cache.reset();
-    for pos in 0..n_positions {
-        cache.store_key(0, pos, &keys[pos]);
+    for (pos, key) in keys.iter().enumerate() {
+        cache.store_key(0, pos, key);
     }
     let mut buf = vec![0.0f32; kv_dim];
     // Warmup
@@ -132,8 +132,8 @@ fn bench_turboquant_zero_alloc_store_dequant() {
 
     let mut cache = TurboQuantKVCache::new(&config, 3, 3);
     cache.reset();
-    for pos in 0..n_positions {
-        cache.store_value(0, pos, &vals[pos]);
+    for (pos, val) in vals.iter().enumerate() {
+        cache.store_value(0, pos, val);
     }
     for _ in 0..warmup {
         for pos in 0..n_positions {
@@ -153,8 +153,8 @@ fn bench_turboquant_zero_alloc_store_dequant() {
 
     let mut cache = TurboQuantKVCache::new(&config, 3, 3);
     cache.reset();
-    for pos in 0..n_positions {
-        cache.store_value(0, pos, &vals[pos]);
+    for (pos, val) in vals.iter().enumerate() {
+        cache.store_value(0, pos, val);
     }
     let mut buf = vec![0.0f32; kv_dim];
     for _ in 0..warmup {

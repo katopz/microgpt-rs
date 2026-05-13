@@ -245,7 +245,7 @@ fn bench_hot_swap_reload() {
     // Create initial file
     fs::write(&path, "0.5").expect("Failed to write pruner file");
 
-    let hs = HotSwapPruner::new(&path, Box::new(|p| BenchPruner::load(p)))
+    let hs = HotSwapPruner::new(&path, Box::new(BenchPruner::load))
         .expect("Failed to create HotSwapPruner");
 
     // ── Reload with same file (no change) ────────────────────────

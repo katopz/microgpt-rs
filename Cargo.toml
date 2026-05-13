@@ -23,7 +23,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 
 [features]
-default = []
+default = ["bandit", "g_zero"]  # Bench requires heuristic_learning (Plan 051)
 sudoku = []
 validator = ["syn", "proc-macro2"]
 sparse_mlp = []  # TwELL-inspired sparse MLP matmul (Plan 022)

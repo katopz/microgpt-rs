@@ -303,7 +303,7 @@ impl TemplateProposer {
     pub fn mean_delta(&self, template_id: usize) -> f32 {
         self.stats
             .get(template_id)
-            .map(|s| s.mean_delta())
+            .map(TemplateStats::mean_delta)
             .unwrap_or(0.0)
     }
 
@@ -652,10 +652,10 @@ mod tests {
         let mut reasoning_count = 0;
         for _ in 0..100 {
             let pair = proposer.propose();
-            if let Some(template) = proposer.template(pair.template_id) {
-                if template.is_reasoning() {
-                    reasoning_count += 1;
-                }
+            if let Some(template) = proposer.template(pair.template_id)
+                && template.is_reasoning()
+            {
+                reasoning_count += 1;
             }
         }
 

@@ -225,9 +225,10 @@ pub fn run_all(config: &Config) -> Vec<BenchResult> {
     let recall_br = bench_raven_recall(config);
     results.push(recall_br);
 
-    // TQ-3bit store+dequant (Plan 043)
-    let tq_br = bench_turboquant_store_dequant(config);
-    results.push(tq_br);
+    // TQ-3bit store+dequant: allocating vs zero-alloc (Plan 043, Plan 051)
+    let (tq_alloc_br, tq_zero_br) = bench_turboquant_store_dequant(config);
+    results.push(tq_alloc_br);
+    results.push(tq_zero_br);
 
     // PFlash block_select (Plan 044)
     let pflash_br = bench_pflash_block_select();
@@ -1307,7 +1308,9 @@ pub fn bench_raven_recall(_config: &Config) -> BenchResult {
 ///
 /// Measures round-trip: store synthetic KV → dequantize back.
 /// Uses 3-bit as the sweet spot between compression and quality.
-pub fn bench_turboquant_store_dequant(config: &Config) -> BenchResult {
+/// Benchmark TurboQuant store+dequant: both allocating and zero-alloc paths.
+/// Returns (allocating_result, zero_alloc_result) for comparison.
+pub fn bench_turboquant_store_dequant(config: &Config) -> (BenchResult, BenchResult) {
     let kvd = kv_dim(config);
     let n_positions = config.block_size;
     let iters = 100u64;
@@ -1324,46 +1327,92 @@ pub fn bench_turboquant_store_dequant(config: &Config) -> BenchResult {
         })
         .collect();
 
-    let mut cache = TurboQuantKVCache::new(config, 3, 3);
+    // ── Allocating path (dequantize_key / dequantize_value) ───────
+    let mut cache_alloc = TurboQuantKVCache::new(config, 3, 3);
 
     // Warmup
     for _ in 0..10 {
-        cache.reset();
+        cache_alloc.reset();
         for pos in 0..n_positions {
-            cache.store_key(0, pos, &keys[pos]);
-            cache.store_value(0, pos, &vals[pos]);
+            cache_alloc.store_key(0, pos, &keys[pos]);
+            cache_alloc.store_value(0, pos, &vals[pos]);
         }
         for pos in 0..n_positions {
-            std::hint::black_box(cache.dequantize_key(0, pos));
-            std::hint::black_box(cache.dequantize_value(0, pos));
+            std::hint::black_box(cache_alloc.dequantize_key(0, pos));
+            std::hint::black_box(cache_alloc.dequantize_value(0, pos));
         }
     }
 
     let start = Instant::now();
     for _ in 0..iters {
-        cache.reset();
+        cache_alloc.reset();
         for pos in 0..n_positions {
-            cache.store_key(0, pos, &keys[pos]);
-            cache.store_value(0, pos, &vals[pos]);
+            cache_alloc.store_key(0, pos, &keys[pos]);
+            cache_alloc.store_value(0, pos, &vals[pos]);
         }
         for pos in 0..n_positions {
-            std::hint::black_box(cache.dequantize_key(0, pos));
-            std::hint::black_box(cache.dequantize_value(0, pos));
+            std::hint::black_box(cache_alloc.dequantize_key(0, pos));
+            std::hint::black_box(cache_alloc.dequantize_value(0, pos));
         }
     }
-    let elapsed = start.elapsed();
+    let elapsed_alloc = start.elapsed();
 
     let total_tokens = n_positions as u64 * iters;
-    let throughput = total_tokens as f64 / elapsed.as_secs_f64();
-
-    BenchResult {
-        label: "TQ-3bit store+dequant".into(),
-        throughput,
-        time_per_step_us: elapsed.as_micros() as f64 / total_tokens as f64,
-        avg_acceptance_len: cache.compression_ratio(),
+    let alloc_result = BenchResult {
+        label: "TQ-3bit store+dequant (alloc)".into(),
+        throughput: total_tokens as f64 / elapsed_alloc.as_secs_f64(),
+        time_per_step_us: elapsed_alloc.as_micros() as f64 / total_tokens as f64,
+        avg_acceptance_len: cache_alloc.compression_ratio(),
         color: (148, 0, 211),
         category: BenchCategory::Infrastructure,
+    };
+
+    // ── Zero-alloc path (dequantize_key_into / dequantize_value_into) ──
+    let mut cache_zero = TurboQuantKVCache::new(config, 3, 3);
+    let mut key_buf = vec![0.0f32; kvd];
+    let mut val_buf = vec![0.0f32; kvd];
+
+    // Warmup
+    for _ in 0..10 {
+        cache_zero.reset();
+        for pos in 0..n_positions {
+            cache_zero.store_key(0, pos, &keys[pos]);
+            cache_zero.store_value(0, pos, &vals[pos]);
+        }
+        for pos in 0..n_positions {
+            cache_zero.dequantize_key_into(0, pos, &mut key_buf);
+            cache_zero.dequantize_value_into(0, pos, &mut val_buf);
+            std::hint::black_box(&key_buf);
+            std::hint::black_box(&val_buf);
+        }
     }
+
+    let start = Instant::now();
+    for _ in 0..iters {
+        cache_zero.reset();
+        for pos in 0..n_positions {
+            cache_zero.store_key(0, pos, &keys[pos]);
+            cache_zero.store_value(0, pos, &vals[pos]);
+        }
+        for pos in 0..n_positions {
+            cache_zero.dequantize_key_into(0, pos, &mut key_buf);
+            cache_zero.dequantize_value_into(0, pos, &mut val_buf);
+            std::hint::black_box(&key_buf);
+            std::hint::black_box(&val_buf);
+        }
+    }
+    let elapsed_zero = start.elapsed();
+
+    let zero_result = BenchResult {
+        label: "TQ-3bit store+dequant (zero-alloc)".into(),
+        throughput: total_tokens as f64 / elapsed_zero.as_secs_f64(),
+        time_per_step_us: elapsed_zero.as_micros() as f64 / total_tokens as f64,
+        avg_acceptance_len: cache_zero.compression_ratio(),
+        color: (0, 191, 255),
+        category: BenchCategory::Infrastructure,
+    };
+
+    (alloc_result, zero_result)
 }
 
 // ═══════════════════════════════════════════════════════════════

@@ -1085,7 +1085,7 @@ mod tests {
         // All rewards should be in [0.0, 1.0]
         for _ in 0..1000 {
             let r = env.pull(0, &mut rng);
-            assert!(r >= 0.0 && r <= 1.0, "reward {r} out of bounds");
+            assert!((0.0..=1.0).contains(&r), "reward {r} out of bounds");
         }
     }
 
@@ -1099,7 +1099,7 @@ mod tests {
                 for _ in 0..100 {
                     let sample = sample_beta(alpha, beta, &mut rng);
                     assert!(
-                        sample >= 0.0 && sample <= 1.0,
+                        (0.0..=1.0).contains(&sample),
                         "Beta({alpha},{beta}) sample {sample} out of bounds"
                     );
                 }
@@ -1406,9 +1406,8 @@ mod tests {
         let rewards = [0.1f32, 0.3f32, 0.9f32, 0.5f32];
         let updates_per_thread = 200u32;
 
-        for arm in 0..4 {
+        for (arm, &reward) in rewards.iter().enumerate() {
             let stats_clone = Arc::clone(&stats);
-            let reward = rewards[arm];
             handles.push(thread::spawn(move || {
                 for _ in 0..updates_per_thread {
                     stats_clone.update(arm, reward);
@@ -1444,9 +1443,8 @@ mod tests {
         }
 
         // Verify Q-values converge toward true rewards
-        for arm in 0..4 {
+        for (arm, &expected) in rewards.iter().enumerate() {
             let q = stats.q_value(arm);
-            let expected = rewards[arm];
             assert!(
                 (q - expected).abs() < 0.1,
                 "arm {arm} q_value {q} should be close to {expected}"

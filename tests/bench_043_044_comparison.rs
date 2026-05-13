@@ -768,13 +768,6 @@ fn bench_043_turboquant_before_after() {
     }
     println!("  └───────────────────────────────────────────────────────────┘");
 
-    // ── Write CSV ──────────────────────────────────────────────
-    let csv_path = "bench/specialized/057_tq_pflash_comparison.csv";
-    let csv_content = csv_rows.join("\n") + "\n";
-    std::fs::create_dir_all("bench/specialized").ok();
-    std::fs::write(csv_path, &csv_content).unwrap();
-    println!("\n  📝 Results saved to {csv_path}");
-
     // ── Assertions ─────────────────────────────────────────────
     // TurboQuant: 3-bit should be > 4× compression, > 0.85 cosine
     let cache_3bit = TurboQuantKVCache::new(&config, 3, 3);
