@@ -129,7 +129,7 @@ cargo run --example py2rs_hello                                 # BPE + bidirect
 | 04 | `04_performance.md` | Performance engineering & benchmarks |
 | 05 | `05_sudoku.md` | Sudoku solvers |
 | 06 | `06_validator.md` | Constraint validator + SynPruner |
-| 07 | *(reserved)* | — |
+| 07 | `07_adaptation.md` | Model adaptation (bidirectional prefill, LoRA switching, sparse MLP, domain latent) |
 | 08 | `08_lucebox_techniques.md` | LuceBox techniques |
 | 09 | `09_heuristic-learning.md` | Heuristic learning, bandit, HL arena |
 | 10 | `10_bomber_arena.md` | Bomberman HL arena (Plan 033) |
