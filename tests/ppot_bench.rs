@@ -115,7 +115,7 @@ fn ppot_profile_components() {
                     attempted_token: variant[pos],
                     error_kind: None,
                     entropy: 0.5,
-                    accepted: rng.next() % 3 == 0,
+                    accepted: rng.next().is_multiple_of(3),
                 });
             }
         }

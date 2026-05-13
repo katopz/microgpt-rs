@@ -91,6 +91,7 @@ fn main() {
         &prompt_2l,
         &config_2l,
         None,
+        None,
     )
     .to_vec();
 
@@ -149,6 +150,7 @@ fn main() {
         &prompt_tokens,
         &config,
         Some(&reader_lora),
+        None,
     )
     .to_vec();
 
@@ -164,6 +166,7 @@ fn main() {
         &prompt_tokens,
         &config,
         Some(&writer_lora),
+        None,
     )
     .to_vec();
 
@@ -178,6 +181,7 @@ fn main() {
         &mut cache_n,
         &prompt_tokens,
         &config,
+        None,
         None,
     )
     .to_vec();
@@ -295,6 +299,7 @@ fn main() {
         &prompt_tokens,
         &config,
         None,
+        None,
     );
 
     // Verify all prompt positions have K/V data
@@ -379,6 +384,7 @@ fn main() {
             &bench_tokens,
             &config,
             None,
+            None,
         );
     }
 
@@ -406,6 +412,7 @@ fn main() {
             &mut k,
             &bench_tokens,
             &config,
+            None,
             None,
         );
     }

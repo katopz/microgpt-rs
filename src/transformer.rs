@@ -2851,8 +2851,8 @@ mod tests {
         );
 
         assert_eq!(alive, 0, "Expected 0 alive neurons");
-        for i in 0..rows {
-            assert_eq!(sparse_out[i], 0.0, "Expected zero output at {i}");
+        for (i, &val) in sparse_out.iter().take(rows).enumerate() {
+            assert_eq!(val, 0.0, "Expected zero output at {i}");
         }
     }
 
@@ -3321,7 +3321,7 @@ mod tests {
 
         // Logits should differ — domain latent modulates K/V at mid-layer
         let mut any_diff = false;
-        for (_i, (&a, &b)) in logits1.iter().zip(logits2.iter()).enumerate() {
+        for (&a, &b) in logits1.iter().zip(logits2.iter()) {
             if (a - b).abs() > 1e-6 {
                 any_diff = true;
                 break;

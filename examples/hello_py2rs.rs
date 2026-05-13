@@ -333,6 +333,7 @@ fn main() {
         &prompt_tokens,
         &config,
         None,
+        None,
     );
 
     let max_diff: f32 = causal_logits
