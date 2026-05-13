@@ -1,0 +1,8 @@
+benchmark,metric,before,after,unit,gain,quality
+NIAH-512,retrieval,100.0,100,%,0%,5/5
+NIAH-1024,retrieval,100.0,100,%,0%,5/5
+NIAH-2048,retrieval,100.0,100,%,0%,5/5
+block_select-2K,throughput,N/A,41678424,blocks/s,-,64 blocks
+block_select-8K,throughput,N/A,55837947,blocks/s,-,256 blocks
+block_select-32K,throughput,N/A,63698444,blocks/s,-,1024 blocks
+block_select-128K,throughput,N/A,65992200,blocks/s,-,4096 blocks

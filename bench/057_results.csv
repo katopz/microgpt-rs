@@ -1,0 +1,60 @@
+benchmark,metric,before,after,unit,gain,quality
+TQ-2bit,bytes_per_token,128,16,bytes,8.0x,-
+TQ-3bit,bytes_per_token,128,24,bytes,5.3x,-
+TQ-4bit,bytes_per_token,128,24,bytes,5.3x,-
+TQ-store,throughput,11685912,,tok/s,,
+TQ-2bit,store+dequant,11685912,53689,tok/s,217.7x compute,memory wins at scale
+TQ-3bit,store+dequant,11685912,52854,tok/s,221.1x compute,memory wins at scale
+TQ-4bit,store+dequant,11685912,50786,tok/s,230.1x compute,memory wins at scale
+TQ-2bit,key_cos_sim,1.0000,0.9242,cos_sim,0.0758,min=0.9112
+TQ-2bit,val_cos_sim,1.0000,0.9273,cos_sim,0.0727,min=0.9106
+TQ-3bit,key_cos_sim,1.0000,0.9825,cos_sim,0.0175,min=0.9735
+TQ-3bit,val_cos_sim,1.0000,0.9850,cos_sim,0.0150,min=0.9781
+TQ-4bit,key_cos_sim,1.0000,0.9958,cos_sim,0.0042,min=0.9933
+TQ-4bit,val_cos_sim,1.0000,0.9958,cos_sim,0.0042,min=0.9942
+TQ-2bit,attention_correlation,1.0000,0.9450,pearson_r,0.0550,output_cos=0.9699
+TQ-3bit,attention_correlation,1.0000,0.9907,pearson_r,0.0093,output_cos=0.9989
+TQ-4bit,attention_correlation,1.0000,0.9978,pearson_r,0.0022,output_cos=0.9975
+TQ-2bit,32K_ctx_memory,1073.7,83.9,MB,12.8x,-
+TQ-3bit,32K_ctx_memory,1073.7,151.0,MB,7.1x,-
+TQ-4bit,32K_ctx_memory,1073.7,151.0,MB,7.1x,-
+PF-512-alpha0.05,token_reduction,512,480,tokens,1.1x,93.8%
+PF-512-alpha0.12,token_reduction,512,480,tokens,1.1x,93.8%
+PF-512-alpha0.25,token_reduction,512,480,tokens,1.1x,93.8%
+PF-512-alpha0.50,token_reduction,512,480,tokens,1.1x,93.8%
+PF-1024-alpha0.05,token_reduction,1024,832,tokens,1.2x,81.2%
+PF-1024-alpha0.12,token_reduction,1024,832,tokens,1.2x,81.2%
+PF-1024-alpha0.25,token_reduction,1024,832,tokens,1.2x,81.2%
+PF-1024-alpha0.50,token_reduction,1024,832,tokens,1.2x,81.2%
+PF-2048-alpha0.05,token_reduction,2048,1632,tokens,1.3x,79.7%
+PF-2048-alpha0.12,token_reduction,2048,1632,tokens,1.3x,79.7%
+PF-2048-alpha0.25,token_reduction,2048,1632,tokens,1.3x,79.7%
+PF-2048-alpha0.50,token_reduction,2048,1632,tokens,1.3x,79.7%
+PF-4096-alpha0.05,token_reduction,4096,3232,tokens,1.3x,78.9%
+PF-4096-alpha0.12,token_reduction,4096,3232,tokens,1.3x,78.9%
+PF-4096-alpha0.25,token_reduction,4096,3232,tokens,1.3x,78.9%
+PF-4096-alpha0.50,token_reduction,4096,3232,tokens,1.3x,78.9%
+PF-latency-512,compression_time,N/A,19.2,µs,-,1.1x reduction
+PF-latency-1024,compression_time,N/A,35.5,µs,-,1.2x reduction
+PF-latency-2048,compression_time,N/A,69.1,µs,-,1.3x reduction
+PF-latency-4096,compression_time,N/A,137.1,µs,-,1.3x reduction
+PF-block_select-64,throughput,N/A,12964561,blocks/s,-,2 blocks
+PF-block_select-128,throughput,N/A,18195953,blocks/s,-,4 blocks
+PF-block_select-256,throughput,N/A,24191717,blocks/s,-,8 blocks
+PF-block_select-512,throughput,N/A,29736090,blocks/s,-,16 blocks
+PF-block_select-1024,throughput,N/A,30801561,blocks/s,-,32 blocks
+PF-block_select-2048,throughput,N/A,35679275,blocks/s,-,64 blocks
+PF-grid-4x4x4,throughput,N/A,19729794,entries/s,-,64 entries
+PF-grid-8x16x4,throughput,N/A,51659728,entries/s,-,512 entries
+PF-grid-16x32x8,throughput,N/A,66616692,entries/s,-,4096 entries
+PF-grid-32x64x8,throughput,N/A,75670884,entries/s,-,16384 entries
+PFlash-default,niah_retrieval,100.0,100.0,%,0.0%,16/16
+PFlash-compress,niah_retrieval,100.0,100.0,%,0.0%,16/16
+Combined-TQ3-PF0.05,combined_resource,100.0,14.9,%,6.7x,seq=79.7% mem=18.8%
+Combined-TQ4-PF0.05,combined_resource,100.0,14.9,%,6.7x,seq=79.7% mem=18.8%
+Combined-TQ3-PF0.12,combined_resource,100.0,14.9,%,6.7x,seq=79.7% mem=18.8%
+Combined-TQ4-PF0.12,combined_resource,100.0,14.9,%,6.7x,seq=79.7% mem=18.8%
+Combined-TQ3-PF0.25,combined_resource,100.0,14.9,%,6.7x,seq=79.7% mem=18.8%
+Combined-TQ4-PF0.25,combined_resource,100.0,14.9,%,6.7x,seq=79.7% mem=18.8%
+Combined-TQ3-PF0.50,combined_resource,100.0,14.9,%,6.7x,seq=79.7% mem=18.8%
+Combined-TQ4-PF0.50,combined_resource,100.0,14.9,%,6.7x,seq=79.7% mem=18.8%
