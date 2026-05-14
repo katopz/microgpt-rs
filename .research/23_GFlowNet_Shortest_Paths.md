@@ -255,6 +255,15 @@ Backward probability distribution:
 
 ### T15: Real Benchmark with TacticalPruner (KEY FINDING)
 
+**Why a separate test?** D1–D4 each test one component in isolation against `NoScreeningPruner`. They cannot prove the key finding because:
+
+1. D1/D2 use `NoScreeningPruner` → `ln(1)=0` → no relevance signal to compete
+2. D1/D2 use `tree_budget=10000` → entire state space fits → heap never needs to choose
+3. D3 tests bandit reward in isolation, not DDTree scoring
+4. D4 is backward replay, unrelated to DDTree construction
+
+T15 needed **three things no prior test had:** `TacticalPruner` (real constraint graph), `BanditPruner` (fractional relevance where `ln(R) ≠ 0`), and tight budget sweep (forces heap to choose → exposes scoring differences).
+
 The D1–D4 benchmarks used `NoScreeningPruner` (relevance=1.0, ln(1)=0), showing zero delta. T15 uses `BanditPruner<BinaryScreeningPruner<TacticalPruner>>` on a real game map (BXT/SMG, 2×3, 7-step optimal solution) with non-uniform marginals biased toward Right/Down.
 
 #### Relevance Analysis
