@@ -6,6 +6,7 @@
 pub mod arena;
 pub mod players;
 pub mod replay;
+pub mod replay_backward;
 pub mod systems;
 
 #[cfg(feature = "g_zero")]
@@ -19,6 +20,7 @@ pub mod wasm_state;
 
 pub use arena::ArenaGrid;
 pub use players::{BomberPlayer, GreedyPlayer, HLPlayer, RandomPlayer, ValidatorPlayer};
+pub use replay_backward::{BackwardSample, BackwardWalkResult, ReplayBackwardWalker};
 
 #[cfg(feature = "bandit")]
 pub use crate::pruners::SharedBanditStats;

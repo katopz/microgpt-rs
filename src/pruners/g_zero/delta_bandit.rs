@@ -61,6 +61,11 @@ pub struct DeltaBanditPruner<P: ScreeningPruner> {
     ///
     /// Negative δ means hint hurt — ignore those observations.
     delta_floor: f32,
+    /// Trajectory length regularization strength (default: 0.1).
+    ///
+    /// GFlowNet flow regularization: shorter solutions get higher bonus,
+    /// forcing concentration on shortest paths.
+    lambda_length: f32,
 }
 
 impl<P: ScreeningPruner> DeltaBanditPruner<P> {
@@ -73,12 +78,21 @@ impl<P: ScreeningPruner> DeltaBanditPruner<P> {
             delta_weights: vec![0.0; num_arms],
             delta_counts: vec![0; num_arms],
             delta_floor: 0.0,
+            lambda_length: 0.1,
         }
     }
 
     /// Create with custom δ floor (minimum δ to count as reward).
     pub fn with_delta_floor(mut self, floor: f32) -> Self {
         self.delta_floor = floor;
+        self
+    }
+
+    /// Set trajectory length regularization strength.
+    ///
+    /// Default: 0.1. Higher values penalize longer trajectories more.
+    pub fn with_lambda_length(mut self, lambda: f32) -> Self {
+        self.lambda_length = lambda;
         self
     }
 
@@ -105,6 +119,23 @@ impl<P: ScreeningPruner> DeltaBanditPruner<P> {
 
         // Feed as reward to inner bandit
         self.inner.update(arm, effective_delta);
+    }
+
+    /// Feed δ signal with trajectory length bonus (GFlowNet flow regularization).
+    ///
+    /// Shorter solutions (small prefix_len) get higher bonus.
+    /// This is the GFlowNet flow regularization applied to bandit rewards:
+    /// minimizing trajectory length forces concentration on shortest paths.
+    ///
+    /// # Arguments
+    ///
+    /// * `arm` — Bandit arm index
+    /// * `delta` — Hint-δ value (predictive shift)
+    /// * `prefix_len` — Current solution prefix length (tokens generated so far)
+    #[inline]
+    pub fn observe_delta_with_flow(&mut self, arm: usize, delta: f32, prefix_len: usize) {
+        let flow_bonus = self.lambda_length / prefix_len.max(1) as f32;
+        self.observe_delta(arm, delta + flow_bonus);
     }
 
     /// Feed a [`HintDelta`] directly — convenience wrapper for [`observe_delta`](Self::observe_delta).
@@ -179,6 +210,11 @@ impl<P: ScreeningPruner> DeltaBanditPruner<P> {
     /// δ floor configuration.
     pub fn delta_floor(&self) -> f32 {
         self.delta_floor
+    }
+
+    /// Trajectory length regularization strength.
+    pub fn lambda_length(&self) -> f32 {
+        self.lambda_length
     }
 }
 
@@ -350,5 +386,51 @@ mod tests {
         assert!((pruner.total_delta(0) - 1.5).abs() < 1e-6);
         assert_eq!(pruner.delta_observation_count(0), 10);
         assert!((pruner.mean_delta(0) - 0.15).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_observe_delta_with_flow_short_bonus() {
+        let mut pruner = make_pruner(3);
+
+        // Short prefix (2 tokens) → high bonus
+        pruner.observe_delta_with_flow(0, 0.1, 2);
+
+        // delta = 0.1, flow_bonus = 0.1 / 2 = 0.05, effective = 0.15
+        assert!(
+            pruner.total_delta(0) > 0.1,
+            "Flow bonus should increase total delta"
+        );
+        assert!((pruner.total_delta(0) - 0.15).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_observe_delta_with_flow_long_less_bonus() {
+        let mut pruner = make_pruner(3);
+
+        // Long prefix (100 tokens) → tiny bonus
+        pruner.observe_delta_with_flow(0, 0.1, 100);
+
+        // delta = 0.1, flow_bonus = 0.1 / 100 = 0.001, effective = 0.101
+        assert!(
+            (pruner.total_delta(0) - 0.101).abs() < 1e-5,
+            "Long prefix should have tiny bonus"
+        );
+    }
+
+    #[test]
+    fn test_observe_delta_with_flow_zero_len() {
+        let mut pruner = make_pruner(3);
+
+        // Zero prefix_len → uses max(1) = 1, so bonus = 0.1
+        pruner.observe_delta_with_flow(0, 0.0, 0);
+
+        // delta = 0.0 clamped to floor (0.0), flow_bonus = 0.1
+        assert!((pruner.total_delta(0) - 0.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_lambda_length_builder() {
+        let pruner = make_pruner(3).with_lambda_length(0.5);
+        assert!((pruner.lambda_length() - 0.5).abs() < 1e-6);
     }
 }

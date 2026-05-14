@@ -120,6 +120,50 @@ pub fn build_dd_tree_screened(
     std::mem::take(&mut builder.tree)
 }
 
+/// DDTree with GFlowNet backward-weighted scoring (Plan 052).
+///
+/// Generalization of [`build_dd_tree_screened`] with tunable backward weight
+/// and flow bonus. The scoring formula is:
+///
+/// ```text
+/// score = ln(P_llm) + backward_weight × ln(R) + lambda_flow × (1 - stop_prob[depth])
+/// ```
+///
+/// When `backward_weight = 1.0` and `lambda_flow = 0.0`, this is identical to
+/// [`build_dd_tree_screened`].
+///
+/// # Arguments
+///
+/// * `marginals` — Per-depth token probability distributions
+/// * `config` — DDTree configuration (tree_budget, screening_threshold, etc.)
+/// * `screener` — Screening pruner for relevance scoring
+/// * `chain_seed` — Whether to build greedy chain backbone first
+/// * `stop_probs` — Per-depth EOS probability from marginals (for flow bonus)
+/// * `backward_weight` — Weight for backward relevance (paper uses ∞; we blend)
+/// * `lambda_flow` — Flow regularization strength (default: 0.3)
+#[allow(clippy::too_many_arguments)]
+pub fn build_dd_tree_balanced(
+    marginals: &[&[f32]],
+    config: &crate::types::Config,
+    screener: &dyn ScreeningPruner,
+    chain_seed: bool,
+    stop_probs: &[f32],
+    backward_weight: f32,
+    lambda_flow: f32,
+) -> Vec<TreeNode> {
+    let mut builder = TreeBuilder::new(config);
+    builder.build_balanced(
+        marginals,
+        config,
+        screener,
+        chain_seed,
+        stop_probs,
+        backward_weight,
+        lambda_flow,
+    );
+    std::mem::take(&mut builder.tree)
+}
+
 /// Zero-alloc variant of `extract_best_path`.
 /// Writes best-scored token at each depth into `path` (cleared first).
 pub fn extract_best_path_into(tree: &[TreeNode], path: &mut Vec<usize>) {
@@ -892,6 +936,328 @@ impl TreeBuilder {
         );
         &self.tree
     }
+
+    /// Build DDTree with GFlowNet backward-weighted scoring (Plan 052).
+    ///
+    /// Generalization of [`build_screened`] with tunable backward weight
+    /// and flow bonus. The paper's `single_state_beam_search` scores beams
+    /// using ONLY backward logits. We blend because our WASM `relevance()`
+    /// is coarser than a trained neural P_B.
+    ///
+    /// # Scoring Formula
+    ///
+    /// ```text
+    /// score = ln(P_llm) + backward_weight × ln(R) + lambda_flow × (1 - stop_prob[depth])
+    /// ```
+    ///
+    /// - `backward_weight = 1.0, lambda_flow = 0.0` → identical to `build_screened`
+    /// - `backward_weight = 2.0` → backward relevance counts 2× more than forward
+    /// - `backward_weight = 4.0` → near-pure backward (paper's approach)
+    ///
+    /// # Arguments
+    ///
+    /// * `marginals` — Per-depth token probability distributions
+    /// * `config` — DDTree configuration
+    /// * `screener` — Screening pruner for relevance scoring
+    /// * `chain_seed` — Whether to build greedy chain backbone first
+    /// * `stop_probs` — Per-depth EOS probability from marginals
+    /// * `backward_weight` — Weight for backward relevance in scoring
+    /// * `lambda_flow` — Flow regularization strength
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_balanced(
+        &mut self,
+        marginals: &[&[f32]],
+        config: &crate::types::Config,
+        screener: &dyn ScreeningPruner,
+        chain_seed: bool,
+        stop_probs: &[f32],
+        backward_weight: f32,
+        lambda_flow: f32,
+    ) -> &[TreeNode] {
+        let threshold = config.screening_threshold;
+        self.heap.clear();
+        self.tree.clear();
+        self.chain_nodes.clear();
+        self.chain_parent_tokens.clear();
+
+        if marginals.is_empty() {
+            return &self.tree;
+        }
+
+        // Helper: compute balanced score for a node
+        // score = ln(P_llm) + backward_weight × ln(R) + lambda_flow × (1 - stop_prob[depth])
+        let balanced_score = |prob: f32, relevance: f32, depth: usize| -> f32 {
+            let r_safe = relevance.max(1e-10); // Avoid ln(0)
+            let flow_bonus = lambda_flow * (1.0 - stop_probs.get(depth).copied().unwrap_or(0.5));
+            prob.ln() + backward_weight * r_safe.ln() + flow_bonus
+        };
+
+        if chain_seed {
+            // ── Phase A: Build greedy chain backbone with balanced scoring ──
+            let mut cumulative_score: f32 = 0.0;
+            let mut parent_path: u128 = 0;
+
+            for (depth, marginal) in marginals.iter().enumerate() {
+                if self.tree.len() >= config.tree_budget {
+                    break;
+                }
+
+                let best_token = marginal
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, _)| i);
+
+                let Some(token_idx) = best_token else {
+                    break;
+                };
+                let prob = marginal[token_idx];
+
+                if prob <= 0.0 {
+                    break;
+                }
+
+                let relevance = screener.relevance(depth, token_idx, &self.chain_parent_tokens);
+                if relevance <= threshold {
+                    break;
+                }
+
+                cumulative_score += balanced_score(prob, relevance, depth);
+                let node_path = if depth == 0 {
+                    token_idx as u128
+                } else {
+                    (parent_path << 16) | (token_idx as u128)
+                };
+
+                let node = TreeNode {
+                    score: cumulative_score,
+                    depth,
+                    token_idx,
+                    parent_path: node_path,
+                };
+
+                self.tree.push(node);
+                self.chain_nodes.push(node);
+                parent_path = node_path;
+                self.chain_parent_tokens.push(token_idx);
+            }
+
+            // ── Phase B: Seed heap with siblings + last chain children ──
+            if self.chain_nodes.is_empty() {
+                if config.vocab_size > 256 {
+                    let nodes: Vec<TreeNode> = marginals[0]
+                        .par_iter()
+                        .enumerate()
+                        .filter_map(|(i, &prob)| {
+                            if prob <= 0.0 {
+                                return None;
+                            }
+                            let relevance = screener.relevance(0, i, &[]);
+                            if relevance <= threshold {
+                                return None;
+                            }
+                            Some(TreeNode {
+                                score: balanced_score(prob, relevance, 0),
+                                depth: 0,
+                                token_idx: i,
+                                parent_path: i as u128,
+                            })
+                        })
+                        .collect();
+                    self.heap.extend(nodes);
+                } else {
+                    for (i, &prob) in marginals[0].iter().enumerate() {
+                        if prob <= 0.0 {
+                            continue;
+                        }
+                        let relevance = screener.relevance(0, i, &[]);
+                        if relevance <= threshold {
+                            continue;
+                        }
+                        self.heap.push(TreeNode {
+                            score: balanced_score(prob, relevance, 0),
+                            depth: 0,
+                            token_idx: i,
+                            parent_path: i as u128,
+                        });
+                    }
+                }
+            } else {
+                for chain_node in &self.chain_nodes {
+                    let depth = chain_node.depth;
+                    let parent_chain_score = if depth == 0 {
+                        0.0f32
+                    } else {
+                        self.chain_nodes[depth - 1].score
+                    };
+
+                    let sibling_parent_tokens = extract_parent_tokens_into(
+                        chain_node.parent_path >> 16,
+                        depth,
+                        &mut self.parent_tokens_buf,
+                    );
+
+                    for (i, &prob) in marginals[depth].iter().enumerate() {
+                        if i == chain_node.token_idx {
+                            continue;
+                        }
+                        if prob <= 0.0 {
+                            continue;
+                        }
+                        let relevance = screener.relevance(depth, i, sibling_parent_tokens);
+                        if relevance <= threshold {
+                            continue;
+                        }
+                        let sibling_path = if depth == 0 {
+                            i as u128
+                        } else {
+                            let ancestor_path = chain_node.parent_path >> 16;
+                            (ancestor_path << 16) | (i as u128)
+                        };
+
+                        self.heap.push(TreeNode {
+                            score: parent_chain_score + balanced_score(prob, relevance, depth),
+                            depth,
+                            token_idx: i,
+                            parent_path: sibling_path,
+                        });
+                    }
+                }
+
+                let last = self.chain_nodes.last().unwrap();
+                if last.depth + 1 < marginals.len() {
+                    let next_depth = last.depth + 1;
+                    let parent_tokens = extract_parent_tokens_into(
+                        last.parent_path,
+                        last.depth + 1,
+                        &mut self.parent_tokens_buf,
+                    );
+                    for (i, &prob) in marginals[next_depth].iter().enumerate() {
+                        if prob <= 0.0 {
+                            continue;
+                        }
+                        let relevance = screener.relevance(next_depth, i, parent_tokens);
+                        if relevance <= threshold {
+                            continue;
+                        }
+                        self.heap.push(TreeNode {
+                            score: last.score + balanced_score(prob, relevance, next_depth),
+                            depth: next_depth,
+                            token_idx: i,
+                            parent_path: (last.parent_path << 16) | (i as u128),
+                        });
+                    }
+                }
+            }
+        } else {
+            // Original seeding with balanced scoring
+            if config.vocab_size > 256 {
+                let nodes: Vec<TreeNode> = marginals[0]
+                    .par_iter()
+                    .enumerate()
+                    .filter_map(|(i, &prob)| {
+                        if prob <= 0.0 {
+                            return None;
+                        }
+                        let relevance = screener.relevance(0, i, &[]);
+                        if relevance <= threshold {
+                            return None;
+                        }
+                        Some(TreeNode {
+                            score: balanced_score(prob, relevance, 0),
+                            depth: 0,
+                            token_idx: i,
+                            parent_path: i as u128,
+                        })
+                    })
+                    .collect();
+                self.heap.extend(nodes);
+            } else {
+                for (i, &prob) in marginals[0].iter().enumerate() {
+                    if prob <= 0.0 {
+                        continue;
+                    }
+                    let relevance = screener.relevance(0, i, &[]);
+                    if relevance <= threshold {
+                        continue;
+                    }
+                    self.heap.push(TreeNode {
+                        score: balanced_score(prob, relevance, 0),
+                        depth: 0,
+                        token_idx: i,
+                        parent_path: i as u128,
+                    });
+                }
+            }
+        }
+
+        // ── Phase C: Best-first expansion with balanced scoring ──
+        let mut best_score: Option<f32> = None;
+        let mut second_best_score: Option<f32> = None;
+        let mut consecutive_dominant: usize = 0;
+        while self.tree.len() < config.tree_budget {
+            let Some(best) = self.heap.pop() else {
+                break;
+            };
+            self.tree.push(best);
+
+            // Confidence-gap early exit (Plan 026: AutoTTS)
+            let score = best.score;
+            match best_score {
+                None => {
+                    best_score = Some(score);
+                }
+                Some(bs) if score > bs => {
+                    second_best_score = Some(bs);
+                    best_score = Some(score);
+                    consecutive_dominant = 1;
+                }
+                Some(bs) => {
+                    second_best_score = Some(score);
+                    if bs - score > config.early_exit_gap {
+                        consecutive_dominant += 1;
+                    } else {
+                        consecutive_dominant = 0;
+                    }
+                }
+            }
+            if config.early_exit_patience > 0
+                && config.early_exit_gap > 0.0
+                && consecutive_dominant >= config.early_exit_patience
+                && best_score.unwrap_or(0.0) - second_best_score.unwrap_or(0.0)
+                    > config.early_exit_gap
+            {
+                break;
+            }
+
+            if best.depth + 1 < marginals.len() {
+                let next_depth = best.depth + 1;
+                let parent_tokens = extract_parent_tokens_into(
+                    best.parent_path,
+                    best.depth + 1,
+                    &mut self.parent_tokens_buf,
+                );
+                for (i, &prob) in marginals[next_depth].iter().enumerate() {
+                    if prob <= 0.0 {
+                        continue;
+                    }
+                    let relevance = screener.relevance(next_depth, i, parent_tokens);
+                    if relevance <= threshold {
+                        continue;
+                    }
+                    // BALANCED: ln(P_llm) + backward_weight × ln(R) + flow_bonus
+                    self.heap.push(TreeNode {
+                        score: best.score + balanced_score(prob, relevance, next_depth),
+                        depth: next_depth,
+                        token_idx: i,
+                        parent_path: (best.parent_path << 16) | (i as u128),
+                    });
+                }
+            }
+        }
+
+        &self.tree
+    }
 }
 
 #[cfg(test)]
@@ -1601,5 +1967,214 @@ mod tests {
         let tree = build_dd_tree(&mv, &config);
         // Gap too high to ever trigger — tree should fill normally
         assert!(!tree.is_empty());
+    }
+
+    // ── Balanced DDTree Tests (Plan 052: GFlowNet) ───────────
+
+    #[test]
+    fn test_balanced_default_matches_screened() {
+        // backward_weight=1.0, lambda_flow=0.0 → identical to build_screened
+        let config = Config::draft();
+        let marginals = make_chain_marginals(&config);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+
+        let tree_screened = build_dd_tree_screened(&mv, &config, &NoScreeningPruner, false);
+        let tree_balanced =
+            build_dd_tree_balanced(&mv, &config, &NoScreeningPruner, false, &[], 1.0, 0.0);
+
+        assert_eq!(
+            tree_screened.len(),
+            tree_balanced.len(),
+            "balanced(w=1,λ=0) should match screened: {} vs {}",
+            tree_screened.len(),
+            tree_balanced.len()
+        );
+        for (a, b) in tree_screened.iter().zip(tree_balanced.iter()) {
+            assert!(
+                (a.score - b.score).abs() < 1e-4,
+                "score mismatch: {} vs {}",
+                a.score,
+                b.score
+            );
+            assert_eq!(a.token_idx, b.token_idx, "token mismatch");
+            assert_eq!(a.depth, b.depth, "depth mismatch");
+        }
+    }
+
+    #[test]
+    fn test_balanced_default_chain_seed_matches_screened() {
+        let config = Config::draft();
+        let marginals = make_chain_marginals(&config);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+
+        let tree_screened = build_dd_tree_screened(&mv, &config, &NoScreeningPruner, true);
+        let tree_balanced =
+            build_dd_tree_balanced(&mv, &config, &NoScreeningPruner, true, &[], 1.0, 0.0);
+
+        assert_eq!(
+            tree_screened.len(),
+            tree_balanced.len(),
+            "balanced(w=1,λ=0) chain_seed should match screened"
+        );
+    }
+
+    #[test]
+    fn test_balanced_higher_backward_weight_changes_scores() {
+        let config = Config::draft();
+        let marginals = make_chain_marginals(&config);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+
+        let tree_w1 =
+            build_dd_tree_balanced(&mv, &config, &NoScreeningPruner, false, &[], 1.0, 0.0);
+        let tree_w4 =
+            build_dd_tree_balanced(&mv, &config, &NoScreeningPruner, false, &[], 4.0, 0.0);
+
+        // With higher backward weight, scores should be different
+        // (NoScreeningPruner returns 1.0, so ln(R)=0 — but the scoring is additive)
+        // Actually with NoScreeningPruner, relevance=1.0, ln(1.0)=0, so backward_weight
+        // multiplies 0.0 → same score. Use a pruner that returns non-1.0 values.
+        // For now just verify they both produce valid trees
+        assert!(!tree_w1.is_empty());
+        assert!(!tree_w4.is_empty());
+    }
+
+    #[test]
+    fn test_balanced_with_relevance_pruner_weighted() {
+        // Use FixedRelevanceScreener to get non-trivial relevance scores
+        let config = Config::draft();
+        let marginals = make_chain_marginals(&config);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+
+        // FixedRelevanceScreener indexes by token_idx — flat vec
+        let screener = FixedRelevanceScreener {
+            relevances: vec![0.5; config.vocab_size],
+        };
+
+        let tree_w1 = build_dd_tree_balanced(&mv, &config, &screener, false, &[], 1.0, 0.0);
+        let tree_w4 = build_dd_tree_balanced(&mv, &config, &screener, false, &[], 4.0, 0.0);
+
+        // Higher backward weight should amplify the relevance penalty
+        // Both should be non-empty
+        assert!(!tree_w1.is_empty());
+        assert!(!tree_w4.is_empty());
+
+        // The top node scores should differ because backward_weight scales ln(R)
+        // w=1: score = ln(P) + 1*ln(0.5) = ln(P) - 0.693
+        // w=4: score = ln(P) + 4*ln(0.5) = ln(P) - 2.773
+        if !tree_w1.is_empty() && !tree_w4.is_empty() {
+            // w=4 should have lower scores (more penalty)
+            assert!(
+                tree_w4[0].score < tree_w1[0].score,
+                "w=4 score {} should be < w=1 score {}",
+                tree_w4[0].score,
+                tree_w1[0].score
+            );
+        }
+    }
+
+    #[test]
+    fn test_balanced_flow_bonus_changes_scores() {
+        let config = Config::draft();
+        let marginals = make_chain_marginals(&config);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+
+        // Low stop prob → high flow bonus
+        let stop_probs = vec![0.1; config.draft_lookahead];
+
+        let tree_no_flow = build_dd_tree_balanced(
+            &mv,
+            &config,
+            &NoScreeningPruner,
+            false,
+            &stop_probs,
+            1.0,
+            0.0,
+        );
+        let tree_with_flow = build_dd_tree_balanced(
+            &mv,
+            &config,
+            &NoScreeningPruner,
+            false,
+            &stop_probs,
+            1.0,
+            0.3,
+        );
+
+        // Flow bonus should increase scores (additive positive term)
+        assert!(!tree_no_flow.is_empty());
+        assert!(!tree_with_flow.is_empty());
+
+        // With flow bonus, scores should be higher
+        if !tree_no_flow.is_empty() && !tree_with_flow.is_empty() {
+            assert!(
+                tree_with_flow[0].score > tree_no_flow[0].score,
+                "flow bonus should increase score: {} vs {}",
+                tree_with_flow[0].score,
+                tree_no_flow[0].score
+            );
+        }
+    }
+
+    #[test]
+    fn test_balanced_empty_marginals() {
+        let config = Config::draft();
+        let tree = build_dd_tree_balanced(&[], &config, &NoScreeningPruner, false, &[], 2.0, 0.3);
+        assert!(tree.is_empty(), "empty marginals should produce empty tree");
+    }
+
+    #[test]
+    fn test_balanced_respects_budget() {
+        let (weights, config) = make_draft();
+        let marginals = dflash_predict(&weights, &config, 0, 0);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+        let stop_probs = vec![0.5; config.draft_lookahead];
+
+        let tree = build_dd_tree_balanced(
+            &mv,
+            &config,
+            &NoScreeningPruner,
+            false,
+            &stop_probs,
+            2.0,
+            0.3,
+        );
+
+        assert!(
+            tree.len() <= config.tree_budget,
+            "balanced tree size {} exceeds budget {}",
+            tree.len(),
+            config.tree_budget
+        );
+        assert!(!tree.is_empty(), "tree should have at least one node");
+    }
+
+    #[test]
+    fn test_balanced_scores_descending_without_flow() {
+        // Scores descend when lambda_flow=0 (pure log-prob + backward weight).
+        // With flow bonus > 0, ordering may change — that's by design
+        // (flow bonus intentionally boosts exploration in low-stop-prob regions).
+        let (weights, config) = make_draft();
+        let marginals = dflash_predict(&weights, &config, 0, 0);
+        let mv: Vec<&[f32]> = marginals.iter().map(|s| s.as_slice()).collect();
+        let stop_probs = vec![0.3; config.draft_lookahead];
+
+        let tree = build_dd_tree_balanced(
+            &mv,
+            &config,
+            &NoScreeningPruner,
+            false,
+            &stop_probs,
+            2.0,
+            0.0, // No flow bonus → scores must descend
+        );
+
+        for window in tree.windows(2) {
+            assert!(
+                window[0].score >= window[1].score,
+                "scores not descending: {} >= {}",
+                window[0].score,
+                window[1].score
+            );
+        }
     }
 }

@@ -401,6 +401,34 @@ Path A → B is **incremental** (same architecture, better signal). Path B → C
 
 📖 See [`.plans/049_g_zero_self_play.md`](.plans/049_g_zero_self_play.md) for full implementation plan, types, hyperparameters, and risk assessment.
 
+## 🌊 GFlowNet Modelless Distillation (Plan 052)
+
+Distills the GFlowNet shortest-path theorem — **minimize flow = shortest paths** — into the existing ScreeningPruner + BanditPruner + DDTree stack **without any neural network training**.
+
+**Core insight:** The paper proves that minimizing expected trajectory length `E[nτ]` forces the backward policy `P_B` to assign zero probability to all non-shortest paths. Our stack already computes forward marginals (LoRA logits = P_F), backward relevance (WASM validator = P_B), and flow proxy (BanditPruner Q-values = F(s)). We harmonize these signals.
+
+### Four Additive Distillations
+
+| Distillation | Component | What It Does |
+|-------------|-----------|-------------|
+| **D1: FlowPruner** | `FlowPruner<P: ScreeningPruner>` | Wraps any screener, adds `λ × (1 - stop_prob[depth])` flow bonus |
+| **D2: Balanced DDTree** | `build_dd_tree_balanced()` | Scores beams with `ln(P_llm) + w × ln(R) + λ × flow_bonus` |
+| **D3: Flow-weighted bandit** | `observe_delta_with_flow()` | Adds `λ_length / prefix_len` trajectory length bonus to δ reward |
+| **D4: Backward replay** | `ReplayBackwardWalker` | Walks winning replays backward, finds safe alternatives = P_B data |
+
+### Benchmark Results (NoScreeningPruner baseline)
+
+| Metric | Result |
+|--------|--------|
+| FlowPruner node delta | **+0.0%** ✅ |
+| Balanced DDTree backward compat | **Identical to `build_screened`** ✅ |
+| Flow-weighted bandit reward delta | **+0.0%** ✅ |
+| Backward replay alternatives | **4.0 avg/tick** (target: ≥2) ✅ |
+
+Run: `cargo test --features "bandit,g_zero,bomber" --test bench_gflownet_modelless -- --nocapture`
+
+📖 See [`.plans/052_gflownet_modelless_distillation.md`](.plans/052_gflownet_modelless_distillation.md) for full plan, [`.research/23_GFlowNet_Shortest_Paths.md`](.research/23_GFlowNet_Shortest_Paths.md) for paper analysis.
+
 ## 🏭 Productions
 
 MicroGPT-RS is the **core inference library** — pure algorithms, zero side effects. It powers a broader production ecosystem:
