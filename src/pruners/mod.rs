@@ -72,6 +72,16 @@ pub use g_zero::{
     DeltaGatedConfig, GeneratedPair, HintDelta, LogProbResult, QueryTemplate, TemplateProposer,
 };
 
+#[cfg(feature = "delta_mem")]
+pub mod delta_mem;
+
+#[cfg(feature = "delta_mem")]
+pub use delta_mem::{
+    AggregationStrategy, ContextFeatures, CorrectionMode, DeltaMemoryConfig, DeltaMemorySnapshot,
+    DeltaMemoryState, FeatureHasher, MemorySteeredPruner, MultiDomainMemory,
+    MultiDomainMemoryPruner, OutcomeFeatures, WriteGranularity,
+};
+
 #[cfg(all(feature = "g_zero", feature = "fft"))]
 pub use g_zero::{FFTTemplate, FFTTemplateProposer};
 

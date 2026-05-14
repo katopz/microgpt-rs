@@ -410,8 +410,57 @@ The delta-rule update `S' = (1-β)S - β(S·k)⊗k + β·v⊗k` is a **second-or
 
 The paper proves that with `normalize_qk=True` (keys on unit sphere) and coupled gates, the state norm remains bounded. This is critical for our modelless version — we must normalize our feature hashes to prevent state explosion.
 
+## Plan 053 Implementation Results
+
+**Status:** Feature-gated (`delta_mem = ["bandit"]`), **NOT in default features.**
+
+### What We Built (Plan 053)
+
+All distillations D1–D5 implemented in `src/pruners/delta_mem/`:
+- `state.rs` — DeltaMemoryState (r×r associative matrix, delta-rule read/write)
+- `hash.rs` — FeatureHasher (LSH projection replacing learned W_mq/W_mk/W_mv)
+- `pruner.rs` — MemorySteeredPruner<P> (wraps any ScreeningPruner with memory corrections)
+- `multi.rs` — MultiDomainMemory (per-domain isolated states, MSW adaptation)
+- `multi_pruner.rs` — MultiDomainMemoryPruner<P> (domain-routed pruner)
+
+### DDTree Proof Test Results
+
+| Pruner | Avg Nodes | Time | vs Baseline |
+|--------|-----------|------|-------------|
+| NoScreeningPruner | 256.0 | 44ms | baseline |
+| Fresh MemorySteeredPruner | 256.0 | 1.13s | +2470% |
+| Trained MemorySteeredPruner (200 obs) | 256.0 | 1.14s | +2492% |
+
+### What Works
+
+- ✅ Delta-rule math converges (cosine similarity ≤0.20 alignment error after 200 updates)
+- ✅ Domain isolation is perfect (0% cross-interference in MultiDomainMemory)
+- ✅ Fresh memory = zero corruption (identical to NoScreeningPruner baseline)
+- ✅ State norm bounded with L2-normalized keys (<200 after 500 writes)
+- ✅ Coupled gates (λ=1-β) produce smaller state norm than uncoupled
+- ✅ Snapshots serialize/deserialize correctly for persistence
+
+### What Doesn't Work
+
+- ❌ No DDTree quality improvement (corrections too small to flip branch ordering)
+- ❌ 26× latency overhead (FeatureHasher + matmul per `relevance()` call, ~682 calls/build)
+- ❌ Tree fills budget regardless of relevance adjustments
+
+### Why No Gain for DDTree
+
+The paper corrects **attention Q/O projections across all layers** of a 4B+ parameter model — that's hundreds of dimensions being nudged in a learned representation space. We correct a **single scalar relevance score** in a tree search. The correction surface is too simple — there's not enough "model" to correct. The value proposition is specifically for Transformer attention correction, not for tree-based relevance scoring.
+
+### Path Forward
+
+The infrastructure is correct and may have value in other contexts:
+- **Transformer integration** — if riir-gpu gets a Transformer, these same primitives apply corrections where they matter (attention layers, not tree scoring)
+- **Caching** — cache relevance per (depth, token_idx) to amortize hashing cost
+- **Offline analysis** — use memory state to analyze blind spots without hot-path overhead
+- **Not recommended for DDTree hot-path** — the 26× overhead is unacceptable for per-build use
+
 **See also:**
 - Research 21 (G-Zero) — δ is the same signal used to gate writes in our modelless delta memory
 - Research 20 (TurboQuant) — online vector quantization for feature hashing
 - Research 22 (Lighthouse Attention) — alternative long-context attention mechanism
 - Research 07 (Screening Absolute Relevance) — the relevance signal that could feed into memory reads
+- Plan 053 (`.plans/053_delta_mem_modelless.md`) — full implementation details and benchmarks

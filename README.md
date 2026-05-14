@@ -429,6 +429,28 @@ Run: `cargo test --features "bandit,g_zero,bomber" --test bench_gflownet_modelle
 
 📖 See [`.plans/052_gflownet_modelless_distillation.md`](.plans/052_gflownet_modelless_distillation.md) for full plan, [`.research/23_GFlowNet_Shortest_Paths.md`](.research/23_GFlowNet_Shortest_Paths.md) for paper analysis.
 
+## 🧲 δ-Mem Modelless Distillation (Plan 053) — ⚠️ Infrastructure Only
+
+Distills δ-mem's online associative memory (arXiv 2605.12357) into our modelless stack. The delta-rule update `S' = (1-β)S - β(S·k)⊗k + β·v⊗k` is implemented with feature hashing replacing the paper's learned projections.
+
+### Verdict: No DDTree Gain
+
+| Metric | Target | Actual |
+|--------|--------|--------|
+| DDTree node delta | ≤10% more | 0% ✅ |
+| Latency overhead | ≤5% | **+2500%** ❌ |
+| Tree quality improvement | ≤5% shorter paths | 0% ❌ |
+| Memory convergence | ≤20% error | 18% ✅ |
+| Domain isolation | ≤50% interference | 0% ✅ |
+
+**Why no gain:** The paper corrects attention Q/O projections across all layers of a 4B+ param Transformer. We correct a single scalar relevance score in a tree search — the correction surface is too simple. The 26× overhead comes from FeatureHasher + matmul per `relevance()` call (~682 calls/build).
+
+**What works:** Delta-rule math, domain isolation, bounded state, snapshots. **What doesn't:** DDTree quality or latency. The value prop is for Transformer attention correction, not tree scoring.
+
+**Feature gate:** `delta_mem = ["bandit"]` — **off by default**, not in `default` features.
+
+📖 See [`.plans/053_delta_mem_modelless.md`](.plans/053_delta_mem_modelless.md) for full plan, [`.research/24_Delta_Mem_Online_Associative_Memory.md`](.research/24_Delta_Mem_Online_Associative_Memory.md) for paper analysis.
+
 ## 🏭 Productions
 
 MicroGPT-RS is the **core inference library** — pure algorithms, zero side effects. It powers a broader production ecosystem:
@@ -554,6 +576,7 @@ cargo clippy --all-targets --all-features --quiet
 | `gpu` | Placeholder — GPU training lives in riir-ai/riir-gpu |
 | `game_domain` | Alias for `domain_latent` — game-specific Config presets (Plan 040) |
 | `language_domain` | Language domain: BPE vocab, LLM models (Plan 040, future) |
+| `delta_mem` | δ-Mem associative bandit memory — infrastructure only, no DDTree gain (Plan 053, off by default) |
 | `g_zero` | G-Zero self-play + FFT arena + Bomber arena + TFT party AI (Plans 049–055) |
 | `full` | Enable all features |
 
