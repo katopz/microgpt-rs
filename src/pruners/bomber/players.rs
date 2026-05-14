@@ -272,7 +272,10 @@ fn update_opponents(opponents: &mut Vec<KnownOpponent>, events: &[GameEvent], my
 }
 
 /// Predict opponent's next position from trajectory (prev → current → next).
-fn predict_direction(current: (i32, i32), prev: Option<(i32, i32)>) -> Option<(i32, i32)> {
+pub(crate) fn predict_direction(
+    current: (i32, i32),
+    prev: Option<(i32, i32)>,
+) -> Option<(i32, i32)> {
     let (cx, cy) = current;
     let (px, py) = prev?;
     let dx = cx - px;
@@ -284,7 +287,7 @@ fn predict_direction(current: (i32, i32), prev: Option<(i32, i32)>) -> Option<(i
 }
 
 /// Count walkable neighbors (escape routes) from a position.
-fn count_escape_routes(pos: (i32, i32), grid: &ArenaGrid) -> usize {
+pub(crate) fn count_escape_routes(pos: (i32, i32), grid: &ArenaGrid) -> usize {
     [(0i32, -1), (0, 1), (-1, 0), (1, 0)]
         .iter()
         .filter(|&&(dx, dy)| grid.is_walkable(pos.0 + dx, pos.1 + dy))
@@ -293,7 +296,7 @@ fn count_escape_routes(pos: (i32, i32), grid: &ArenaGrid) -> usize {
 
 /// Score a bomb placement by how trapped the opponent would be.
 /// Higher score = fewer opponent escape routes + blast coverage.
-fn trap_score(
+pub(crate) fn trap_score(
     bomb_pos: (i32, i32),
     opponent_pos: (i32, i32),
     grid: &ArenaGrid,
@@ -337,7 +340,7 @@ fn trap_score(
 }
 
 /// Score movement toward intercepting an opponent's predicted path.
-fn intercept_score(
+pub(crate) fn intercept_score(
     my_target: (i32, i32),
     opponent_pos: (i32, i32),
     predicted_pos: Option<(i32, i32)>,

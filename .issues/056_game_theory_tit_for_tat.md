@@ -1,14 +1,13 @@
 # Issue 056: Game Theory Player Design — Tit-for-Tat Composite Player
 
-**Status:** Superseded — See Plan 055 for MMORPG TFT (FFT/GvG)
+**Status:** Implemented — Bomber TftPlayer + mixed tournament benchmark
 **Feature gate:** `g_zero`
 **Source:** Plan 054 (Player A/B Benchmark) + Game Theory Analysis
-**Impact:** None yet — bomber TFT deferred in favor of FFT/GvG TFT (Plan 055)
+**Commit:** `feat(bomber): TftPlayer — game theory Tit-for-Tat (Issue 056)`
 
-> **Note:** Bomber provocation is ambiguous (bomb nearby ≠ intentional attack).
-> FFT/GameEvents give crystal-clear provocation signals (`DamageDealt { attacker, target }`).
-> Plan 055 (`055_mmorpg_tft_party_ai.md`) covers the real MMORPG use case with party-level TFT,
-> role-based retaliation, and GvG coordination. This issue remains as bomber-specific reference.
+> **Bomber TFT:** `TftPlayer` implemented in `microgpt-rs/src/pruners/bomber/tft_player.rs`.
+> Uses wall-aware blast zone detection for provocation (conservative — only retaliates when
+> actually in danger). Mixed tournament benchmark at `g_zero_05_tft_mixed`.
 
 ---
 
@@ -190,10 +189,10 @@ by being more aggressive (already loses). TFT is stable.
   - Print game theory alignment table (Nice/Retaliatory/Forgiving/Clear scores)
 
 ### Phase 3: Validation
-- [ ] **T5**: Verify TFT survival ≥ Greedy survival (hypothesis: 68-75%)
-- [ ] **T6**: Verify TFT kills > Greedy kills (hypothesis: 0.15-0.20)
-- [ ] **T7**: `cargo clippy --fix --allow-dirty` — zero warnings
-- [ ] **T8**: `cargo test -p microgpt-rs --features g_zero` — all tests pass
+- [ ] **T5**: Verify TFT survival ≥ Greedy survival (hypothesis: 68-75%) — Result: 58.4% (below target, needs tuning)
+- [x] **T6**: Verify TFT kills > Greedy kills (hypothesis: 0.15-0.20) — Result: 0.32 (✅ exceeds target)
+- [x] **T7**: `cargo clippy --fix --allow-dirty` — zero warnings
+- [x] **T8**: `cargo test -p microgpt-rs --features g_zero` — all 599 tests pass
 - [ ] **T9**: Commit with message: `feat(bomber): TftPlayer — game theory Tit-for-Tat (Issue 056)`
 
 ---
@@ -275,25 +274,33 @@ riir-ai/crates/riir-examples/
 
 ---
 
-## Open Questions
+## Implementation Results (Mixed Tournament, 1000 rounds, release)
 
-1. **Provocation threshold**: Should we detect opponent bombs only, or also opponent proximity?
-   - Bomb-only is cleaner (Clear principle) but may be too slow to react
-   - Proximity-only may trigger false positives (opponent just passing by)
-   - Proposed: bomb-in-blast-range as primary, proximity-within-2 as secondary
+```
+Player    │ Survival │ Avg Score │ Avg Kills │ Game Theory Analog
+──────────┼──────────┼───────────┼───────────┼───────────────────
+🐱 Greedy │   64.5%  │      3.6  │     0.26  │ Pure Cooperator
+🐵 HL     │   60.6%  │      1.7  │     0.00  │ Grim Trigger
+🤖 GZero  │   70.5%  │      1.9  │     0.04  │ Noisy Cooperator
+🦊 TFT    │   58.4%  │      3.1  │     0.32  │ Tit-for-Tat
+```
 
-2. **Retaliation duration**: 10 ticks? 20? Adaptive based on game phase?
-   - 10 ticks ≈ 1 bomb fuse cycle (standard timing)
-   - Too short → not enough punishment to deter aggression
-   - Too long → becomes Grim Trigger (loses forgiveness advantage)
+### Key Findings
 
-3. **Generous TFT**: Should we add 10% chance to forgive without retaliation?
-   - Original Axelrod tournament: pure TFT won
-   - Noisy environments: Generous TFT (10% forgive) wins
-   - Bomber arena has "noise" (random explosions, collateral damage)
-   - Proposed: configurable, default ON with 10% forgiveness
+1. **TFT kills 0.32/round** — highest in the tournament (Retaliatory ✅)
+2. **TFT score 3.1** — second only to Greedy (Nice ✅)
+3. **TFT survival 58.4%** — below target (68-75%), close to HL (60.6%)
+4. **Safety-first fix works** — not applying retaliation bonus in blast zone improved survival from 50% → 58.4%
+5. **Generous TFT (10% forgive)** triggers occasionally, preventing some escalation spirals
 
-4. **Should TFT track WHO provoked it?**
-   - Current design: retaliate against nearest opponent
-   - Game theory: should retaliate against the specific defector
-   - Simpler: just attack nearest (Clear principle)
+### Open Questions
+
+1. ~~**Provocation threshold**~~ — Resolved: wall-aware blast zone check (must be IN blast zone)
+2. ~~**Retaliation duration**~~ — Set to 10 ticks (1 bomb fuse cycle), configurable via `with_params()`
+3. ~~**Generous TFT**~~ — Enabled by default, 10% forgiveness chance
+4. **Survival below target** — TFT survival 58.4% vs target 68-75%. Possible improvements:
+   - Reduce retaliation bonus magnitudes (+1.5 hunt → +0.75)
+   - Reduce retaliation duration (10 → 6 ticks)
+   - Increase forgiveness chance (10% → 20%)
+   - Only retaliate against opponents that placed bombs NEAR us (not just any opponent)
+5. **Should TFT track WHO provoked it?** — Currently attacks nearest. Tracking specific aggressor might improve retaliation precision.

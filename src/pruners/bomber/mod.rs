@@ -10,6 +10,8 @@ pub mod systems;
 
 #[cfg(feature = "g_zero")]
 pub mod g_zero_player;
+#[cfg(feature = "g_zero")]
+pub mod tft_player;
 #[cfg(feature = "bomber-wasm")]
 pub mod wasm_pruner;
 #[cfg(feature = "bomber-wasm")]
@@ -26,6 +28,8 @@ pub use g_zero_player::GZeroPlayer;
 #[cfg(feature = "bomber-wasm")]
 pub use players::{LoraPlayer, LoraWasmPlayer, NNPlayer, create_players_with_wasm, is_safe_action};
 pub use systems::*;
+#[cfg(feature = "g_zero")]
+pub use tft_player::TftPlayer;
 #[cfg(feature = "bomber-wasm")]
 pub use wasm_state::{ZeroCopyStateBuffer, serialize_grid_only, serialize_into_buffer};
 
