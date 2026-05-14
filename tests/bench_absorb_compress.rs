@@ -167,6 +167,7 @@ fn bench_trial_log_throughput() {
         note: "test".to_string(),
         base_correct: None,
         reviewed_correct: None,
+        anchors: None,
     };
 
     // Warmup

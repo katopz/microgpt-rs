@@ -17,6 +17,7 @@ All examples run with `cargo run --example <name>`. Some require feature flags.
 | 9 | Sudoku | 3 examples | `sudoku` |
 | 10 | Tactical AI | 6 examples | — |
 | 11 | Getting Started | 1 example | — |
+| 12 | Stepwise Reward Shaping | 1 example | `stepcode` |
 
 ---
 
@@ -364,6 +365,20 @@ Python-to-Rust migration primer — demonstrates idiomatic Rust patterns for Pyt
 
 ```bash
 cargo run --example hello_py2rs
+```
+
+---
+
+## 12. Stepwise Reward Shaping (StepCodeReasoner Plan 054)
+
+Intra-trajectory reward shaping distilled from StepCodeReasoner (ICML 2026). Rewards bandit arms proportionally to how many downstream arms they enable.
+
+### stepcode_01_shaped_bandit
+
+Demonstrates flat vs shaped reward convergence, path consistency metrics, and the effect of λ (shaping coefficient).
+
+```bash
+cargo run --example stepcode_01_shaped_bandit --features stepcode
 ```
 
 ---

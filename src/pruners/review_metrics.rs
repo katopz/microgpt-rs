@@ -78,6 +78,14 @@ pub struct ReviewMetrics {
     harmful: AtomicU64,
     both_correct: AtomicU64,
     both_wrong: AtomicU64,
+    /// Paths where final answer was correct but intermediate steps were shaky (Plan 054).
+    path_hacking: AtomicU64,
+    /// Paths where both final AND intermediate steps were correct (Plan 054).
+    path_faithful: AtomicU64,
+    /// Total paths analyzed for consistency (Plan 054).
+    path_total: AtomicU64,
+    /// Running sum of path consistency values (Plan 054).
+    path_consistency_sum: AtomicU64,
 }
 
 impl ReviewMetrics {
@@ -88,6 +96,10 @@ impl ReviewMetrics {
             harmful: AtomicU64::new(0),
             both_correct: AtomicU64::new(0),
             both_wrong: AtomicU64::new(0),
+            path_hacking: AtomicU64::new(0),
+            path_faithful: AtomicU64::new(0),
+            path_total: AtomicU64::new(0),
+            path_consistency_sum: AtomicU64::new(0),
         }
     }
 
@@ -196,6 +208,57 @@ impl ReviewMetrics {
     pub fn both_wrong_count(&self) -> u64 {
         self.both_wrong.load(Ordering::Relaxed)
     }
+
+    // ── Path Consistency (StepCodeReasoner Plan 054) ─────────────
+
+    /// Classify a path by its consistency vs final correctness.
+    ///
+    /// Maps to StepCodeReasoner's "right answer, wrong logic" detection:
+    /// - final_correct && consistency >= threshold → fully_faithful
+    /// - final_correct && consistency < threshold → reward_hacking
+    /// - !final_correct → not counted (no credit assignment issue)
+    ///
+    /// Returns a snapshot of the cumulative path consistency summary.
+    pub fn classify_path(&self, final_correct: bool, consistency: f32, threshold: f32) {
+        if final_correct {
+            if consistency >= threshold {
+                self.path_faithful.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.path_hacking.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.path_total.fetch_add(1, Ordering::Relaxed);
+        // Store consistency * 10000 as u64 to preserve precision
+        self.path_consistency_sum
+            .fetch_add((consistency * 10000.0) as u64, Ordering::Relaxed);
+    }
+
+    /// Snapshot of cumulative path consistency statistics (Plan 054).
+    pub fn path_consistency_summary(&self) -> PathConsistencySummary {
+        let total = self.path_total.load(Ordering::Relaxed);
+        let avg_consistency = if total > 0 {
+            let sum = self.path_consistency_sum.load(Ordering::Relaxed);
+            sum as f64 / (total as f64 * 10000.0)
+        } else {
+            0.0
+        };
+        PathConsistencySummary {
+            reward_hacking: self.path_hacking.load(Ordering::Relaxed),
+            fully_faithful: self.path_faithful.load(Ordering::Relaxed),
+            total_paths: total,
+            avg_consistency,
+        }
+    }
+
+    /// Number of paths classified as reward hacking.
+    pub fn path_hacking_count(&self) -> u64 {
+        self.path_hacking.load(Ordering::Relaxed)
+    }
+
+    /// Number of paths classified as fully faithful.
+    pub fn path_faithful_count(&self) -> u64 {
+        self.path_faithful.load(Ordering::Relaxed)
+    }
 }
 
 impl Default for ReviewMetrics {
@@ -234,6 +297,34 @@ impl fmt::Display for ReviewSummary {
             f,
             "helpful={:.1}% harmful={:.1}% ratio={}:1 n={}",
             self.helpfulness, self.harmfulness, ratio_str, self.total
+        )
+    }
+}
+
+// ── Path Consistency Summary (StepCodeReasoner Plan 054) ────────
+
+/// Classification result including path consistency (StepCodeReasoner Plan 054).
+///
+/// Detects "right answer, wrong logic" — paths where the final outcome was
+/// correct but intermediate steps were shaky, indicating reward hacking.
+#[derive(Clone, Debug, Default)]
+pub struct PathConsistencySummary {
+    /// Number of paths where final answer was correct but intermediate steps were shaky.
+    pub reward_hacking: u64,
+    /// Number of paths where both final AND intermediate steps were correct.
+    pub fully_faithful: u64,
+    /// Total paths analyzed.
+    pub total_paths: u64,
+    /// Average path consistency across all paths (0.0 to 1.0).
+    pub avg_consistency: f64,
+}
+
+impl fmt::Display for PathConsistencySummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "faithful={} hacking={} total={} avg_consistency={:.2}",
+            self.fully_faithful, self.reward_hacking, self.total_paths, self.avg_consistency
         )
     }
 }

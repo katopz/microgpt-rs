@@ -327,6 +327,7 @@ mod tests {
                     note: String::new(),
                     base_correct: None,
                     reviewed_correct: None,
+                    anchors: None,
                 })
                 .unwrap();
             }

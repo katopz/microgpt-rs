@@ -159,6 +159,7 @@ fn main() {
             note: String::new(),
             base_correct: None,
             reviewed_correct: None,
+            anchors: None,
         };
         if let Err(e) = trial_log.append(&record) {
             eprintln!("Trial log write error at episode {episode}: {e}");

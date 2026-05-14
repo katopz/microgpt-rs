@@ -72,6 +72,12 @@ pub use g_zero::{
     DeltaGatedConfig, GeneratedPair, HintDelta, LogProbResult, QueryTemplate, TemplateProposer,
 };
 
+#[cfg(feature = "stepcode")]
+pub mod stepcode;
+
+#[cfg(feature = "stepcode")]
+pub use stepcode::{PathStep, ShapedPath, path_consistency, shape_path};
+
 #[cfg(feature = "delta_mem")]
 pub mod delta_mem;
 

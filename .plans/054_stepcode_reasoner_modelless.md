@@ -10,7 +10,7 @@
 
 ### Phase 0: Benchmark Baseline (MUST DO FIRST)
 
-- [ ] **T1: Create benchmark test** — `tests/bench_stepcode_modelless.rs`
+- [x] **T1: Create benchmark test** — `tests/bench_stepcode_modelless.rs`
   - DDTree `build_screened` with `NoScreeningPruner` baseline (nodes, time)
   - DDTree with `BanditPruner<NoScreeningPruner>` + flat rewards (existing)
   - DDTree with `BanditPruner<NoScreeningPruner>` + shaped rewards (new D1)
@@ -34,7 +34,7 @@ Three key properties (preserved from paper):
 
 **Why this matters for bandit:** Currently `BanditPruner::update(arm, 1.0)` treats every correct arm identically. But an arm accepted at depth 0 that leads to 5 more accepted tokens is MORE valuable than an arm accepted at depth 0 that leads to immediate rejection at depth 1. Shaped reward captures this "enabling" signal.
 
-- [ ] **T2: Implement `ShapedPath` struct** — `src/pruners/stepcode.rs`
+- [x] **T2: Implement `ShapedPath` struct** — `src/pruners/stepcode.rs`
 
   ```rust
   //! Intra-trajectory reward shaping distilled from StepCodeReasoner (arXiv 2605.11922).
@@ -179,7 +179,7 @@ Three key properties (preserved from paper):
   }
   ```
 
-- [ ] **T3: Implement `shape_path` helper function** — `src/pruners/stepcode.rs`
+- [x] **T3: Implement `shape_path` helper function** — `src/pruners/stepcode.rs`
 
   ```rust
   /// Convenience: shape a flat `(arm, reward)` path with default λ = 0.3.
@@ -219,7 +219,7 @@ Three key properties (preserved from paper):
   }
   ```
 
-- [ ] **T4: Unit tests for ShapedPath** — `src/pruners/stepcode.rs`
+- [x] **T4: Unit tests for ShapedPath** — `src/pruners/stepcode.rs`
   - `test_shape_all_correct` — all rewards = 1.0, verify boosting cascade
   - `test_shape_all_wrong` — all rewards = 0.0, verify all shaped = 0.0
   - `test_shape_terminal_flat` — last step gets no future shaping
@@ -232,7 +232,7 @@ Three key properties (preserved from paper):
 
 ### Phase 2: AnchorTrace — Enriched TrialLog (D2)
 
-- [ ] **T5: Add `AnchorTrace` to TrialRecord** — `src/pruners/trial_log.rs`
+- [x] **T5: Add `AnchorTrace` to TrialRecord** — `src/pruners/trial_log.rs`
 
   ```rust
   /// Per-anchor verification trace for stepwise reward analysis.
@@ -266,7 +266,7 @@ Three key properties (preserved from paper):
 
   Default impl: `anchors: None` — backward-compatible.
 
-- [ ] **T6: Implement `TrialRecord::from_shaped_path`** — `src/pruners/trial_log.rs`
+- [x] **T6: Implement `TrialRecord::from_shaped_path`** — `src/pruners/trial_log.rs`
 
   ```rust
   impl TrialRecord {
@@ -326,7 +326,7 @@ Three key properties (preserved from paper):
   }
   ```
 
-- [ ] **T7: Unit tests for AnchorTrace** — `src/pruners/trial_log.rs`
+- [x] **T7: Unit tests for AnchorTrace** — `src/pruners/trial_log.rs`
   - `test_anchor_trace_serialization` — roundtrip through JSONL
   - `test_trial_record_from_shaped_path` — verify fields populated correctly
   - `test_backward_compat_none_anchors` — existing logs without anchors load fine
@@ -334,7 +334,7 @@ Three key properties (preserved from paper):
 
 ### Phase 3: PathConsistency — Reward Hacking Detection (D3)
 
-- [ ] **T8: Add `path_consistency` to ReviewMetrics classification** — `src/pruners/review_metrics.rs`
+- [x] **T8: Add `path_consistency` to ReviewMetrics classification** — `src/pruners/review_metrics.rs`
 
   Add a new classification category:
 
@@ -373,7 +373,7 @@ Three key properties (preserved from paper):
 
   **Minimal implementation:** Add `path_hacking_count: AtomicU64` and `path_faithful_count: AtomicU64` to `ReviewMetrics`. Gate `AbsorbCompress` when reward hacking ratio exceeds threshold.
 
-- [ ] **T9: Unit tests for path consistency** — `src/pruners/review_metrics.rs`
+- [x] **T9: Unit tests for path consistency** — `src/pruners/review_metrics.rs`
   - `test_path_consistency_faithful` — high consistency → faithful
   - `test_path_consistency_hacking` — low consistency + correct final → hacking
   - `test_path_consistency_wrong_final` — wrong final → not counted
@@ -381,13 +381,13 @@ Three key properties (preserved from paper):
 
 ### Phase 4: Integration & Benchmark
 
-- [ ] **T10: Integration example** — `examples/stepcode_01_shaped_bandit.rs`
+- [x] **T10: Integration example** — `examples/stepcode_01_shaped_bandit.rs`
   - Build DDTree with `BanditPruner<NoScreeningPruner>` + shaped rewards
   - Compare flat vs shaped reward convergence over 100 episodes
   - Print consistency metrics
   - Run: `cargo run --example stepcode_01_shaped_bandit --features "bandit"`
 
-- [ ] **T11: Final benchmark comparison** — `tests/bench_stepcode_modelless.rs`
+- [x] **T11: Final benchmark comparison** — `tests/bench_stepcode_modelless.rs`
 
   | Config | Metric | Target |
   |--------|--------|--------|
@@ -399,7 +399,7 @@ Three key properties (preserved from paper):
 
   **Honest expectation:** Shaped rewards should NOT increase DDTree nodes or latency (it's a post-hoc computation on the accepted path, not in the hot path). The benefit is in **bandit convergence quality** — arms that enable downstream success get higher Q-values faster.
 
-- [ ] **T12: Feature gate** — `Cargo.toml`
+- [x] **T12: Feature gate** — `Cargo.toml`
 
   ```toml
   [features]
@@ -416,7 +416,7 @@ Three key properties (preserved from paper):
           "gpu", "delta_mem", "g_zero", "stepcode"]
   ```
 
-- [ ] **T13: Module registration** — `src/pruners/mod.rs`
+- [x] **T13: Module registration** — `src/pruners/mod.rs`
 
   ```rust
   #[cfg(feature = "stepcode")]
@@ -426,7 +426,7 @@ Three key properties (preserved from paper):
   pub use stepcode::{PathStep, ShapedPath, shape_path, path_consistency};
   ```
 
-- [ ] **T14: README update** — Add to `## 🧠 Heuristic Learning Infrastructure` section
+- [x] **T14: README update** — Add to `## 🧠 Heuristic Learning Infrastructure` section
 
   Add subsection:
   ```markdown
@@ -443,7 +443,7 @@ Three key properties (preserved from paper):
   Run: `cargo test --features "stepcode" --test bench_stepcode_modelless -- --nocapture`
   ```
 
-- [ ] **T15: Commit to feature branch**
+- [x] **T15: Commit to feature branch**
 
   ```sh
   git checkout develop

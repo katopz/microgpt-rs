@@ -231,6 +231,17 @@ Based on arXiv:2604.27233 — tracks whether reviewer intervention is net-positi
 
 Run: `cargo run --example review_01_metrics --features bandit`
 
+### Stepwise Reward Shaping (Plan 054)
+
+Distilled from [StepCodeReasoner](https://arxiv.org/pdf/2605.11922) (ICML 2026) — intra-trajectory shaping rewards bandit arms proportionally to how many downstream arms they enable. After DDTree verification, correct arms that lead to more correct future arms get boosted credit.
+
+| λ | Behavior |
+|---|----------|
+| 0.0 | Flat binary rewards (default, backward-compatible) |
+| 0.3 | Shaped rewards (paper default, arms enabling success get boosted) |
+
+Run: `cargo test --features "stepcode" --test bench_stepcode_modelless -- --nocapture`
+
 ## 🎮 Bomberman HL Arena — ✅ HL Thesis Proven
 
 4-player Bomberman arena with `bevy_ecs` standalone. **Result: HL (+177) > Greedy (+131) > Validator (-30) > Random (-55)**.

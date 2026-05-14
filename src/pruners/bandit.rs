@@ -808,6 +808,7 @@ impl<E: BanditEnv> BanditSession<E> {
                 note: String::new(),
                 base_correct: None,
                 reviewed_correct: None,
+                anchors: None,
             };
             if let Err(e) = trial_log.append(&record) {
                 eprintln!("trial_log write error at episode {episode}: {e}");

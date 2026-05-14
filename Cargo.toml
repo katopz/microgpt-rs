@@ -33,6 +33,7 @@ bandit = []  # Multi-armed bandit adaptive ScreeningPruner (Plan 030)
 delta_mem = ["bandit"]  # δ-Mem modelless distillation — associative bandit memory (Plan 053)
 g_zero = ["bandit"]  # G-Zero self-play distillation — Hint-δ gated absorb + bandit (Plan 049)
 fft = ["bandit"]     # FFT Tactics Arena — ATB battle engine with status effects (Plan 053)
+stepcode = ["bandit"]  # StepCodeReasoner modelless distillation — shaped bandit rewards + anchor tracing (Plan 054)
 bomber = ["bevy_ecs", "bandit"]  # Bomberman HL Arena (Plan 033)
 bomber-wasm = ["bomber", "wasmtime", "papaya"]  # WASM bomber validator loader (Plan 034) + batch pool (Plan 037)
 monopoly = ["bevy_ecs", "bandit"]  # Monopoly Board Game Engine (Plan 034)
@@ -43,7 +44,7 @@ game_domain = ["domain_latent"]  # Alias for domain_latent — game-specific Con
 language_domain = []  # Language domain: BPE vocab, LLM models (Plan 040, future)
 gpu = []  # Placeholder — GPU training lives in riir-ai/riir-gpu
 # LeviathanVerifier is always compiled (no gate needed) — verifier.rs, benchmark.rs
-full = ["sudoku", "validator", "ppot", "domain_latent", "bandit", "delta_mem", "g_zero", "fft", "bomber", "bomber-wasm", "monopoly", "feedback", "rest", "embedding_router", "gpu", "game_domain", "language_domain"]
+full = ["sudoku", "validator", "ppot", "domain_latent", "bandit", "delta_mem", "g_zero", "fft", "bomber", "bomber-wasm", "monopoly", "feedback", "rest", "embedding_router", "gpu", "game_domain", "language_domain", "stepcode"]
 
 # ── Bandit (RL / Game Theory) ─────────────────────────────────
 
@@ -90,6 +91,12 @@ required-features = ["bandit"]
 [[example]]
 name = "review_01_metrics"
 required-features = ["bandit"]
+
+# ── Stepwise Reward Shaping (StepCodeReasoner Plan 054) ──────
+
+[[example]]
+name = "stepcode_01_shaped_bandit"
+required-features = ["stepcode"]
 
 # ── Bomberman HL Arena ────────────────────────────────────────
 

@@ -23,6 +23,26 @@ use serde::{Deserialize, Serialize};
 
 use super::review_metrics::{ReviewMetrics, ReviewSummary};
 
+// ── AnchorTrace (StepCodeReasoner Plan 054) ─────────────────────
+
+/// Per-anchor verification trace for stepwise reward analysis.
+///
+/// Distilled from StepCodeReasoner's execution-trace anchors.
+/// Each entry records what happened at one DDTree depth (one "anchor").
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct AnchorTrace {
+    /// Depth in DDTree (anchor position).
+    pub depth: usize,
+    /// Arm (token) selected at this depth.
+    pub arm: usize,
+    /// Flat binary reward (0.0 or 1.0).
+    pub reward: f32,
+    /// Shaped reward (reward × (1 + λ × future_accuracy)).
+    pub shaped_reward: f32,
+    /// Fraction of subsequent arms that were correct.
+    pub future_accuracy: f32,
+}
+
 // ── Record ──────────────────────────────────────────────────────
 
 /// A single episode record for persistent trial history.
@@ -51,6 +71,9 @@ pub struct TrialRecord {
     pub base_correct: Option<bool>,
     /// Whether the reviewed decision was correct (Plan 036).
     pub reviewed_correct: Option<bool>,
+    /// Per-anchor verification trace (StepCodeReasoner Plan 054).
+    /// `None` for backward compatibility with existing logs.
+    pub anchors: Option<Vec<AnchorTrace>>,
 }
 
 // ── Summary ─────────────────────────────────────────────────────
@@ -257,6 +280,7 @@ mod tests {
             note: format!("ep{episode}"),
             base_correct: None,
             reviewed_correct: None,
+            anchors: None,
         }
     }
 
@@ -333,5 +357,90 @@ mod tests {
         assert_eq!(log.count(), 2);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ── AnchorTrace Tests (Plan 054, T7) ─────────────────────────
+
+    #[test]
+    fn test_anchor_trace_serialization() {
+        let trace = AnchorTrace {
+            depth: 2,
+            arm: 5,
+            reward: 1.0,
+            shaped_reward: 1.15,
+            future_accuracy: 0.5,
+        };
+
+        // Roundtrip through JSON
+        let json = serde_json::to_string(&trace).unwrap();
+        let deserialized: AnchorTrace = serde_json::from_str(&json).unwrap();
+        assert_eq!(trace, deserialized);
+    }
+
+    #[test]
+    fn test_trial_record_with_anchors() {
+        let anchors = vec![
+            AnchorTrace {
+                depth: 0,
+                arm: 3,
+                reward: 1.0,
+                shaped_reward: 1.15,
+                future_accuracy: 0.5,
+            },
+            AnchorTrace {
+                depth: 1,
+                arm: 7,
+                reward: 0.0,
+                shaped_reward: 0.0,
+                future_accuracy: 0.0,
+            },
+        ];
+
+        let record = TrialRecord {
+            episode: 42,
+            arm: 7,
+            reward: 0.0,
+            q_value: 0.5,
+            cumulative_reward: 10.0,
+            cumulative_regret: 5.0,
+            config: "stepcode".into(),
+            note: "test".into(),
+            base_correct: None,
+            reviewed_correct: None,
+            anchors: Some(anchors),
+        };
+
+        // Roundtrip through JSONL
+        let path = temp_path("anchors");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut log = TrialLog::new(&path).unwrap();
+            log.append(&record).unwrap();
+            log.flush().unwrap();
+        }
+
+        let loaded = TrialLog::load(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].episode, 42);
+        assert!(loaded[0].anchors.is_some());
+        let loaded_anchors = loaded[0].anchors.as_ref().unwrap();
+        assert_eq!(loaded_anchors.len(), 2);
+        assert_eq!(loaded_anchors[0].depth, 0);
+        assert_eq!(loaded_anchors[0].shaped_reward, 1.15);
+        assert_eq!(loaded_anchors[1].reward, 0.0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_backward_compat_none_anchors() {
+        // A JSON record without "anchors" field should load with anchors=None
+        let json_line = r#"{"episode":0,"arm":1,"reward":0.5,"q_value":0.5,"cumulative_reward":0.0,"cumulative_regret":0.5,"config":"old","note":"","base_correct":null,"reviewed_correct":null}"#;
+
+        let record: TrialRecord = serde_json::from_str(json_line).unwrap();
+        assert_eq!(record.episode, 0);
+        assert_eq!(record.arm, 1);
+        assert!(record.anchors.is_none());
     }
 }
