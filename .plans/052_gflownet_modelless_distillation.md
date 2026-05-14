@@ -39,13 +39,13 @@ Measured via existing benchmarks. To be filled during Task 1:
 
 ### Phase 1: FlowPruner — Stop-Probability Regularization (D1)
 
-The GFlowNet adds `λ / P_F(s_f | s, θ)` as flow regularization. In our model, `P_F(s_f | s)` is the LoRA model's probability of the EOS token at depth d. Low EOS prob = model thinks solution needs more tokens = high flow = boost exploration.
+The GFlowNet flow regularization is `λ * exp(logsumexp(-log_pf_stop))` (verified: `train.py` L215, L243). In our model, `P_F(s_f | s)` is the LoRA model's probability of the EOS token at depth d. The flow `F(s) = 1/P_stop(s)` — high when the model thinks the solution continues. Low P_stop = high flow = model expects more tokens = boost exploration there.
 
 - [ ] **T2: Implement `FlowPruner<P: ScreeningPruner>`** — `src/speculative/flow_pruner.rs`
   ```rust
   pub struct FlowPruner<P: ScreeningPruner> {
       inner: P,
-      lambda: f32,           // flow regularization strength
+      lambda: f32,           // flow regularization strength (paper: reg_coef)
       stop_probs: Vec<f32>,  // per-depth EOS probability from marginals
   }
   
@@ -54,36 +54,47 @@ The GFlowNet adds `λ / P_F(s_f | s, θ)` as flow regularization. In our model, 
           let inner = self.inner.relevance(depth, token_idx, parent_tokens);
           if inner <= 0.0 { return 0.0; }
           
-          // Flow bonus: boost relevance where model thinks solution continues
+          // Flow bonus: F(s) = 1/P_stop(s)
           // High stop_prob = model wants to stop = low flow = no bonus needed
           // Low stop_prob = model wants to continue = high flow = boost exploration
+          // Paper: reg_coef * exp(logsumexp(-log_pf_stop)) over batch
+          // Simplified per-depth: lambda * (1.0 - stop_prob) as multiplicative bonus
           let flow_bonus = 1.0 + self.lambda * (1.0 - self.stop_prob(depth));
           (inner * flow_bonus).clamp(0.0, 1.0)
       }
   }
   ```
   - `stop_probs` populated from marginals before DDTree build
-  - Default `lambda = 0.3` (tunable, paper uses 10^-3 to 10^-2 for λ but that's loss-scale)
+    - Extract from `marginals[depth][eos_token_idx]` — the EOS token log-prob
+    - If no EOS token in vocab, use `entropy(marginals[depth])` as proxy (high entropy = model unsure = should continue)
+  - Default `lambda = 0.3` (paper reg_coef ranges 5e-7 to 0.01 depending on task scale)
 
 - [ ] **T3: Benchmark FlowPruner** — Add to `tests/bench_gflownet_modelless.rs`
   - DDTree with `FlowPruner<NoScreeningPruner>` vs `NoScreeningPruner` alone
   - Measure: tree nodes used, solution quality (path length), time
   - **Gate: FlowPruner must use ≤10% more nodes AND produce equal or shorter paths OR revert T2**
 
-### Phase 2: Balanced DDTree — Harmonize Forward + Backward (D2)
+### Phase 2: Backward-Weighted DDTree — Score with P_B Dominance (D2)
 
-The paper proves P_F and P_B should agree. Currently DDTree blends `ln(P_llm) + ln(R)` where R comes from ScreeningPruner. But R is typically binary (0 or 1). The GFlowNet insight: use R as a continuous signal that represents "how likely is this token on a shortest path to a valid solution?"
+**Critical finding from source code:** The paper's `single_state_beam_search` (train.py L289-345) scores beams using ONLY backward logits (`log_pbs`), NOT forward. Forward policy is used exclusively during training (scrambling from goal state). At test time, backward policy IS the solver.
+
+Currently DDTree `build_screened` blends `ln(P_llm) + ln(R)` where R from ScreeningPruner is often binary (0 or 1). The paper's insight: backward scores should dominate beam selection. We add a `backward_weight` parameter to control the blend ratio.
 
 - [ ] **T4: Add `build_balanced` method to `TreeBuilder`** — `src/speculative/dd_tree.rs`
-  - New method: `build_balanced(marginals, config, screener, stop_probs, lambda, chain_seed)`
-  - Score formula changes from `ln(P_llm) + ln(R)` to `ln(P_llm) + lambda × ln(R) + flow_bonus`
+  - New method: `build_balanced(marginals, config, screener, stop_probs, backward_weight, chain_seed)`
+  - Score formula: `ln(P_llm) + backward_weight × ln(R_backward) + flow_bonus`
   - Where `flow_bonus = lambda_flow × (1.0 - stop_probs[depth])`
-  - This is a **generalization** of `build_screened` — when `lambda=1.0` and `lambda_flow=0.0`, it's identical
+  - `backward_weight` defaults to `2.0` — backward relevance (WASM validator) counts 2× more than forward marginal
+    - Paper uses pure backward (effectively `backward_weight = ∞`) for beam search
+    - We blend because our WASM `relevance()` is coarser than a trained neural P_B
+    - Start at 2.0, benchmark at 1.0/2.0/4.0 in T5
+  - This is a **generalization** of `build_screened` — when `backward_weight=1.0` and `lambda_flow=0.0`, it's identical
   - Keep `build_screened` unchanged for backward compat
 
 - [ ] **T5: Benchmark balanced DDTree** — Add to `tests/bench_gflownet_modelless.rs`
-  - `build_balanced` with various lambda values (0.5, 1.0, 1.5) vs `build_screened`
-  - Measure: tree nodes, solution length, time
+  - `build_balanced` with backward_weight sweep (1.0, 2.0, 4.0) vs `build_screened`
+  - Also test with flow_bonus enabled/disabled to isolate each contribution
+  - Measure: tree nodes, solution length, time per build
   - **Gate: balanced must produce ≤5% shorter paths with ≤10% more nodes OR revert T4**
 
 ### Phase 3: Flow-Weighted Bandit Reward (D3)
@@ -158,6 +169,7 @@ All new code behind `#[cfg(feature = "bandit")]` (reuses existing gate — FlowP
 3. **FlowPruner is a wrapper** — Wraps any ScreeningPruner, adds flow bonus. Zero-alloc: just a multiplication.
 4. **Flow bonus from stop-probs** — Uses LoRA model's EOS token probability, which is already computed in marginals. No new forward pass needed.
 5. **Backward replay is offline** — ReplayBackwardWalker processes JSONL files, doesn't run during game ticks. Zero runtime overhead.
+6. **Backward-weight is tunable** — Paper uses pure backward for beam search (trained P_B). Our WASM `relevance()` is coarser, so we blend with forward marginals. The `backward_weight` parameter lets us dial from pure-forward (1.0) to near-pure-backward (4.0+), benchmarked to find the sweet spot.
 
 ## Risk Assessment
 

@@ -34,6 +34,83 @@ The paper proves that minimizing expected trajectory length E[nτ] in a non-acyc
 
 ---
 
+## Source Code Verification (`.raw/gfn-pathfinding/`)
+
+Verified against actual implementation in `train.py` + `eval.py`:
+
+### Architecture: Single Backbone, Split Heads
+
+The `ResMLPPolicy` has ONE shared backbone (6 residual blocks with LayerNorm) and ONE output linear layer that splits into `backward_logits` and `forward_logits`. Confirmed: **single forward pass outputs ALL neighbor logits for both directions**. This is the efficiency source — not a separate model per direction.
+
+```python
+# train.py L155-156
+result = self.outp(x6 + x0)
+backward_logits, forward_logits = jnp.split(result, [self.n_bwd_actions], axis=-1)
+```
+
+### Beam Search Uses ONLY Backward Logits
+
+`single_state_beam_search` scores beams using `log_pbs` (backward logits), NOT forward logits. Forward policy is only used during training (scrambling from goal state). At test time, the backward policy IS the solver.
+
+```python
+# train.py L306-307
+logits = jax.vmap(model)(state)
+log_pbs, _, _ = process_logits(state, logits, bwd_action_perms, fwd_action_perms, params)
+# Only log_pbs used for beam scoring — forward logits ignored at test time
+```
+
+### TB Loss: Prefix-Level Cumulative Balance
+
+The trajectory balance loss computes `cumsum` of forward and backward log-probs, then computes loss on ALL prefixes simultaneously. This is NOT just end-of-trajectory balance — every prefix contributes to the gradient.
+
+```python
+# train.py L235-241
+log_forward_prefix = jnp.cumulative_sum(log_forward_policy, axis=0, include_initial=True)
+log_backward_prefix = jnp.cumulative_sum(log_backward_policy, axis=0, include_initial=True)
+step_losses = (params['true_log_z'] + log_forward_prefix - log_backward_prefix - log_flows) ** 2
+tb_loss = step_losses.mean()
+```
+
+### Flow Regularization: Exact Formula
+
+The actual flow regularization is `reg_coef * exp(logsumexp(-log_pf_stop))` where `log_pf_stop = log_pfs[:, -1]` is the stop-action log-probability. In math: `λ * Σ_s 1/P_F(s_f|s)`. This is computed over all states in the batch trajectory.
+
+```python
+# train.py L215, L243
+log_flows = -log_pfs[:, -1]  # flow = 1/P_stop for each state
+reg_loss = params['reg_coef'] * jnp.exp(jax.nn.logsumexp(log_flows[1:, :], axis=0)).mean()
+```
+
+### Training Starts FROM Goal State
+
+The forward policy samples trajectories starting from the SOLVED state (goal), then "scrambles" by applying random actions. The backward policy starts from scrambled states and works back to goal. This is the reversed-edge construction from the paper's Section 3.2.
+
+```python
+# train.py L261
+init_state = jnp.stack([goal_state(params) for i in range(params['batch_size'])])
+```
+
+### Cycle Prevention via Forward Masking
+
+The forward policy masks actions that would undo the previous backward action (preventing trivial cycles). This is `mask_forward_logits` which checks if `state == bwd_action_perms // div`.
+
+### Known Log Z (Normalizing Constant)
+
+For uniform reward R(s)=1, the normalizing constant is `log(|V|)` (number of graph vertices). This is known analytically and passed as `true_log_z` — not learned.
+
+### Hyperparameters from README
+
+| Task | hidden_size | reg_coef | batch_size | trajlen | beam_k |
+|------|------------|----------|------------|---------|--------|
+| Swap n=15 | 1024 | 0.001 | 128 | 35 | 4 |
+| Swap n=20 | 1024 | 0.0001 | 128 | 60 | 4 |
+| Rubik 2×2×2 | 1024 | 0.01 | 128 | 12 | 256 |
+| Rubik 3×3×3 | 2048 | 5e-7 | 2048 | 24 | 512 |
+
+**Key finding for our plan:** The `trajlen` (N_max) is much smaller than the longest possible path. For Rubik 2×2×2, `trajlen=12` but God's number is 14. The model generalizes from shorter training trajectories to longer test solutions.
+
+---
+
 ## Mapping to Our Stack
 
 ```
@@ -53,8 +130,8 @@ Beam search W                 ←→     DDTree tree_budget + draft_lookahead (a
 **D1: FlowPruner** — Stop-probability regularization as ScreeningPruner wrapper.
 Paper adds `λ / P_F(s_f | s, θ)` to the loss. We compute `1.0 - stop_prob[depth]` from LoRA marginals and blend into relevance.
 
-**D2: Balanced DDTree** — Harmonize forward marginals with backward relevance.
-Paper proves P_F and P_B should agree on trajectory distribution. Currently DDTree uses only forward marginals, relevance is binary filter. New: `score = ln(P_llm) + λ × ln(R_backward)`.
+**D2: Balanced DDTree** — Score beams using backward logits (like paper's beam search).
+Paper's `single_state_beam_search` scores beams using ONLY backward logits (P_B), not forward. Our DDTree `build_screened` blends `ln(P_llm) + ln(R)` where R is ScreeningPruner relevance. The paper's insight: backward scores should dominate beam selection, forward is only for training. New method: `build_balanced` where backward relevance weight `λ_bw` controls the blend ratio, defaulting to favoring backward signal.
 
 **D3: Flow-weighted bandit reward** — Trajectory length bonus via `observe_delta_with_flow`.
 Paper minimizes trajectory length via flow regularization. We add `λ_length / prefix_len` to δ reward.
