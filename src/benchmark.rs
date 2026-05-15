@@ -58,16 +58,18 @@ pub fn save_results_csv(results: &[BenchResult], path: &str) -> std::io::Result<
 
     let mut file = std::fs::File::create(path)?;
 
+    let features = active_features();
+
     writeln!(
         file,
-        "commit,date,method,throughput,us_per_step,avg_accept_len"
+        "commit,date,features,method,throughput,us_per_step,avg_accept_len"
     )?;
 
     for r in results {
         writeln!(
             file,
-            "{},{},{},{:.0},{:.2},{:.2}",
-            commit, date, r.label, r.throughput, r.time_per_step_us, r.avg_acceptance_len,
+            "{},{},{},{},{:.0},{:.2},{:.2}",
+            commit, date, features, r.label, r.throughput, r.time_per_step_us, r.avg_acceptance_len,
         )?;
     }
 
@@ -85,6 +87,7 @@ pub fn append_timeseries_csv(results: &[BenchResult], path: &str) -> std::io::Re
         .unwrap_or_else(|| "unknown".into());
 
     let date = chrono_like_now();
+    let features = active_features();
 
     let file_exists = std::path::Path::new(path).exists();
 
@@ -97,7 +100,7 @@ pub fn append_timeseries_csv(results: &[BenchResult], path: &str) -> std::io::Re
     if !file_exists {
         writeln!(
             file,
-            "run_date,commit,category,method,throughput,us_per_step,avg_accept_len"
+            "run_date,commit,features,category,method,throughput,us_per_step,avg_accept_len"
         )?;
     }
 
@@ -110,8 +113,15 @@ pub fn append_timeseries_csv(results: &[BenchResult], path: &str) -> std::io::Re
         };
         writeln!(
             file,
-            "{},{},{},{},{:.0},{:.2},{:.2}",
-            date, commit, cat, r.label, r.throughput, r.time_per_step_us, r.avg_acceptance_len,
+            "{},{},{},{},{},{:.0},{:.2},{:.2}",
+            date,
+            commit,
+            features,
+            cat,
+            r.label,
+            r.throughput,
+            r.time_per_step_us,
+            r.avg_acceptance_len,
         )?;
     }
 
@@ -128,7 +138,55 @@ fn chrono_like_now() -> String {
     output.unwrap_or_else(|| "unknown".into())
 }
 
+/// Collect active feature flags that affect forward-path performance.
+/// Appended to CSV for regression tracking across feature-gate changes.
+fn active_features() -> String {
+    let mut flags = Vec::new();
+    if cfg!(feature = "sparse_mlp") {
+        flags.push("sparse_mlp");
+    }
+    if cfg!(feature = "domain_latent") {
+        flags.push("domain_latent");
+    }
+    if cfg!(feature = "ppot") {
+        flags.push("ppot");
+    }
+    if cfg!(feature = "bandit") {
+        flags.push("bandit");
+    }
+    if cfg!(feature = "g_zero") {
+        flags.push("g_zero");
+    }
+    if cfg!(feature = "delta_mem") {
+        flags.push("delta_mem");
+    }
+    if cfg!(feature = "fft") {
+        flags.push("fft");
+    }
+    if cfg!(feature = "stepcode") {
+        flags.push("stepcode");
+    }
+    if cfg!(feature = "bomber") {
+        flags.push("bomber");
+    }
+    if flags.is_empty() {
+        flags.push("(none)");
+    }
+    flags.join("+")
+}
+
+/// Cooldown pause between benchmark groups to reduce thermal throttling noise.
+fn cooldown(secs: u64) {
+    if secs > 0 {
+        println!("   ❄️  Cooling down {secs}s...");
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+    }
+}
+
 /// Run all benchmarks and return results.
+///
+/// Order: infrastructure first (cool CPU) → speculative → tree → heuristic.
+/// Inter-group cooldowns (3s) reduce thermal throttling noise on sustained runs.
 pub fn run_all(config: &Config) -> Vec<BenchResult> {
     let mut rng = Rng::new(42);
     let weights = TransformerWeights::new(config, &mut rng);
@@ -149,7 +207,19 @@ pub fn run_all(config: &Config) -> Vec<BenchResult> {
         "   Draft  model: embd={}, heads={}, mlp={}",
         draft_config.n_embd, draft_config.n_head, draft_config.mlp_hidden
     );
+    println!("   Features: {}", active_features());
 
+    // ── Phase 1: Infrastructure (cool CPU — lowest thermal noise) ──
+    let (flat_br, paged_br) = bench_paged_vs_flat_cache(config);
+    let (_, raven_br) = bench_raven_vs_flat_cache(config);
+    let recall_br = bench_raven_recall(config);
+    let (tq_alloc_br, tq_zero_br) = bench_turboquant_store_dequant(config);
+    let pflash_br = bench_pflash_block_select();
+    let (nocompress_br, compress_br) =
+        bench_prefill_compression(&draft_weights, &draft_config, warmup, iters);
+    cooldown(3);
+
+    // ── Phase 2: Core + Speculative (warmer CPU — acceptable for pipelines) ──
     let ar = bench_ar(&weights, config, warmup, iters);
     let dflash = bench_dflash(&draft_weights, &draft_config, warmup, iters);
     let ddtree = bench_ddtree(&draft_weights, &draft_config, warmup, iters);
@@ -158,7 +228,9 @@ pub fn run_all(config: &Config) -> Vec<BenchResult> {
 
     #[allow(unused_mut)]
     let mut results = vec![ar, dflash, ddtree, spec, spec_ar];
+    cooldown(3);
 
+    // ── Phase 3: Leviathan variants ──
     {
         let leviathan = bench_leviathan(
             &draft_weights,
@@ -170,7 +242,6 @@ pub fn run_all(config: &Config) -> Vec<BenchResult> {
         );
         results.push(leviathan);
 
-        // Snapshot/rollback overhead
         let (no_rollback, with_rollback) = bench_snapshot_rollback(
             &draft_weights,
             &draft_config,
@@ -182,7 +253,6 @@ pub fn run_all(config: &Config) -> Vec<BenchResult> {
         results.push(no_rollback);
         results.push(with_rollback);
 
-        // Conditioned vs unconditioned draft
         let (uncond_br, cond_br) = bench_conditioned_vs_unconditioned(
             &draft_weights,
             &draft_config,
@@ -194,51 +264,36 @@ pub fn run_all(config: &Config) -> Vec<BenchResult> {
         results.push(uncond_br);
         results.push(cond_br);
     }
+    cooldown(3);
 
-    // Prefill compression comparison
-    let (nocompress_br, compress_br) =
-        bench_prefill_compression(&draft_weights, &draft_config, warmup, iters);
+    // ── Phase 4: Tree variants (hot CPU — acceptable for tree ops) ──
     results.push(nocompress_br);
     results.push(compress_br);
 
-    // Chain-seed comparison
     let (no_chain, chain) = bench_ddtree_chain_seed(&draft_weights, &draft_config, warmup, iters);
     results.push(no_chain);
     results.push(chain);
 
-    // Screening Pruner regression check (Plan 021)
     let (screened_noop, screened_adapter) =
         bench_ddtree_screened(&draft_weights, &draft_config, warmup, iters);
     results.push(screened_noop);
     results.push(screened_adapter);
+    cooldown(3);
 
-    // Paged vs flat cache comparison
-    let (flat_br, paged_br) = bench_paged_vs_flat_cache(config);
+    // ── Phase 5: Infrastructure results (already measured on cool CPU) ──
     results.push(flat_br);
     results.push(paged_br);
-
-    // Raven RSM cache (draft model) — flat already measured above
-    let (_, raven_br) = bench_raven_vs_flat_cache(config);
     results.push(raven_br);
-
-    // Raven recall accuracy after noise
-    let recall_br = bench_raven_recall(config);
     results.push(recall_br);
-
-    // TQ-3bit store+dequant: allocating vs zero-alloc (Plan 043, Plan 051)
-    let (tq_alloc_br, tq_zero_br) = bench_turboquant_store_dequant(config);
     results.push(tq_alloc_br);
     results.push(tq_zero_br);
-
-    // PFlash block_select (Plan 044)
-    let pflash_br = bench_pflash_block_select();
     results.push(pflash_br);
+    cooldown(3);
 
-    // G-Zero heuristic learning benchmarks (Plan 049)
+    // ── Phase 6: Heuristic learning (feature-gated, parallel-heavy) ──
     #[cfg(feature = "g_zero")]
     results.extend(bench_g_zero());
 
-    // FFT G-Zero pruner benchmarks (Plan 053)
     #[cfg(all(feature = "g_zero", feature = "fft"))]
     results.extend(bench_fft_g_zero());
 

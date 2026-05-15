@@ -152,6 +152,10 @@ Sparse W2:  output[r] = Σ_{c ∈ alive} W[r,c] × hidden[c]        → only ali
 
 The Trinity: **Raven** (O(1) memory) + **Screening** (O(1) judgment) + **Sparse MLP** (O(alive) FLOPs).
 
+> ⚠️ **Throughput trade-off (bench 063→064 A/B):** Enabling `sparse_mlp` + `domain_latent` costs ~20% on `forward (flat)` and `forward_paged` (1,164K → 926K ops/s). The sparse path adds index-tracking overhead; `domain_latent` adds a mid-layer branch + extra function parameter. DDTree, Raven, TQ, and PFlash are unaffected. For max raw throughput, bench with `--no-default-features --features "bandit,g_zero"`.
+>
+> **Regression visibility:** Bench CSV and timeseries charts now include a `features` column (e.g. `sparse_mlp+domain_latent+ppot+bandit` vs `bandit+g_zero`) so feature-gate throughput differences are traceable across runs. Infrastructure benches run first (cool CPU) with 3s inter-group cooldowns to reduce thermal noise.
+
 ## 🔬 Percepta: O(log N) 2D Convex Hull Attention
 
 When keys form a convex hull, finding the maximum attention score becomes ternary search → **O(log N)**.
@@ -594,7 +598,11 @@ cargo clippy --all-targets --all-features --quiet
 | `language_domain` | Language domain: BPE vocab, LLM models (Plan 040, future) |
 | `delta_mem` | δ-Mem associative bandit memory — infrastructure only, no DDTree gain (Plan 053, off by default) |
 | `g_zero` | G-Zero self-play + FFT arena + Bomber arena + TFT party AI (Plans 049–055) |
-| `full` | Enable all features |
+| `fft` | FFT Tactics Arena — ATB battle engine with status effects (Plan 053) |
+| `stepcode` | ⚠️ Plan 054 — NO GAIN proven. Infrastructure only. Off by default, not in `full` |
+| `full` | Enable all features (excludes `stepcode`) |
+
+> **Default features trade-off:** `default = ["sparse_mlp", "domain_latent", "ppot", "bandit"]` targets production accuracy + sparsity. For benchmark comparisons, use `--no-default-features --features "bandit,g_zero"` to isolate the forward pass (see ⚡ Sparse MLP section for measured impact). Active features are logged in `bench/*_results.csv` and `bench/timeseries.csv` for regression tracking across feature-gate changes.
 
 > **Note:** `LeviathanVerifier` is always compiled (no feature gate) — it's part of `verifier.rs` and `benchmark.rs`. `Transformer AR`, `DFlash`, `Raven`, `TurboQuant`, and `PFlash` are also always available — they're zero-cost until their caches are instantiated.
 

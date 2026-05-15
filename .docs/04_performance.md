@@ -232,6 +232,41 @@ Store+dequantize has ~200× compute overhead vs flat f32 copy. Net win at long c
 ### Combined with TurboQuant
 TQ 3-bit + PF α=0.15 = 14.9% resources (6.7× total reduction).
 
+## Feature-Gate Throughput Impact (bench 063→064 A/B, Plan 054)
+
+Default features changed in Plan 051 from `["bandit", "g_zero"]` to `["sparse_mlp", "domain_latent", "ppot", "bandit"]`. Measured on same cool CPU, back-to-back:
+
+### A/B Results
+
+| Method | `bandit,g_zero` | `sparse_mlp,domain_latent,ppot,bandit` | Delta |
+|--------|-----------------|----------------------------------------|-------|
+| forward (flat) | 1,164,412 | 926,060 | **-20.5%** |
+| forward_paged | 1,035,403 | 793,110 | **-23.4%** |
+| Transformer AR | 1,170,941 | 924,803 | **-21.0%** |
+| Leviathan (Alg 1) | 112,677 | 90,934 | **-19.3%** |
+| DDTree Build | 362,635 | 363,978 | +0.4% |
+| DDTree (chain-seed) | 378,874 | 384,435 | +1.5% |
+| forward_raven | 1,649,131 | 1,594,088 | -3.3% |
+| TQ-3bit (alloc) | 1,858,844 | 1,826,570 | -1.7% |
+
+### Root Cause
+
+1. **`sparse_mlp`** — `sparse_matmul` adds index-tracking overhead (`active_indices`, `active_values` buffers + alive-count branch) vs plain `matmul`. At micro scale (mlp=64), the extra branching costs more than skipping zero elements saves.
+2. **`domain_latent`** — adds an extra `Option<&DomainLatent>` parameter to `forward_base()` + mid-layer `if layer_idx == n_layer / 2` branch. Changes function signature → different inlining/register allocation.
+3. **DDTree, Raven, TQ, PFlash unaffected** — they use different code paths or the overhead is amortized.
+
+### Verdict
+
+Not a regression from Plan 054 stepcode (feature is off-by-default, not compiled). This is a **Plan 051 default-features decision**: trade ~20% raw forward throughput for sparsity + domain conditioning capability.
+
+For benchmark comparisons: `cargo run --release --no-default-features --features "bandit,g_zero"`.
+
+### Regression Visibility
+
+- **`features` column** in `bench/*_results.csv` and `bench/timeseries.csv` — active feature flags (e.g. `sparse_mlp+domain_latent+ppot+bandit` vs `bandit+g_zero`) make feature-gate throughput diffs traceable across runs.
+- **Timeseries chart titles** include the latest run's features (e.g. `Infrastructure Primitives — Time Series [sparse_mlp+domain_latent+ppot+bandit]`).
+- **Run order:** Infrastructure benches run first (cool CPU) → speculative → tree → heuristic. 3s inter-group cooldowns reduce thermal throttling noise. The `forward (flat)` regression is clearly visible as a step-down in `bench/timeseries_infrastructure.png` when features change from `bandit+g_zero` to `sparse_mlp+domain_latent+ppot+bandit`.
+
 ## What We Don't Do (and why)
 
 | Technique | Reason |

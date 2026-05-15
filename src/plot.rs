@@ -111,6 +111,7 @@ pub fn plot_results(
 struct TsRow {
     run_date: String,
     commit: String,
+    features: String,
     category: String,
     method: String,
     throughput: f64,
@@ -123,19 +124,20 @@ fn parse_timeseries_csv(path: &str) -> Result<Vec<TsRow>, Box<dyn std::error::Er
     let content = std::fs::read_to_string(path)?;
     let mut rows = Vec::new();
     for line in content.lines().skip(1) {
-        let fields: Vec<&str> = line.splitn(7, ',').collect();
-        if fields.len() < 7 {
+        let fields: Vec<&str> = line.splitn(9, ',').collect();
+        if fields.len() < 8 {
             continue;
         }
-        let throughput = fields[4].parse::<f64>().ok();
-        let us_per_step = fields[5].parse::<f64>().ok();
-        let avg_accept_len = fields[6].parse::<f64>().ok();
+        let throughput = fields[5].parse::<f64>().ok();
+        let us_per_step = fields[6].parse::<f64>().ok();
+        let avg_accept_len = fields[7].parse::<f64>().ok();
         match (throughput, us_per_step, avg_accept_len) {
             (Some(tp), Some(us), Some(aal)) => rows.push(TsRow {
                 run_date: fields[0].to_string(),
                 commit: fields[1].to_string(),
-                category: fields[2].to_string(),
-                method: fields[3].to_string(),
+                features: fields[2].to_string(),
+                category: fields[3].to_string(),
+                method: fields[4].to_string(),
                 throughput: tp,
                 us_per_step: us,
                 avg_accept_len: aal,
@@ -257,9 +259,13 @@ pub fn plot_timeseries(
 
         let y_max = max_tp * 1.15;
 
+        let latest_features = cat_rows
+            .last()
+            .map(|r| r.features.as_str())
+            .unwrap_or("unknown");
         let mut chart = ChartBuilder::on(&root)
             .caption(
-                format!("{title} — Time Series"),
+                format!("{title} — Time Series [{latest_features}]"),
                 ("sans-serif", 20).into_font(),
             )
             .margin(12)
