@@ -48,7 +48,7 @@
 
 - [x] T15: Update `README.md` examples section with GvG example description
 - [x] T16: Update `.docs/` with GvG design rationale (why teams matter for MCTS) — rationale documented in plan and example output
-- [ ] T17: Commit with message `feat(game_state): gvg team-based mcts showcase`
+- [x] T17: Commit with message `feat(game_state): gvg team-based mcts showcase` — `bbc79dc`
 
 ---
 
