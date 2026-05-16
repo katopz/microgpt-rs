@@ -1,0 +1,28 @@
+commit,date,features,method,throughput,us_per_step,avg_accept_len
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,Transformer AR,866889,1.15,1.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,DFlash,485571,2.06,8.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,DDTree Build,358037,2.79,0.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,Speculative (Simulated),999268,5.00,5.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,Speculative (AR Draft),1395344,5.01,7.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,Leviathan (Algorithm 1),122793,9.60,1.18
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,Leviathan (no rollback),125809,9.37,1.18
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,Leviathan (w/ rollback),199348,5.89,1.18
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,Spec (unconditioned),1051205,4.76,5.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,Spec (conditioned),1134152,5.95,6.74
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,MTP OFF (BPE),2824,354.20,1.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,MTP ON truncate/pad (BPE),2690,371.87,1.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,MTP OFF shared KV (small),8366,717.15,6.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,MTP ON shared KV (small),4407,737.27,3.25
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,Prefill (no compress),284230,3.52,64.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,Prefill (compressed),262820,3.80,7.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,DDTree (no chain),337527,2.96,16.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,DDTree (chain-seed),387116,2.58,16.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,DDTree (screened R=1.0),298028,3.36,16.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,DDTree (screened adapter),296301,3.37,16.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,forward (flat),1355837,0.74,0.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,forward_paged,1158791,0.86,0.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,forward_raven (16 slots),1562436,0.64,0.00
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,raven_recall (1000 noise, slot 12=9.9→6.3 acc=63%),9689171,0.10,63.21
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,TQ-3bit store+dequant (alloc),1624229,0.62,5.33
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,TQ-3bit store+dequant (zero-alloc),2338040,0.43,5.33
+d891ee4,2026-05-16T16:13:30,sparse_mlp+domain_latent+ppot+bandit,PFlash block_select (1024 blocks),1164192,0.86,0.00

@@ -334,12 +334,12 @@ unsafe fn attention_head(
     let mut max_score = f32::NEG_INFINITY;
     for t in 0..t_n {
         let k_off = t * kv_dim + kv_group_offset;
-        let mut dot = 0.0f32;
-        for d in 0..hd {
-            unsafe {
-                dot += *q.get_unchecked(q_head_offset + d) * *key_cache.get_unchecked(k_off + d);
-            }
-        }
+        // SAFETY: q_head_offset + hd <= n_embd (head_dim * n_head), k_off + hd <= block_size * kv_dim
+        let dot = unsafe {
+            let q_slice = std::slice::from_raw_parts(q.as_ptr().add(q_head_offset), hd);
+            let k_slice = std::slice::from_raw_parts(key_cache.as_ptr().add(k_off), hd);
+            crate::simd::simd_dot_f32(q_slice, k_slice, hd)
+        };
         let score = dot * scale;
         unsafe {
             *scores_buf.get_unchecked_mut(t) = score;
@@ -450,12 +450,11 @@ fn clustered_lm_head(
     let mut best_score = f32::NEG_INFINITY;
     for c in 0..num_clusters {
         let row_off = c * n_embd;
-        let mut dot = 0.0f32;
-        for d in 0..n_embd {
-            unsafe {
-                dot += *cluster_classifier.get_unchecked(row_off + d) * *hidden.get_unchecked(d);
-            }
-        }
+        let dot = crate::simd::simd_dot_f32(
+            &cluster_classifier[row_off..row_off + n_embd],
+            &hidden[..n_embd],
+            n_embd,
+        );
         if dot > best_score {
             best_score = dot;
             best_cluster = c;
@@ -469,12 +468,11 @@ fn clustered_lm_head(
     for &token_idx in cluster_tokens {
         if token_idx < vocab_size {
             let row_off = token_idx * n_embd;
-            let mut dot = 0.0f32;
-            for d in 0..n_embd {
-                unsafe {
-                    dot += *lm_head.get_unchecked(row_off + d) * *hidden.get_unchecked(d);
-                }
-            }
+            let dot = crate::simd::simd_dot_f32(
+                &lm_head[row_off..row_off + n_embd],
+                &hidden[..n_embd],
+                n_embd,
+            );
             unsafe {
                 *logits.get_unchecked_mut(token_idx) = dot;
             }

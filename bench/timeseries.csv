@@ -276,3 +276,111 @@
 2026-05-15T17:30:38,c34871f,sparse_mlp+domain_latent+ppot+bandit,infrastructure,TQ-3bit store+dequant (alloc),1742602,0.57,5.33
 2026-05-15T17:30:38,c34871f,sparse_mlp+domain_latent+ppot+bandit,infrastructure,TQ-3bit store+dequant (zero-alloc),2417528,0.41,5.33
 2026-05-15T17:30:38,c34871f,sparse_mlp+domain_latent+ppot+bandit,infrastructure,PFlash block_select (1024 blocks),1192119,0.84,0.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Transformer AR,1165745,0.86,1.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DFlash,491201,2.04,8.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree Build,370101,2.70,0.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Speculative (Simulated),1020688,4.90,5.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Speculative (AR Draft),1452514,4.82,7.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Leviathan (Algorithm 1),122298,9.64,1.18
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Leviathan (no rollback),122454,9.63,1.18
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Leviathan (w/ rollback),195034,6.03,1.18
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Spec (unconditioned),1007615,4.96,5.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Spec (conditioned),1108425,6.09,6.74
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP OFF (BPE),2765,361.73,1.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP ON truncate/pad (BPE),2719,367.85,1.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP OFF shared KV (small),8274,725.14,6.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP ON shared KV (small),4495,722.78,3.25
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,Prefill (no compress),293385,3.41,64.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,Prefill (compressed),272228,3.67,7.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (no chain),317995,3.14,16.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (chain-seed),398757,2.51,16.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (screened R=1.0),290471,3.44,16.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (screened adapter),290581,3.44,16.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,forward (flat),1027562,0.97,0.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,forward_paged,928860,1.08,0.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,forward_raven (16 slots),1199250,0.83,0.00
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,raven_recall (1000 noise, slot 12=9.9→6.3 acc=63%),7549506,0.13,63.21
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,TQ-3bit store+dequant (alloc),1543966,0.65,5.33
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,TQ-3bit store+dequant (zero-alloc),2354239,0.42,5.33
+2026-05-16T15:36:22,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,PFlash block_select (1024 blocks),1191925,0.84,0.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Transformer AR,1302524,0.77,1.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DFlash,468062,2.14,8.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree Build,320222,3.12,0.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Speculative (Simulated),797670,6.27,5.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Speculative (AR Draft),944269,7.41,7.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Leviathan (Algorithm 1),104127,11.32,1.18
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Leviathan (no rollback),83222,14.16,1.18
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Leviathan (w/ rollback),129646,9.06,1.18
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Spec (unconditioned),608388,8.22,5.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Spec (conditioned),717907,9.40,6.74
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP OFF (BPE),1619,617.67,1.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP ON truncate/pad (BPE),2701,370.32,1.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP OFF shared KV (small),5041,1190.17,6.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP ON shared KV (small),2318,1401.35,3.25
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,Prefill (no compress),259631,3.85,64.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,Prefill (compressed),230598,4.34,7.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (no chain),361521,2.77,16.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (chain-seed),378154,2.64,16.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (screened R=1.0),293824,3.40,16.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (screened adapter),295743,3.38,16.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,forward (flat),1273421,0.79,0.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,forward_paged,1103004,0.91,0.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,forward_raven (16 slots),1464196,0.68,0.00
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,raven_recall (1000 noise, slot 12=9.9→6.3 acc=63%),8902024,0.11,63.21
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,TQ-3bit store+dequant (alloc),1574609,0.64,5.33
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,TQ-3bit store+dequant (zero-alloc),2214916,0.45,5.33
+2026-05-16T16:07:21,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,PFlash block_select (1024 blocks),1099282,0.91,0.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Transformer AR,1298690,0.77,1.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DFlash,428587,2.33,8.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree Build,274504,3.64,0.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Speculative (Simulated),652356,7.66,5.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Speculative (AR Draft),973106,7.19,7.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Leviathan (Algorithm 1),74500,15.82,1.18
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Leviathan (no rollback),68396,17.24,1.18
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Leviathan (w/ rollback),109885,10.69,1.18
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Spec (unconditioned),538314,9.29,5.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Spec (conditioned),607713,11.10,6.74
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP OFF (BPE),1559,641.62,1.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP ON truncate/pad (BPE),1455,687.23,1.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP OFF shared KV (small),5787,1036.85,6.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP ON shared KV (small),4425,734.25,3.25
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,Prefill (no compress),208134,4.80,64.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,Prefill (compressed),191213,5.23,7.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (no chain),349421,2.86,16.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (chain-seed),381781,2.62,16.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (screened R=1.0),293792,3.40,16.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (screened adapter),286643,3.49,16.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,forward (flat),975437,1.02,0.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,forward_paged,849520,1.18,0.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,forward_raven (16 slots),1134048,0.88,0.00
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,raven_recall (1000 noise, slot 12=9.9→6.3 acc=63%),6995013,0.14,63.21
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,TQ-3bit store+dequant (alloc),1246186,0.80,5.33
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,TQ-3bit store+dequant (zero-alloc),1725689,0.58,5.33
+2026-05-16T16:10:41,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,PFlash block_select (1024 blocks),862946,1.16,0.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Transformer AR,866889,1.15,1.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DFlash,485571,2.06,8.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree Build,358037,2.79,0.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Speculative (Simulated),999268,5.00,5.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Speculative (AR Draft),1395344,5.01,7.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Leviathan (Algorithm 1),122793,9.60,1.18
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Leviathan (no rollback),125809,9.37,1.18
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Leviathan (w/ rollback),199348,5.89,1.18
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Spec (unconditioned),1051205,4.76,5.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,Spec (conditioned),1134152,5.95,6.74
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP OFF (BPE),2824,354.20,1.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP ON truncate/pad (BPE),2690,371.87,1.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP OFF shared KV (small),8366,717.15,6.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,speculative,MTP ON shared KV (small),4407,737.27,3.25
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,Prefill (no compress),284230,3.52,64.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,Prefill (compressed),262820,3.80,7.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (no chain),337527,2.96,16.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (chain-seed),387116,2.58,16.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (screened R=1.0),298028,3.36,16.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,tree_build,DDTree (screened adapter),296301,3.37,16.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,forward (flat),1355837,0.74,0.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,forward_paged,1158791,0.86,0.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,forward_raven (16 slots),1562436,0.64,0.00
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,raven_recall (1000 noise, slot 12=9.9→6.3 acc=63%),9689171,0.10,63.21
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,TQ-3bit store+dequant (alloc),1624229,0.62,5.33
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,TQ-3bit store+dequant (zero-alloc),2338040,0.43,5.33
+2026-05-16T16:13:30,d891ee4,sparse_mlp+domain_latent+ppot+bandit,infrastructure,PFlash block_select (1024 blocks),1164192,0.86,0.00

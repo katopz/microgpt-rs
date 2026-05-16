@@ -556,11 +556,8 @@ pub fn rmsnorm(x: &mut [f32]) {
         return;
     }
 
-    // Pass 1: sum of squares
-    let mut sum_sq = 0.0f32;
-    for &v in x.iter() {
-        sum_sq += v * v;
-    }
+    // Pass 1: sum of squares (SIMD-accelerated)
+    let sum_sq = crate::simd::simd_dot_f32(x, x, x.len());
 
     // Pass 2: scale
     let inv_rms = 1.0 / (sum_sq / x.len() as f32 + 1e-5).sqrt();

@@ -228,10 +228,35 @@ impl SpeculativeContext {
 
     /// Get populated marginals as slice-of-slices (borrowed view).
     /// Returns a Vec of borrowed slices for compatibility with existing APIs.
+    /// Prefer [`marginals_into`] for hot paths (zero-alloc).
     pub fn marginals_view(&self, vocab_size: usize) -> Vec<&[f32]> {
         (0..self.steps_populated)
             .map(|step| self.marginal_slice(step, vocab_size))
             .collect()
+    }
+
+    /// Zero-alloc marginals view: writes borrowed slices into caller-provided buffer.
+    ///
+    /// Returns the populated portion of `buf` as `&[&[f32]]`.
+    /// `buf` must be at least `steps_populated` long (bounded by `draft_lookahead`, typically ≤64).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut buf: [&[f32]; 64] = [&[]; 64];
+    /// let view = sctx.marginals_into(&mut buf, vocab_size);
+    /// tree_builder.build(view, config, &NoPruner, false);
+    /// ```
+    pub fn marginals_into<'s, 'a>(
+        &'s self,
+        buf: &'a mut [&'s [f32]],
+        vocab_size: usize,
+    ) -> &'a [&'s [f32]] {
+        let count = self.steps_populated.min(buf.len());
+        for (i, slot) in buf.iter_mut().enumerate().take(count) {
+            *slot = self.marginal_slice(i, vocab_size);
+        }
+        &buf[..count]
     }
 
     /// Get populated sampled tokens.
@@ -409,8 +434,7 @@ pub enum DraftEvent {
 // ── PFlash Block-Sparse Prefill (Plan 044) ─────────────────────
 
 /// Whether to apply block-sparse prefill compression.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PrefillMode {
     /// Never compress — use full prompt.
     #[default]
@@ -420,7 +444,6 @@ pub enum PrefillMode {
     /// Always compress (even short prompts).
     Always,
 }
-
 
 /// Configuration for PFlash block-sparse prefill scoring.
 ///

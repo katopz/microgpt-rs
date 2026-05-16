@@ -68,11 +68,12 @@ impl SpeculativeVerifier for SimulatedVerifier {
         self.sctx.reset();
         dflash_predict_with(&mut self.sctx, draft_weights, draft_config, token, pos);
 
-        // 2. Build marginals view for tree building (zero-alloc: borrow slices from flat buffer)
-        let marginals_view = self.sctx.marginals_view(vocab_size);
+        // 2. Build marginals view for tree building (zero-alloc: stack array + marginals_into)
+        let mut marginals_buf: [&[f32]; 64] = [&[]; 64];
+        let marginals_view = self.sctx.marginals_into(&mut marginals_buf, vocab_size);
         let tree = self
             .tree_builder
-            .build(&marginals_view, draft_config, &NoPruner, false);
+            .build(marginals_view, draft_config, &NoPruner, false);
 
         // 3. Extract best path into pre-allocated buffer
         extract_best_path_into(tree, &mut self.sctx.path_buf);
@@ -210,9 +211,12 @@ impl SpeculativeVerifier for LeviathanVerifier<'_> {
             );
         }
 
-        // Clone context only when MTP is active to avoid borrow conflict with &mut self.draft_sctx
-        let mtp_buf = if mtp_active {
-            Some(self.draft_sctx.ctx.mtp_context_buf.clone())
+        // Copy MTP context to stack (zero-alloc, avoids borrow conflict with &mut self.draft_sctx)
+        let mut mtp_stack = [0.0f32; 256];
+        let mtp_buf: Option<&[f32]> = if mtp_active {
+            let n = draft_config.n_embd.min(mtp_stack.len());
+            mtp_stack[..n].copy_from_slice(&self.draft_sctx.ctx.mtp_context_buf[..n]);
+            Some(&mtp_stack[..n])
         } else {
             None
         };
@@ -223,7 +227,7 @@ impl SpeculativeVerifier for LeviathanVerifier<'_> {
             token,
             pos,
             rng,
-            mtp_buf.as_deref(),
+            mtp_buf,
         );
 
         if gamma == 0 {
@@ -232,11 +236,14 @@ impl SpeculativeVerifier for LeviathanVerifier<'_> {
         }
 
         // Phase 2: Target scoring — skip token[0] (already scored in Phase 0)
-        // Copy sampled tokens before iterating (avoids borrow conflicts with flat buffers)
-        let sampled_tokens = self.draft_sctx.sampled_tokens[..gamma].to_vec();
+        // Copy sampled tokens to stack (zero-alloc, avoids borrow conflict with &mut self.draft_sctx)
+        let mut token_stack = [0usize; 64];
+        let gamma_bounded = gamma.min(token_stack.len());
+        token_stack[..gamma_bounded]
+            .copy_from_slice(&self.draft_sctx.sampled_tokens[..gamma_bounded]);
 
         // Score each drafted token → p_dist[1..=gamma]
-        for (i, &draft_tok) in sampled_tokens.iter().enumerate() {
+        for (i, &draft_tok) in token_stack[..gamma_bounded].iter().enumerate() {
             let logits = forward(
                 &mut self.target_ctx,
                 self.target_weights,
@@ -258,7 +265,7 @@ impl SpeculativeVerifier for LeviathanVerifier<'_> {
 
         for i in 0..gamma {
             let offset = i * vocab_size;
-            let drafted_token = sampled_tokens[i];
+            let drafted_token = token_stack[i];
 
             let p_i = self
                 .draft_sctx
