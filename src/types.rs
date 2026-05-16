@@ -54,7 +54,7 @@ pub enum HlaMode {
 }
 
 impl Config {
-    /// Micro GPT config matching talos-vs-macbook reference:
+    /// Micro GPT config matching [talos-vs-macbook](https://github.com/AlexCheema/talos-vs-macbook) reference:
     /// vocab=27, block=16, n_layer=1, n_head=4, n_embd=16, head_dim=4,
     /// RMSNorm (no learnable gain), ReLU MLP (4x), no biases, untied lm_head.
     pub fn micro() -> Self {

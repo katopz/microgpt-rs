@@ -2,7 +2,7 @@
 
 Speculative Decoding with DFlash & DDTree — a high-performance Rust implementation of a micro-Transformer with built-in benchmarking and visualization.
 
-Inspired by [microgpt-c](https://github.com/nicholasgasior/microgpt-c), [talos-vs-macbook](https://github.com/alexcb123/talos-vs-macbook), and [Luce-Org/lucebox-hub](https://github.com/Luce-Org/lucebox-hub/).
+Inspired by [microgpt-c](https://github.com/nicholasgasior/microgpt-c), [talos-vs-macbook](https://github.com/AlexCheema/talos-vs-macbook), and [Luce-Org/lucebox-hub](https://github.com/Luce-Org/lucebox-hub/).
 
 ## 🚀 Key Features
 
@@ -862,7 +862,7 @@ Lessons from [NVIDIA Dynamo's agentic inference](https://developer.nvidia.com/bl
 ## 📜 References
 
 - [microgpt-c](https://github.com/nicholasgasior/microgpt-c) — Original C implementation
-- [talos-vs-macbook](https://github.com/alexcb123/talos-vs-macbook) — Reference model
+- [talos-vs-macbook](https://github.com/AlexCheema/talos-vs-macbook) — Reference model
 - [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/pdf/2211.17192) — Leviathan et al., 2022
 - [DFlash: Block-Diffusion Speculative Decoding](https://arxiv.org/abs/2602.06036) — Wang et al., 2026
 - [DDTree: Block Diffusion Draft Trees](https://arxiv.org/abs/2604.12989) — Ringel & Romano, 2026

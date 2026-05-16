@@ -328,7 +328,7 @@ DFlash's draft model sees `[last_target_token, MASK×15]` + last 5 target hidden
 - [x] **6.5** Run `cargo clippy --all-targets --all-features --quiet` — zero warnings
 - [x] **6.6** Update `README.md` header — add Lucebox-Hub inspiration line:
   ```
-  Inspired by [microgpt-c](...), [talos-vs-macbook](...), and [Luce-Org/lucebox-hub](https://github.com/Luce-Org/lucebox-hub/).
+  Inspired by [microgpt-c](...), [talos-vs-macbook](https://github.com/AlexCheema/talos-vs-macbook), and [Luce-Org/lucebox-hub](https://github.com/Luce-Org/lucebox-hub/).
   ```
 - [x] **6.7** Update `README.md` References section — add Lucebox-Hub + paper citations:
   ```
