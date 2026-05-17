@@ -465,6 +465,36 @@ Run: `cargo run --features game_state --example game_state_01_bomber_mcts`
 
 📖 See [`.plans/056_game_state_forward_model.md`](.plans/056_game_state_forward_model.md), [`.research/27_STRATEGA_General_Strategy_Games_Forward_Model.md`](.research/27_STRATEGA_General_Strategy_Games_Forward_Model.md).
 
+### 🔄 NFSP/MCTS Duality (Plan 067)
+
+Both methods find a better action at state `s` for a student policy to imitate. They differ only in where the better action comes from:
+
+```text
+              Past                    Future
+         ┌──────────────────┬──────────────────────┐
+  Real   │ ReplayBackward  │  MCTS rollouts        │
+         │ (BanditPruner)  │  (mcts_search)        │
+         ├──────────────────┼──────────────────────┤
+  Counter│ Bandit Q-update  │  Hint-δ              │
+ factual │ (what worked)   │  (what model doesn't  │
+         │                  │   know)               │
+         └──────────────────┴──────────────────────┘
+  Student: AbsorbCompress (doesn't know which teacher spoke)
+```
+
+**Why generic MCTS failed**: `mcts_search<S>()` uses random rollouts with no backward signal. Every game starts from scratch. Meanwhile `BanditPruner` carries Q-values across episodes — that's why HL (+177) dominates MCTS (25%, ≈ random). The fix: wire bandit Q-values into MCTS rollouts (AlphaZero pattern, but modelless).
+
+| Teacher | Direction | Component | Signal |
+|---------|-----------|-----------|--------|
+| A (NFSP) | ← Backward | `BanditPruner` Q-values | Q(s,a) from past episodes |
+| B (MCTS) | → Forward | `mcts_search<S>()` | Simulated rollouts |
+| A+B | Both | `BanditRolloutPolicy` (Plan 067) | Bandit-informed rollouts |
+| Neither | Counterfactual | `HintDelta` | Distribution shift at one state |
+
+The inference pipeline (DDTree + BanditPruner) already embodies this duality at the token level — backward Q-values inform forward best-first search.
+
+📖 See [`.plans/067_nfsp_mcts_duality.md`](.plans/067_nfsp_mcts_duality.md).
+
 ## 🎲 Monopoly FSM Arena
 
 4-player Monopoly with `bevy_ecs` standalone. Turn-based event-driven FSM with 8 phases, 40-square board, and 4 AI tiers.
