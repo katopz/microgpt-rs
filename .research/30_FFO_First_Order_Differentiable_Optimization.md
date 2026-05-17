@@ -337,6 +337,44 @@ Current ScreeningPruner uses bandit Q-values for pruning decisions. FFO's dual c
 
 ---
 
+## Implementation Results
+
+### P0: KKT Schur Complement — ✅ CLEAR WIN (Plan 067)
+
+**Implemented in** `riir-ai/crates/riir-gpu/src/schur.rs` (feature-gated `schur_exact`)
+
+| Metric | AdamW 100 steps | Schur 1-shot |
+|--------|-----------------|--------------|
+| Final Loss | 56.44 | 0.000009 |
+| Method | Iterative approximation | Exact closed-form |
+| Learning rate tuning | Required | None needed |
+
+Pure-Rust Cholesky decomposition (no LAPACK dependency) for small matrices (d ≤ 32). `DomainLatentSchurAccumulator` accumulates sufficient statistics across mini-batches, then solves once. Numerically stable for condition numbers up to ~1000.
+
+**Verdict:** Domain latent is exactly a linear model with quadratic loss — the textbook case for Schur complement. AdamW is iterative approximation; Schur is exact. Clear win.
+
+### P1: Dual-Cutoff Active Masking — ❌ NO GAIN (Plan 062)
+
+**Implemented in** `microgpt-rs/src/pruners/bandit.rs` (`dual_cutoff` field, default 0.0 = disabled)
+
+The plan hypothesized that ≥80% of bandit arms would already have near-zero relevance via soft `domain × bandit_q` blending, making hard cutoff redundant. **This was wrong** — with UCB1, 0% of arms had near-zero relevance because the exploration bonus inflates low-Q arm scores.
+
+Hard cutoff IS effective at masking (cutoff=0.2 masks 17/27 arms, -49% relevance mass), but this is **harmful** — it eliminates exploration signal the bandit needs to confirm arms are truly suboptimal.
+
+**Verdict:** Same pattern as Plan 053 (δ-Mem) — mathematically correct technique, wrong surface for our tree-scoring problem. Theorem 4.1 proves active-set gradient equivalence for differentiable optimization layers, but our `BanditPruner` is not solving a QP — it's doing online exploration/exploitation. The dual-cutoff theory doesn't transfer to this domain.
+
+### P2: Cholesky-Accelerated HLA Kernel — Not attempted
+AHLA already achieves 95% SDPA throughput (Plan 060). The Cholesky overhead for d=4-8 head dims would likely make it slower, not faster.
+
+### Summary
+
+| Priority | Technique | Result | Plan |
+|----------|-----------|--------|------|
+| P0 | KKT Schur complement | ✅ CLEAR WIN | Plan 067 |
+| P1 | Dual-cutoff active masking | ❌ NO GAIN | Plan 062 |
+| P2 | Cholesky-accelerated HLA | Not attempted | — |
+| P3 | FD hypergradient | N/A (already captured) | — |
+
 ## References
 
 - [FFOLayer GitHub](https://github.com/ZihaoZhao/FFOLayer)
