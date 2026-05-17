@@ -80,12 +80,11 @@ pub fn attention_turboquant(
     let mut max_score = f32::NEG_INFINITY;
     for t in 0..t_n {
         let k_off = t * kv_dim + kv_group_offset;
-        let mut dot = 0.0f32;
-        for d in 0..head_dim {
-            unsafe {
-                dot += *q.get_unchecked(q_head_offset + d) * *flat_keys.get_unchecked(k_off + d);
-            }
-        }
+        let dot = unsafe {
+            let q_slice = std::slice::from_raw_parts(q.as_ptr().add(q_head_offset), head_dim);
+            let k_slice = std::slice::from_raw_parts(flat_keys.as_ptr().add(k_off), head_dim);
+            crate::simd::simd_dot_f32(q_slice, k_slice, head_dim)
+        };
         let score = dot * scale;
         unsafe {
             *scores_buf.get_unchecked_mut(t) = score;

@@ -1332,12 +1332,9 @@ pub fn generate_with_prefill(
     };
 
     // 2. Sample first generation token from prefill output
-    let mut p_dist = logits.to_vec();
-    for p in p_dist.iter_mut() {
-        *p /= config.temperature;
-    }
-    crate::types::softmax(&mut p_dist);
-    let mut token = crate::types::sample_token(&p_dist, rng);
+    // softmax_scaled fuses temperature + softmax in-place, avoiding logits.to_vec() allocation
+    crate::types::softmax_scaled(logits, 1.0 / config.temperature);
+    let mut token = crate::types::sample_token(logits, rng);
 
     let mut generated = vec![token];
     let mut pos = prompt_tokens.len();
@@ -2405,6 +2402,29 @@ pub fn forward_turboquant<'a>(
             config.mlp_hidden,
             n,
         );
+        // MLP w2: sparse when feature enabled and sparsity is high enough (Plan 022)
+        #[cfg(feature = "sparse_mlp")]
+        {
+            let alive = types::sparse_matmul(
+                &mut ctx.x,
+                &layer_weights.mlp_w2,
+                &ctx.hidden,
+                n,
+                config.mlp_hidden,
+                &mut ctx.active_indices,
+                &mut ctx.active_values,
+            );
+            if (alive as f32 / config.mlp_hidden as f32) > (1.0 - config.sparse_threshold) {
+                matmul(
+                    &mut ctx.x,
+                    &layer_weights.mlp_w2,
+                    &ctx.hidden,
+                    n,
+                    config.mlp_hidden,
+                );
+            }
+        }
+        #[cfg(not(feature = "sparse_mlp"))]
         matmul(
             &mut ctx.x,
             &layer_weights.mlp_w2,

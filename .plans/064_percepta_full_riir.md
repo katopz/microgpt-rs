@@ -1,6 +1,8 @@
 # Plan 064: Percepta Full RIIR — transformer-vm in Rust
 
-> **Status**: ✅ Complete — TG-A through TG-J + TG-K3/K4 + TG-L done. K1/K2/K6 deferred (examples/blog). Success criteria blocked on full pipeline verification (needs clang).
+> **Status**: ✅ Core complete — TG-A through TG-J + TG-K3/K4 + TG-L done. K1/K2/K6 deferred (examples/blog). End-to-end tasks (F6, H5, H6, J8) blocked on Rust→WASM pipeline wiring. Comparison tasks (G5, I4, J9) deferred to Percepta Docker environment.
+>
+> **WASM Strategy**: Rust-first — write Rust programs → `cargo build --target wasm32-unknown-unknown` → feed into percepta pipeline. No clang needed. C→WASM comparison deferred: copy `.wasm` binaries out of Percepta's Docker environment for 1:1 reference matching later.
 
 Complete Rust port of Percepta's `transformer-vm` (Apache-2.0 © Percepta). Distill ~9K lines of Python+C++ into idiomatic Rust under MIT. Prove Rust is better. Show them what's possible.
 
@@ -154,7 +156,7 @@ src/percepta/
 - [x] **F3:** Implement byte-serial arithmetic with carry propagation ✅
 - [x] **F4:** Implement stack, memory, locals, cursor, call depth tracking via attention + cumsum ✅
 - [x] **F5:** Unit tests: each opcode produces correct graph node ✅ (35 tests)
-- [ ] **F6:** Integration: compile + interpret simple C programs (hello, addition, fibonacci) — depends on TG-J
+- [ ] **F6:** Integration: compile + interpret simple Rust programs (hello, addition, fibonacci) via `cargo build --target wasm32-unknown-unknown` → percepta pipeline — depends on TG-J, Rust-first
 
 ### TG-G: Analytical Weight Construction
 
@@ -164,7 +166,7 @@ src/percepta/
 - [x] **G2:** Implement attention head weight construction (parabolic encoding, HARD_K scaling) ✅
 - [x] **G3:** Implement FFN weight construction (ReGLU gates, slot assignments) ✅
 - [x] **G4:** Implement embedding + unembedding layers ✅
-- [ ] **G5:** Verify weight matrices match Python reference for known programs — SKIP for now
+- [ ] **G5:** Verify weight matrices match Python reference for known programs — ⏭️ deferred: needs C-compiled WASM from Percepta Docker for 1:1 comparison
 - [x] **G6:** Unit tests: construct weights for simple programs, verify dimensional correctness ✅ (15 tests)
 
 ### TG-H: Transformer Execution
@@ -175,8 +177,8 @@ src/percepta/
 - [x] **H2:** Integrate CHT hull cache from TG-A as attention backend
 - [x] **H3:** Implement autoregressive generation loop
 - [x] **H4:** Implement token encoding/decoding (byte-level execution trace)
-- [ ] **H5:** Verify: run hello.c through full pipeline, output matches Python reference
-- [ ] **H6:** Verify: run sudoku.c through full pipeline, solves correctly
+- [ ] **H5:** Verify: run Rust hello through full pipeline (Rust→WASM→transformer), output correct — Rust-first
+- [ ] **H6:** Verify: run Rust sudoku through full pipeline, solves correctly — Rust-first
 
 ### TG-I: Futamura Specialization
 
@@ -185,7 +187,7 @@ src/percepta/
 - [x] **I1:** Implement `_cursor_lookup` — bake instruction table into FFN weights ✅ `specialize.rs` (728 lines, 13 tests)
 - [x] **I2:** Implement piecewise-constant step function encoding ✅ (uses existing `PiecewiseLookup` in interpreter)
 - [x] **I3:** Implement specialized model generation (smaller, no instruction-fetch attention) ✅ `specialize()` + `build_universal()` + `SpecializedModel` + `SpecializationReduction`
-- [ ] **I4:** Verify: specialized collatz matches universal model output but runs faster — SKIP for now, depends on full pipeline (TG-J)
+- [ ] **I4:** Verify: specialized collatz matches universal model output but runs faster — ⏭️ deferred: needs full Rust→WASM pipeline first
 
 ### TG-J: CLI + Evaluator + Runner
 
@@ -193,13 +195,13 @@ src/percepta/
 
 - [x] **J1:** Implement graph evaluator (exact arithmetic, no transformer weights needed) ✅ `evaluator.rs` (854 lines, 14 tests)
 - [x] **J2:** Implement reference trace generator (evaluate_with_output, compare_with_reference) ✅
-- [x] **J3:** Implement compile pipeline stub (requires clang — returns NotImplemented for now) ✅
+- [x] **J3:** Implement compile pipeline stub (returns NotImplemented — to be rewritten as Rust→WASM) ✅
 - [x] **J4:** Implement build pipeline (Runner::build, build_from_graph) ✅ `runner.rs` (604 lines, 5 tests)
 - [x] **J5:** Implement run pipeline (Runner::run, run_with_weights) ✅
 - [x] **J6:** Implement specialize pipeline stub (returns NotImplemented — Futamura not yet implemented) ✅
 - [x] **J7:** Implement eval pipeline (Runner::evaluate, evaluate_with_output, full_evaluate) ✅
-- [ ] **J8:** End-to-end test: compile → build → run for all example programs — SKIP (depends on clang + full pipeline)
-- [ ] **J9:** Benchmark: Rust transformer vs Python transformer vs C++ transformer throughput — SKIP for now
+- [ ] **J8:** End-to-end test: Rust→WASM → build → run for example programs — blocked on Rust→WASM compile pipeline
+- [ ] **J9:** Benchmark: Rust transformer vs Python transformer vs C++ transformer throughput — ⏭️ deferred: needs C-compiled WASM from Percepta Docker for fair comparison
 
 ### TG-K: Examples + Benchmarks + Documentation
 
@@ -269,7 +271,9 @@ We proved transformers can learn to play games.
 
 5. **Keep runtime.h as-is** — The C runtime is injected into WASM programs at compile time. It stays as a C header file.
 
-6. **Test against Python reference** — Use `.raw/transformer-vm/` as oracle. Every Rust output must match Python output for the same inputs.
+6. **Rust-first WASM pipeline** — No clang dependency. Write Rust test programs → `cargo build --target wasm32-unknown-unknown` → feed WASM bytes into percepta decoder → lower → token prefix → transformer. Pure Rust toolchain, zero C dependency.
+
+7. **C→WASM comparison deferred to Docker** — For 1:1 Python reference matching, copy C-compiled `.wasm` binaries out of Percepta's Docker environment (e.g. `.raw/autogo/Dockerfile.worker` pattern). Same WASM bytes → same inputs → compare Rust tok/s vs Python tok/s vs C++ tok/s on same machine. Fair comparison, same algorithm, same bytecodes.
 
 ## Feature Flags
 
@@ -314,16 +318,16 @@ Note: crate names in Cargo.toml use `-` (`ordered-float`, `good_lp`), but Rust c
 
 ## Success Criteria
 
-- [ ] ⏭️ All 6 example programs (hello, addition, collatz, fibonacci, min_cost_matching, sudoku) compile and execute correctly through the Rust transformer — *blocked: needs clang + full pipeline*
-- [ ] ⏭️ Output matches Python reference exactly — *blocked: needs full pipeline*
-- [ ] ⏭️ Futamura specialization works (specialized model produces same output as universal) — *blocked: needs full pipeline*
-- [ ] ⏭️ Rust transformer is faster than Python transformer (obvious) and competitive with C++ transformer — *blocked: needs full pipeline*
-- [ ] ⏭️ Graph evaluator matches transformer output (exact arithmetic verification) — *blocked: needs full pipeline*
+- [ ] Rust example programs compile via `cargo build --target wasm32-unknown-unknown` and execute correctly through the Rust transformer — *blocked on: Rust→WASM compile pipeline wiring*
+- [ ] ⏭️ Output matches Python reference exactly (C→WASM programs from Percepta Docker) — *deferred: needs Percepta Docker, copy `.wasm` out for comparison*
+- [ ] ⏭️ Futamura specialization works (specialized model produces same output as universal) — *deferred: needs full Rust→WASM pipeline*
+- [ ] ⏭️ Rust transformer is faster than Python transformer (obvious) and competitive with C++ transformer — *deferred: needs C-compiled WASM from Percepta Docker for fair comparison*
+- [ ] Graph evaluator matches transformer output (exact arithmetic verification) — *blocked on: Rust→WASM pipeline*
 - [x] All TG-A tests pass (CHT fixes V-shape, arbitrary 2D points, cumulative sum) ✅
 - [x] Zero Python dependency at runtime ✅
 - [x] Full module documentation ✅
 
-**Note:** 807 unit tests pass across all TGs. End-to-end success criteria require clang and full WASM pipeline verification, which is deferred.
+**Note:** 807 unit tests pass across all TGs. End-to-end success criteria require wiring the Rust→WASM compile pipeline (no clang needed). C→WASM comparison is deferred to Percepta's Docker environment.
 
 ## References
 
