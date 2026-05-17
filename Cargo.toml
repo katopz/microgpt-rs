@@ -17,7 +17,7 @@ bevy_ecs = { version = "0.15", optional = true }  # Standalone ECS (Plan 033)
 wasmtime = { version = "28", optional = true }     # WASM bomber validator (Plan 034)
 papaya = { version = "0.2", optional = true }      # Lock-free concurrent HashMap (Plan 037)
 ordered-float = { version = "4", optional = true } # Ord wrapper for f64 — CHT breakpoints (Plan 064 TG-A)
-good_lp = { version = "1", optional = true, default-features = false } # MILP solver — scheduling (Plan 064 TG-D), uses _not - on crates.io
+good_lp = { version = "1", optional = true, default-features = false, features = ["microlp"] } # MILP solver — scheduling (Plan 064 TG-D), pure Rust microlp backend
 toml = "0.8"
 
 [dev-dependencies]

@@ -18,6 +18,7 @@
 //! - [`hull`]     — HullHalf, HardAttentionHead, BruteAttentionHead (O(log N) 2D hard attention)
 //! - [`encoding`] — Parabolic key encoding helpers for 2D attention
 //! - [`cumsum`]  — Cumulative sum via uniform attention (fetch_sum equivalent)
+//! - [`transformer`] — VanillaTransformer with ReGLU FFN, autoregressive generation
 
 // ── Submodules ─────────────────────────────────────────────────
 
@@ -49,6 +50,42 @@ pub mod cumsum;
 #[cfg(feature = "percepta")]
 pub mod standard_cache;
 
+/// ReGLU, stepglu, multiply, persist gate primitives: `GateKind`, `PersistSlot`.
+#[cfg(feature = "percepta_gates")]
+pub mod gates;
+
+/// Expression/Dimension DSL computation graph: `Expression`, `Dimension`, `GraphBuilder`, `ProgramGraph`.
+#[cfg(feature = "percepta_graph")]
+pub mod graph;
+
+/// WASM decoder + lowering passes for transformer-vm compilation.
+#[cfg(feature = "percepta_wasm")]
+pub mod wasm;
+
+/// MILP scheduler: 4-phase layer assignment minimizing `d_model`.
+#[cfg(all(feature = "percepta_graph", feature = "good_lp"))]
+pub mod scheduler;
+
+/// Analytical weight construction: graph + schedule → transformer weight tensors.
+#[cfg(feature = "percepta_compile")]
+pub mod weights;
+
+/// Vanilla transformer with ReGLU FFN and CHT hull KV cache: `VanillaTransformer`, autoregressive generation.
+#[cfg(feature = "percepta_compile")]
+pub mod transformer;
+
+/// First Futamura projection: specialize universal WASM interpreter for a specific program.
+#[cfg(feature = "percepta_compile")]
+pub mod specialize;
+
+/// Graph evaluator with exact arithmetic for correctness verification (no transformer weights needed).
+#[cfg(feature = "percepta_compile")]
+pub mod evaluator;
+
+/// Pipeline runner: compile → build → run → evaluate orchestration.
+#[cfg(feature = "percepta_compile")]
+pub mod runner;
+
 // ── Re-exports from legacy (always available) ──────────────────
 
 pub use legacy::{KVCache2D, SolveEvent, StreamingSolver, Sudoku9x9, SymbolicValidator, Vec2};
@@ -69,3 +106,58 @@ pub use cumsum::CumSum;
 
 #[cfg(feature = "percepta")]
 pub use standard_cache::StandardCache;
+
+// ── Re-exports from gates (feature-gated) ──────────────────────
+
+#[cfg(feature = "percepta_gates")]
+pub use gates::{GateKind, PersistSlot, multiply, reglu, stepglu};
+
+// ── Re-exports from graph (feature-gated) ──────────────────────
+
+#[cfg(feature = "percepta_graph")]
+pub use graph::{
+    BIG, DimId, Dimension, DimensionKind, Expression, GraphBuilder, IntoExpr, KEY_OFFSET,
+    LATEST_ALPHA, LookUp, LookupId, ProgramGraph, ValidationError,
+};
+
+// ── Re-exports from scheduler (feature-gated) ──────────────────
+
+#[cfg(all(feature = "percepta_graph", feature = "good_lp"))]
+pub use scheduler::{
+    DepGraph, OpKey, Phase, Schedule, ScheduleError, StdLayer, build_dep_graph, interval_coloring,
+    milp_schedule, min_layers,
+};
+
+// ── Re-exports from weights (feature-gated) ────────────────────
+
+#[cfg(feature = "percepta_compile")]
+pub use weights::{
+    AttentionWeights, FfnWeights, HeadInfo, LayerWeights, TransformerWeights, build_weights,
+    expr_to_vector,
+};
+
+// ── Re-exports from transformer (feature-gated) ───────────────
+
+#[cfg(feature = "percepta_compile")]
+pub use transformer::{
+    GenerationResult, TransformerConfig, TransformerVocab, VanillaTransformer, decode_trace,
+    encode_output_byte, parse_output_byte,
+};
+
+// ── Re-exports from specialize (feature-gated) ────────────────
+
+#[cfg(feature = "percepta_compile")]
+pub use specialize::{
+    SpecializationError, SpecializationReduction, SpecializedModel, UniversalModel,
+    build_universal, specialize,
+};
+
+// ── Re-exports from evaluator (feature-gated) ─────────────────
+
+#[cfg(feature = "percepta_compile")]
+pub use evaluator::{EvalError, GraphEvaluator};
+
+// ── Re-exports from runner (feature-gated) ─────────────────────
+
+#[cfg(feature = "percepta_compile")]
+pub use runner::{BuildResult, Runner, RunnerError};

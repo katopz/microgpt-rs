@@ -156,9 +156,9 @@ The Trinity: **Raven** (O(1) memory) + **Screening** (O(1) judgment) + **Sparse 
 >
 > **Regression visibility:** Bench CSV and timeseries charts now include a `features` column (e.g. `sparse_mlp+domain_latent+ppot+bandit` vs `bandit+g_zero`) so feature-gate throughput differences are traceable across runs. Infrastructure benches run first (cool CPU) with 3s inter-group cooldowns to reduce thermal noise.
 
-## 🔬 Percepta: O(log N) 2D Convex Hull Attention
+## 🔬 Percepta: Transformer-VM in Rust (transformer-vm RIIR)
 
-Based on [Percepta's research](https://www.percepta.ai/blog/can-llms-be-computers) — executing arbitrary C programs inside a standard autoregressive transformer by compiling a [WebAssembly interpreter](https://github.com/Percepta-Core/transformer-vm) into weights, with exponentially faster decoding via 2D geometric attention. **The reference is Apache-2.0** — we're doing a [full RIIR](.research/32_percepta_distillation_strategy.md) (~9K lines Python+C++ → Rust) to prove Rust is better. See [`.research/31_percepta_deep_dive.md`](.research/31_percepta_deep_dive.md) for gap analysis and [Plan 064](.plans/064_percepta_full_riir.md) for the master plan.
+A Rust port of [Percepta's transformer-vm](https://github.com/Percepta-Core/transformer-vm) — a transformer that executes arbitrary C programs by compiling a WebAssembly interpreter into weights, with O(log N) decoding via 2D geometric attention. **The reference is Apache-2.0** — we distilled ~9K lines of Python+C++ into idiomatic Rust: one language, one binary, zero GC. See [Plan 064](.plans/064_percepta_full_riir.md) for the master plan.
 
 ### Core Mechanism: Parabolic Key Encoding
 
@@ -169,27 +169,89 @@ The geometric trick that enables exact discrete retrieval in 2D attention heads:
 - **Attention score:** 2qk − k² = −(k − q)² + q² — **uniquely maximized when k = q**
 - **Hull decoding:** restricting heads to d=2 turns argmax into a supporting-point query on the convex hull → **O(log N)** via ternary search over unimodal dot-product sequence
 
-### Percepta's Compiler Stack vs Our Implementation
+### Feature Flags
 
-| Component | Description | In our impl? |
-|-----------|-------------|:------------:|
-| **ALM** | Append-only Lookup Machine — abstract model for exact integer ops in transformers | Concept |
-| **CALM** | DSL: `fetch`, `fetch_sum`, `reglu`, `stepglu`, `persist` — 5 primitive dimension types | — |
-| **LookUp gates** | Exact key-value retrieval via 2D parabolic attention (`HARD_K=1e10` → hardmax) | ✅ `KVCache2D` |
-| **ReGLU gates** | `relu(b)*a` (1 FFN neuron), `step(b≥0)` (2 neurons), `a*b` (2 neurons + persist) | — |
-| **Parabolic keys** | k → (2k, −k²) with `inv_log_pos * 0.3` tie-break, `clear_key * 1e30` erase | ✅ test patterns |
-| **Gate graph** | `Expression` (sparse linear combo) / `Dimension` DAG → intermediate representation | — |
-| **MILP scheduling** | PuLP/HiGHS: 4-phase layer assignment, `interval_coloring` slot reuse, minimizes `d_model` | — |
-| **WASM interpreter** | 35 opcodes as circle-point dispatch (r²=32045), byte-serial carry propagation | — |
-| **Specialized model** | Futamura projection: `_cursor_lookup` bakes instruction table into FFN weights | — |
-| **Universal model** | WASM bytecode as input tokens, instruction fetch via attention at `5*cursor+1` | — |
-| **CHT hull cache** | Dynamic Convex Hull Trick (`BTreeSet<Line>`): upper+lower hull, `HullMeta` aggregation | ❌ Plan 063 |
-| **Cumulative sum** | `fetch_sum`: uniform attention (AVERAGE tie-break) × position = exact running sum | ❌ Plan 063 |
-| **Weight construction** | `expr_to_tensor`: graph + schedule → analytical weight matrices, no training | — |
+| Flag | Depends On | What It Enables |
+|------|-----------|-----------------|
+| `percepta` | `ordered-float` | CHT hull cache (upper+lower), `HullMeta`, `TieBreak`, parabolic encoding, `CumSum`, `StandardCache` |
+| `percepta_gates` | `percepta` | + ReGLU, stepglu, multiply, persist gate primitives |
+| `percepta_graph` | `percepta_gates` | + Expression/Dimension DSL, `ProgramGraph`, `GraphBuilder` |
+| `percepta_wasm` | `percepta_graph` | + WASM decoder + lowering + interpreter (pure Rust, not wasmtime) |
+| `percepta_compile` | `percepta_wasm` + `good_lp` | + MILP scheduler + weight construction + transformer execution + Futamura specialization + evaluator + runner |
 
-### What We Implement
+### Implementation Status (Plan 064)
 
-The **geometric attention mechanism** — the reusable component any transformer with 2D heads can exploit at decoding time:
+| TG | What | Source | Target | Status |
+|----|------|--------|--------|:------:|
+| **A** | CHT Hull KV Cache | `hull2d_cht.h` (419 lines) | `cht.rs` + `hull.rs` + `encoding.rs` + `cumsum.rs` + `standard_cache.rs` | ✅ |
+| **B** | ReGLU/stepglu gates | `core.py` (gates portion) | `gates.rs` | ✅ |
+| **C** | Expression/Dimension DSL | `core.py` (449 lines) | `graph/types.rs` + `graph/mod.rs` | ✅ |
+| **D** | MILP scheduling | `milp.py` (814 lines) | `scheduler.rs` | ✅ |
+| **E** | WASM decoder + lowering | `decoder.py` + `lower.py` (2472 lines) | `wasm/decoder.rs` + `wasm/lower.rs` | ✅ |
+| **F** | WASM interpreter | `interpreter.py` (637 lines) | `wasm/interpreter/` (dispatch, arithmetic, tokens) | ✅ |
+| **G** | Weight construction | `weights.py` (776 lines) | `weights.rs` | ✅ |
+| **H** | Transformer execution | `transformer.py` + `.cpp` (513 lines) | `transformer.rs` (Rust native, no C++ needed) | ✅ |
+| **I** | Futamura specialization | `specialize.py` (148 lines) | `specialize.rs` | ✅ |
+| **J** | Evaluator + runner | `evaluator.py` + `runner.py` (705 lines) | `evaluator.rs` + `runner.rs` | ✅ |
+| **K** | Examples + docs + benchmarks | `examples/` | Port + benchmark | 🔄 |
+
+**Key result:** ~9K lines Python+C++ → idiomatic Rust. One language, one binary, zero GC.
+
+### Module Structure
+
+```
+src/percepta/
+├── mod.rs              — Module index + re-exports
+├── types.rs            — HullMeta, TieBreak, Vec2, HARD_K constant
+├── cht.rs              — Dynamic CHT: Line, CHT (Vec-based LineContainer)
+├── hull.rs             — HullHalf + HardAttentionHead + BruteAttentionHead
+├── encoding.rs         — Parabolic key encoding: encode_key, encode_query, clear_key
+├── cumsum.rs           — Cumulative sum via uniform attention (fetch_sum)
+├── standard_cache.rs   — O(n) softmax KV cache reference implementation
+├── gates.rs            — ReGLU, stepglu, multiply, persist primitives
+├── scheduler.rs        — MILP scheduling (4-phase layer assignment, interval_coloring)
+├── weights.rs          — Analytical weight construction: graph + schedule → tensors
+├── transformer.rs      — VanillaTransformer with ReGLU FFN + CHT hull cache
+├── specialize.rs       — First Futamura projection (program → specialized weights)
+├── evaluator.rs        — Graph evaluator with exact arithmetic (no weights needed)
+├── runner.rs           — Pipeline runner: compile → build → run → evaluate
+├── legacy.rs           — KVCache2D (Graham Scan) — kept for regression testing
+├── graph/
+│   ├── mod.rs          — Graph module index + re-exports
+│   └── types.rs        — Expression, Dimension, DimensionKind, LookUp, ProgramGraph, GraphBuilder
+└── wasm/
+    ├── mod.rs          — WASM module index + re-exports
+    ├── decoder.rs      — WASM MVP binary decoder (opcode + immediate parsing)
+    ├── lower.rs        — Lower unsupported ops (MUL, DIV, etc.) to basic sequences
+    └── interpreter/
+        ├── mod.rs      — Interpreter builder (universal + specialized modes)
+        ├── dispatch.rs — Circle-point opcode dispatch (r²=32045 geometric hashing)
+        ├── arithmetic.rs — Byte-serial ALU (add, sub, carry propagation)
+        └── tokens.rs   — Input/output token vocabulary construction
+```
+
+### Compiler Stack — Component Status
+
+| Component | Description | Status |
+|-----------|-------------|:------:|
+| **CHT hull cache** | Dynamic CHT: upper+lower hull, `HullMeta` aggregation, `TieBreak` (LATEST/AVERAGE) | ✅ |
+| **Parabolic keys** | k → (2k, −k²) with `inv_log_pos * 0.3` tie-break, `clear_key * 1e30` erase | ✅ |
+| **Cumulative sum** | `fetch_sum`: uniform attention (AVERAGE tie-break) × position = exact running sum | ✅ |
+| **LookUp gates** | Exact key-value retrieval via 2D parabolic attention (`HARD_K=1e10` → hardmax) | ✅ |
+| **ReGLU gates** | `relu(b)*a` (1 FFN neuron), `step(b≥0)` (2 neurons), `a*b` (2 neurons + persist) | ✅ |
+| **Computation graph** | `Expression` (sparse linear combo) / `Dimension` DAG → intermediate representation | ✅ |
+| **MILP scheduling** | `good_lp`/microlp: 4-phase layer assignment, `interval_coloring` slot reuse, minimizes `d_model` | ✅ |
+| **WASM decoder** | WASM MVP binary parser: sections, opcodes, immediates, data segments | ✅ |
+| **WASM lowering** | MUL, DIV, AND, OR, XOR, SHL, SHR, ROTL, ROTR, CLZ, CTZ, POPCNT → basic op sequences | ✅ |
+| **WASM interpreter** | 36 opcodes as circle-point dispatch (r²=32045), byte-serial carry propagation | ✅ |
+| **Weight construction** | `expr_to_vector`: graph + schedule → analytical weight matrices, no training needed | ✅ |
+| **Transformer execution** | `VanillaTransformer`: autoregressive generation with CHT hull cache, ReGLU FFN | ✅ |
+| **Futamura specialization** | `_cursor_lookup`: bake instruction table into FFN weights (smaller, faster model) | ✅ |
+| **Universal model** | WASM bytecode as input tokens, instruction fetch via attention at `5*cursor+1` | ✅ |
+| **Graph evaluator** | Exact arithmetic evaluation of computation graph (no weights needed) | ✅ |
+| **Pipeline runner** | compile → build → run → evaluate orchestration | ✅ |
+
+### What We Implement (Legacy — always available, no feature flags)
 
 - **`KVCache2D`**: Upper convex hull maintenance via Graham Scan (amortized O(1) append)
 - **`fast_attention`**: Ternary search over hull vertices → O(log H) where H = hull size
@@ -200,52 +262,25 @@ The **geometric attention mechanism** — the reusable component any transformer
 - **`StreamingSolver`**: Step-by-step solve events matching Percepta's demo output
 - **`SymbolicValidator`**: Constraint pruning bridge to speculative decoding (DDTree)
 
-### Known Limitations vs Reference (`transformer-vm`)
-
-| Limitation | Impact | Fix |
-|------------|--------|-----|
-| Upper hull only — no lower hull | `qy < 0` queries produce wrong results (documented in adversarial tests) | Plan 063: CHT dual hull |
-| Requires monotonically increasing X | Cannot handle arbitrary 2D key distributions | Plan 063: CHT LineContainer |
-| O(N) memory — stores all keys | No sublinear compression of KV cache | Plan 063: `HullMeta` aggregation |
-| No tie-breaking (LATEST/AVERAGE) | Cannot implement cumulative sum or latest-write semantics | Plan 063: `TieBreak` enum |
-| No cumulative sum (`fetch_sum`) | Cannot track state machines via attention alone | Plan 063: uniform attention mode |
-| No ReGLU / stepglu primitives | Cannot express conditional logic or multiplication as FFN operations | Future: `gates.rs` module |
-| No computation graph DSL | Cannot express programs as transformer-native operations | Future: `graph.rs` module |
-
 ### Verified Properties
 
 - **960 arithmetic ops**: all a+b, a×b, a−b, a÷b for a,b ∈ 0..=10
 - **Unimodality**: dot products over hull vertices proven bitonic across 360° query sweep
 - **Supporting point**: `linear_attention` ≡ `fast_attention` for convex distributions
 - **Hull compression**: backtracking traces compress valleys (dead ends), retain peaks (explorations)
-- **Adversarial limits**: V-shaped (concave-up) keys break `fast_attention` for downward queries — documented and tested
+- **V-shape now PASSES**: CHT dual hull handles concave-up (V-shaped) key distributions correctly
 - **100K trace stress**: fast attention agrees with linear at scale
-
-### Roadmap
-
-**Plan 064 — Full RIIR** (master plan): Complete Rust port of `transformer-vm` (~9K lines Python+C++ → idiomatic Rust). 11 task groups in dependency order. Prove Rust is better. Show them what's possible.
-
-| TG | What | Source | Target |
-|----|------|--------|--------|
-| **A** | CHT Hull KV Cache | `hull2d_cht.h` (419 lines) | `cht.rs` + `hull.rs` |
-| **B** | ReGLU/stepglu gates | `core.py` (gates portion) | `gates.rs` |
-| **C** | Expression/Dimension DSL | `core.py` (449 lines) | `graph.rs` |
-| **D** | MILP scheduling | `milp.py` (814 lines) | `scheduler.rs` |
-| **E** | WASM decoder + lowering | `decoder.py` + `lower.py` (2472 lines) | `wasm/decoder.rs` + `wasm/lower.rs` |
-| **F** | WASM interpreter | `interpreter.py` (637 lines) | `wasm/interpreter.rs` |
-| **G** | Weight construction | `weights.py` (776 lines) | `weights.rs` |
-| **H** | Transformer execution | `transformer.py` + `transformer.cpp` (513 lines) | `transformer.rs` (Rust native, no C++ needed) |
-| **I** | Futamura specialization | `specialize.py` (148 lines) | `specialize.rs` |
-| **J** | CLI + evaluator + runner | `evaluator.py` + `runner.py` + `compile_wasm.py` (1408 lines) | `evaluator.rs` + `runner.rs` + `compile.rs` |
-| **K** | Examples + docs | `examples/` | Port + benchmark |
+- **19 CHT tests**: upper hull, lower hull, V-shape, edge metadata, tie-breaking
+- **50 graph tests**: Expression arithmetic, Dimension kinds, ProgramGraph validation
+- **23 scheduler tests**: slot reuse, layer assignment, interval coloring
+- **22 decoder tests**: WASM binary parsing, opcode sequences, lowering output
 
 **From blog**: k-sparse softmax (nested hulls, O(k + log n)), 3D heads (3D convex hulls), programs into weights (gradient descent no longer the only way to modify a model).
 
-📁 `src/percepta.rs` — `Vec2`, `KVCache2D`, `Sudoku9x9`, `SymbolicValidator`, `StreamingSolver`, `SolveEvent`
+📁 `src/percepta/` — Full module: CHT, hull, encoding, cumsum, gates, graph, scheduler, weights, transformer, specialize, evaluator, runner, wasm/
 📁 `.plans/064_percepta_full_riir.md` — **Master plan**: all 11 task groups with tasks, module map, success criteria
-📁 `.plans/063_percepta_cht_hull_kv_cache.md` — TG-A detail: CHT upgrade plan
 📁 `.research/32_percepta_distillation_strategy.md` — **Full RIIR verdict** (why take everything, Apache-2.0 → MIT)
-📁 `.research/31_percepta_deep_dive.md` — Gap analysis + **comparison table** (what each does better)
+📁 `.research/31_percepta_deep_dive.md` — Gap analysis + **comparison table** (what each Python/C++ does better)
 
 ## 🗜️ TurboQuant: Near-Optimal KV Cache Compression
 
@@ -853,6 +888,11 @@ cargo clippy --all-targets --all-features --quiet
 | `rest` | REST bridge test + merge stub (Plan 009, client lives in riir-ai/riir-rest) |
 | `embedding_router` | Semantic embedding routing (Plan 024, not yet started) |
 | `hla_attention` | Higher-order Linear Attention — O(1) inference cache (Plan 057) |
+| `percepta` | CHT hull cache (upper+lower), `HullMeta`, `TieBreak`, parabolic encoding, `CumSum`, `StandardCache` (TG-A, Plan 064) |
+| `percepta_gates` | + ReGLU, stepglu, multiply, persist gate primitives (TG-B, Plan 064) |
+| `percepta_graph` | + Expression/Dimension DSL, `ProgramGraph`, `GraphBuilder` (TG-C, Plan 064) |
+| `percepta_wasm` | + WASM decoder + lowering + interpreter — pure Rust, NOT wasmtime (TG-E+F, Plan 064) |
+| `percepta_compile` | + MILP + weights + transformer + Futamura + evaluator + runner (TG-D+G-J, Plan 064) |
 | `gpu` | Placeholder — GPU training lives in riir-ai/riir-gpu |
 | `game_domain` | Alias for `domain_latent` — game-specific Config presets (Plan 040) |
 | `language_domain` | Language domain: BPE vocab, LLM models (Plan 040, future) |
@@ -943,7 +983,34 @@ src/
     partial_parser.rs  Partial JSON/code parsing
     syn_pruner.rs    Syntax-aware pruning
     types.rs         Validator types
-  percepta.rs       O(log N) convex hull attention, Sudoku solvers, StreamingSolver
+  percepta/         Transformer-VM in Rust (Plan 064, TG-A✅→TG-J✅, TG-K🔄):
+    mod.rs          Module index + re-exports
+    types.rs        HullMeta, TieBreak, Vec2, HARD_K constant
+    cht.rs          Dynamic CHT: Line, CHT (Vec-based LineContainer)
+    hull.rs         HullHalf + HardAttentionHead + BruteAttentionHead
+    encoding.rs     Parabolic key encoding: encode_key, encode_query, clear_key
+    cumsum.rs       Cumulative sum via uniform attention (fetch_sum)
+    standard_cache.rs  O(n) softmax KV cache reference implementation
+    gates.rs        ReGLU, stepglu, multiply, persist gate primitives
+    legacy.rs       KVCache2D (Graham Scan) — Sudoku solvers, StreamingSolver
+    scheduler.rs    MILP scheduling (4-phase layer assignment, interval_coloring)
+    weights.rs      Analytical weight construction: graph + schedule → tensors
+    transformer.rs  VanillaTransformer with ReGLU FFN + CHT hull cache
+    specialize.rs   First Futamura projection (program → specialized weights)
+    evaluator.rs    Graph evaluator with exact arithmetic
+    runner.rs       Pipeline runner: compile → build → run → evaluate
+    graph/
+      mod.rs        Graph module index + re-exports
+      types.rs      Expression, Dimension, DimensionKind, LookUp, ProgramGraph, GraphBuilder
+    wasm/
+      mod.rs        WASM module index + re-exports
+      decoder.rs    WASM MVP binary decoder (opcode + immediate parsing)
+      lower.rs      Lower unsupported ops (MUL, DIV, etc.) to basic sequences
+      interpreter/
+        mod.rs      Interpreter builder (universal + specialized modes)
+        dispatch.rs Circle-point opcode dispatch (r²=32045 geometric hashing)
+        arithmetic.rs  Byte-serial ALU (add, sub, carry propagation)
+        tokens.rs   Input/output token vocabulary construction
   turboquant/      TurboQuant KV cache compression:
     mod.rs          Module root (re-exports)
     types.rs        TurboQuantCodebook, TurboQuantLayer, TurboQuantKVCacheConfig
