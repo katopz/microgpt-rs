@@ -123,8 +123,9 @@ pub mod go;
 
 #[cfg(feature = "go")]
 pub use go::{
-    AutoGoClient, AutoGoError, AutoGoGameState, DEFAULT_KOMI, GoAction, GoCell, GoHeuristic,
-    GoReplay, GoState, MoveRecord, ReplayError,
+    AutoGoClient, AutoGoError, AutoGoGameState, DEFAULT_KOMI, GoAction, GoCell, GoGZeroPlayer,
+    GoGreedyPlayer, GoHLPlayer, GoHeuristic, GoMctsPlayer, GoMoveCategory, GoPlayer,
+    GoRandomPlayer, GoReplay, GoState, GoTemplate, GoValidatorPlayer, MoveRecord, ReplayError,
 };
 
 #[cfg(feature = "fft")]

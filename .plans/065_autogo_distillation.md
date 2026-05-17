@@ -267,7 +267,7 @@ Port `FastGoBoard` (`go.py`) + `GoBoard` (`go_game.h`) to Rust, implementing our
 
 ### Phase 2: Go Player Strategies (Prove HL Thesis on Go)
 
-- [ ] T17: Define `GoPlayer` trait in `src/pruners/go/players.rs` (adapted from `agents/base.py:Agent`):
+- [x] T17: Define `GoPlayer` trait in `src/pruners/go/players.rs` (adapted from `agents/base.py:Agent`):
   ```rust
   /// Go player strategy trait. Matches AutoGo's `agents/base.py:Agent` pattern.
   pub trait GoPlayer {
@@ -275,17 +275,17 @@ Port `FastGoBoard` (`go.py`) + `GoBoard` (`go_game.h`) to Rust, implementing our
       fn name(&self) -> &'static str;
   }
   ```
-- [ ] T18: Implement `GoRandomPlayer` — random legal move (port from `agents/random.py`)
-- [ ] T19: Implement `GoGreedyPlayer` — maximize immediate captures + liberty advantage
-- [ ] T20: Implement `GoValidatorPlayer` — safety rules: no self-atari large groups, maintain 2+ eye potential, avoid filling own territory
-- [ ] T21: Implement `GoHLPlayer` — bandit-driven with Go-specific features:
+- [x] T18: Implement `GoRandomPlayer` — random legal move (port from `agents/random.py`)
+- [x] T19: Implement `GoGreedyPlayer` — maximize immediate captures + liberty advantage
+- [x] T20: Implement `GoValidatorPlayer` — safety rules: no self-atari large groups, maintain 2+ eye potential, avoid filling own territory
+- [x] T21: Implement `GoHLPlayer` — bandit-driven with Go-specific features:
   - Opening moves bandit (corner star points → side → center)
   - Capture/defend heuristic scoring
   - Influence map-based territory estimation
   - Endgame pass timing (pass when all territory secured)
-- [ ] T22: Implement `GoGZeroPlayer` — template proposer + delta bandit (adapt from `pruners/g_zero/`)
-- [ ] T23: Implement `GoMctsPlayer` — wraps `mcts_search::<GoState>()` with configurable budget
-- [ ] T24: Create `examples/go_02_tournament.rs` — all player types, configurable board size, 100 games, print win rates
+- [x] T22: Implement `GoGZeroPlayer` — template proposer + delta bandit (adapt from `pruners/g_zero/`)
+- [x] T23: Implement `GoMctsPlayer` — wraps `mcts_search::<GoState>()` with configurable budget
+- [x] T24: Create `examples/go_02_tournament.rs` — all player types, configurable board size, 100 games, print win rates
 
 ### Phase 3: Head-to-Head Tournament via API (Prove Against AutoGo)
 

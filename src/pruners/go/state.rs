@@ -1220,7 +1220,7 @@ mod tests {
                 } else {
                     let idx = rng.usize(..legal.len());
                     let (r, c) = legal[idx];
-                    let pre_board = state.board.clone();
+                    let _pre_board = state.board.clone();
                     let ok = state.play_move(r, c);
                     assert!(ok);
                     // Invariant: stone was placed (cell was empty, now has current player's color)
