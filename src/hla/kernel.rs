@@ -95,21 +95,11 @@ pub fn hla_state_update(
 
     // Apply decay if needed (γ < 1.0)
     if gamma < 1.0 {
-        for x in sk.iter_mut() {
-            *x *= gamma;
-        }
-        for x in q_head.cqv.iter_mut() {
-            *x *= gamma;
-        }
-        for x in q_head.mq.iter_mut() {
-            *x *= gamma;
-        }
-        for x in q_head.g.iter_mut() {
-            *x *= gamma;
-        }
-        for x in q_head.h.iter_mut() {
-            *x *= gamma;
-        }
+        crate::simd::simd_scale_inplace(sk, gamma);
+        crate::simd::simd_scale_inplace(&mut q_head.cqv, gamma);
+        crate::simd::simd_scale_inplace(&mut q_head.mq, gamma);
+        crate::simd::simd_scale_inplace(&mut q_head.g, gamma);
+        crate::simd::simd_scale_inplace(&mut q_head.h, gamma);
     }
 
     // SK_t += k_t · k_tᵀ (rank-1 update)
@@ -172,18 +162,10 @@ fn hla_per_head_update(
 
     // Step 2: Decay per-head state
     if gamma < 1.0 {
-        for x in q_head.cqv.iter_mut() {
-            *x *= gamma;
-        }
-        for x in q_head.mq.iter_mut() {
-            *x *= gamma;
-        }
-        for x in q_head.g.iter_mut() {
-            *x *= gamma;
-        }
-        for x in q_head.h.iter_mut() {
-            *x *= gamma;
-        }
+        crate::simd::simd_scale_inplace(&mut q_head.cqv, gamma);
+        crate::simd::simd_scale_inplace(&mut q_head.mq, gamma);
+        crate::simd::simd_scale_inplace(&mut q_head.g, gamma);
+        crate::simd::simd_scale_inplace(&mut q_head.h, gamma);
     }
 
     // Step 3: Accumulate per-head state
@@ -228,7 +210,10 @@ pub fn hla_readout(
     debug_assert!(out.len() >= hd);
     debug_assert!(tmp_u.len() >= hd);
 
-    // u = q_tᵀ · SK (1×d matvec)
+    // TODO(T6): u = q_tᵀ · SK is a transpose matvec (SK^T * q with row-major SK).
+    // `simd_matvec` requires row-major * column-vector, so doesn't apply directly.
+    // Could benefit from a `simd_matvec_transpose` kernel or `simd_scalar_fma`.
+    // Kept scalar for now — only hd² ops (256 for hd=16).
     tmp_u[..hd].fill(0.0);
     for i in 0..hd {
         let qi = unsafe { *q.get_unchecked(i) };
@@ -271,7 +256,7 @@ pub fn hla_denom(
     eps: f32,
     tmp_u: &mut [f32],
 ) -> f32 {
-    // u = q_tᵀ · SK
+    // TODO(T6): transpose matvec — see hla_readout comment
     tmp_u[..hd].fill(0.0);
     for i in 0..hd {
         let qi = unsafe { *q.get_unchecked(i) };
@@ -342,24 +327,16 @@ pub fn ahla_step(
 
     // Apply decay if needed (before accumulation)
     if gamma < 1.0 {
-        for x in pkv.iter_mut() {
-            *x *= gamma;
-        }
-        for x in mk.iter_mut() {
-            *x *= gamma;
-        }
-        for x in q_head.e.iter_mut() {
-            *x *= gamma;
-        }
-        for x in q_head.n.iter_mut() {
-            *x *= gamma;
-        }
+        crate::simd::simd_scale_inplace(pkv, gamma);
+        crate::simd::simd_scale_inplace(mk, gamma);
+        crate::simd::simd_scale_inplace(&mut q_head.e, gamma);
+        crate::simd::simd_scale_inplace(&mut q_head.n, gamma);
     }
 
     // PKV_t += k_t · v_tᵀ (rank-1 update)
     simd::simd_outer_product_acc(pkv, k, v, hd, hd);
 
-    // r = q_tᵀ · PKV_t (1×hd matvec)
+    // TODO(T6): transpose matvec — see hla_readout comment
     tmp_r[..hd].fill(0.0);
     for i in 0..hd {
         let qi = unsafe { *q.get_unchecked(i) };
@@ -391,7 +368,7 @@ pub fn ahla_step(
         }
     }
 
-    // Output: o_t = q_tᵀ · E_t (1×hd matvec)
+    // TODO(T6): transpose matvec (E^T * q with row-major E) — see hla_readout comment
     for j in 0..hd {
         let mut val = 0.0f32;
         for i in 0..hd {
@@ -454,9 +431,7 @@ pub fn hla_layer_update(
     for g in 0..n_kv {
         // Decay
         if gamma < 1.0 {
-            for x in layer.sk[g].iter_mut() {
-                *x *= gamma;
-            }
+            crate::simd::simd_scale_inplace(&mut layer.sk[g], gamma);
         }
         // SK[g] += k_g · k_gᵀ
         let k_slice = &k[g * hd..(g + 1) * hd];
@@ -559,15 +534,11 @@ fn ahla_per_head_step(
 ) {
     // Step 1: Decay per-head state
     if gamma < 1.0 {
-        for x in q_head.e.iter_mut() {
-            *x *= gamma;
-        }
-        for x in q_head.n.iter_mut() {
-            *x *= gamma;
-        }
+        crate::simd::simd_scale_inplace(&mut q_head.e, gamma);
+        crate::simd::simd_scale_inplace(&mut q_head.n, gamma);
     }
 
-    // Step 2: Compute r = q_tᵀ · PKV_t (shared, already updated)
+    // TODO(T6): transpose matvec — see hla_readout comment
     tmp_r[..hd].fill(0.0);
     for i in 0..hd {
         let qi = unsafe { *q.get_unchecked(i) };
@@ -592,7 +563,7 @@ fn ahla_per_head_step(
         }
     }
 
-    // Step 6: Readout: o_t = q_tᵀ · E_t
+    // TODO(T6): transpose matvec (E^T * q with row-major E) — see hla_readout comment
     for j in 0..hd {
         let mut val = 0.0f32;
         for i in 0..hd {
@@ -642,12 +613,8 @@ pub fn ahla_layer_step(
     for g in 0..n_kv {
         // Decay
         if gamma < 1.0 {
-            for x in layer.pkv[g].iter_mut() {
-                *x *= gamma;
-            }
-            for x in layer.mk[g].iter_mut() {
-                *x *= gamma;
-            }
+            crate::simd::simd_scale_inplace(&mut layer.pkv[g], gamma);
+            crate::simd::simd_scale_inplace(&mut layer.mk[g], gamma);
         }
         // PKV[g] += k_g · v_gᵀ
         let k_slice = &k[g * hd..(g + 1) * hd];

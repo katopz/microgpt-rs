@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::speculative::verifier::{SimulatedVerifier, SpeculativeVerifier};
 use crate::transformer::TransformerWeights;
 use crate::types::{Config, Rng};
@@ -57,6 +59,7 @@ pub fn speculative_step(
 /// Requires target model forward pass.
 /// **Deprecated**: Prefer `speculative_step_rollback_with` for zero-alloc hot path.
 /// This variant allocates `Vec<f32>` per candidate and is kept for backward compatibility only.
+#[deprecated(note = "Use speculative_step_rollback_with for zero-alloc production path")]
 #[allow(clippy::too_many_arguments)]
 pub fn speculative_step_rollback(
     draft_weights: &TransformerWeights,
@@ -365,6 +368,7 @@ pub fn speculative_step_rollback_with(
 /// verification rollback (only a few candidate paths are verified).
 ///
 /// Falls back to `speculative_step_rollback` behavior when branch budget is exhausted.
+#[deprecated(note = "Use speculative_step_rollback_with for zero-alloc production path")]
 #[allow(clippy::too_many_arguments)]
 pub fn speculative_step_rollback_paged(
     draft_weights: &TransformerWeights,
@@ -613,15 +617,26 @@ pub fn speculative_step_conditioned_with(
 // ---------------------------------------------------------------------------
 /// Extract candidate verification paths from DDTree (top-3 root branches).
 /// Each branch follows the best child at subsequent depths.
+/// Depth-indexed optimization: groups nodes by depth in a single O(N) pass,
+/// replacing O(D×N) repeated `.iter().filter()` scans with O(1) depth lookups.
 fn extract_ddtree_paths(tree: &[crate::speculative::types::TreeNode]) -> Vec<Vec<usize>> {
     if tree.is_empty() {
         return Vec::new();
     }
 
-    let max_depth = tree.iter().map(|n| n.depth).max().unwrap_or(0);
+    // Build depth index: O(N) single pass instead of O(D×N) repeated scans
+    let mut by_depth: HashMap<usize, Vec<&crate::speculative::types::TreeNode>> = HashMap::new();
+    for node in tree.iter() {
+        by_depth.entry(node.depth).or_default().push(node);
+    }
+
+    let max_depth = *by_depth.keys().max().unwrap_or(&0);
 
     // Collect root nodes (depth 0), sorted by score descending
-    let mut roots: Vec<_> = tree.iter().filter(|n| n.depth == 0).collect();
+    let mut roots: Vec<_> = match by_depth.get(&0) {
+        Some(nodes) => nodes.clone(),
+        None => return Vec::new(),
+    };
     roots.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
@@ -636,10 +651,13 @@ fn extract_ddtree_paths(tree: &[crate::speculative::types::TreeNode]) -> Vec<Vec
         let mut current_path = root.parent_path;
 
         for depth in 1..=max_depth {
-            let child = tree
-                .iter()
-                .filter(|n| n.depth == depth && n.parent_path >> 16 == current_path)
-                .max_by_key(|n| (n.score * 1e6) as i64);
+            let child = match by_depth.get(&depth) {
+                Some(nodes) => nodes
+                    .iter()
+                    .filter(|n| n.parent_path >> 16 == current_path)
+                    .max_by_key(|n| (n.score * 1e6) as i64),
+                None => break,
+            };
 
             match child {
                 Some(node) => {
@@ -774,6 +792,7 @@ mod tests {
 
     // ── Leviathan: Rollback + Conditioned Draft Tests ─────────────
 
+    #[allow(deprecated)]
     #[test]
     fn test_speculative_step_rollback_returns_at_least_one() {
         let target_config = Config::micro();
@@ -805,6 +824,7 @@ mod tests {
         }
     }
 
+    #[allow(deprecated)]
     #[test]
     fn test_speculative_step_rollback_deterministic() {
         let target_config = Config::micro();
@@ -988,6 +1008,7 @@ mod tests {
         }
     }
 
+    #[allow(deprecated)]
     #[test]
     fn test_speculative_step_rollback_paged_returns_at_least_one() {
         let target_config = Config::micro();
@@ -1023,6 +1044,7 @@ mod tests {
         }
     }
 
+    #[allow(deprecated)]
     #[test]
     fn test_speculative_step_rollback_paged_deterministic() {
         let target_config = Config::micro();
@@ -1076,6 +1098,7 @@ mod tests {
         assert_eq!(l1, l2);
     }
 
+    #[allow(deprecated)]
     #[test]
     fn test_speculative_step_rollback_paged_matches_flat_results() {
         // Both paged and flat should produce at least 1 valid token

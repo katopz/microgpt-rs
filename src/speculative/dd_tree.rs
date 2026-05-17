@@ -1,4 +1,4 @@
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 
 #[cfg(test)]
 use super::types::BinaryScreeningPruner;
@@ -166,17 +166,26 @@ pub fn build_dd_tree_balanced(
 
 /// Zero-alloc variant of `extract_best_path`.
 /// Writes best-scored token at each depth into `path` (cleared first).
+/// Depth-indexed optimization: groups nodes by depth in a single O(N) pass,
+/// replacing O(D×N) repeated `.iter().filter()` scans with O(1) depth lookups.
 pub fn extract_best_path_into(tree: &[TreeNode], path: &mut Vec<usize>) {
     path.clear();
     if tree.is_empty() {
         return;
     }
-    let max_depth = tree.iter().map(|n| n.depth).max().unwrap_or(0);
+
+    // Build depth index: O(N) single pass
+    let mut by_depth: HashMap<usize, Vec<&TreeNode>> = HashMap::new();
+    for node in tree.iter() {
+        by_depth.entry(node.depth).or_default().push(node);
+    }
+
+    let max_depth = *by_depth.keys().max().unwrap_or(&0);
     for depth in 0..=max_depth {
-        let best = tree
-            .iter()
-            .filter(|n| n.depth == depth)
-            .max_by_key(|n| (n.score * 1e6) as i64);
+        let best = match by_depth.get(&depth) {
+            Some(nodes) => nodes.iter().max_by_key(|n| (n.score * 1e6) as i64),
+            None => break,
+        };
         match best {
             Some(node) => path.push(node.token_idx),
             None => break,
@@ -185,17 +194,26 @@ pub fn extract_best_path_into(tree: &[TreeNode], path: &mut Vec<usize>) {
 }
 
 /// Extract best-scored token at each depth from a DDTree.
+/// Depth-indexed optimization: groups nodes by depth in a single O(N) pass,
+/// replacing O(D×N) repeated `.iter().filter()` scans with O(1) depth lookups.
 pub fn extract_best_path(tree: &[TreeNode]) -> Vec<usize> {
     if tree.is_empty() {
         return Vec::new();
     }
-    let max_depth = tree.iter().map(|n| n.depth).max().unwrap_or(0);
+
+    // Build depth index: O(N) single pass
+    let mut by_depth: HashMap<usize, Vec<&TreeNode>> = HashMap::new();
+    for node in tree.iter() {
+        by_depth.entry(node.depth).or_default().push(node);
+    }
+
+    let max_depth = *by_depth.keys().max().unwrap_or(&0);
     let mut path = Vec::with_capacity(max_depth + 1);
     for depth in 0..=max_depth {
-        let best = tree
-            .iter()
-            .filter(|n| n.depth == depth)
-            .max_by_key(|n| (n.score * 1e6) as i64);
+        let best = match by_depth.get(&depth) {
+            Some(nodes) => nodes.iter().max_by_key(|n| (n.score * 1e6) as i64),
+            None => break,
+        };
         match best {
             Some(node) => path.push(node.token_idx),
             None => break,

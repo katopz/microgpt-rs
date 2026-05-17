@@ -125,9 +125,10 @@ pub fn attention_turboquant(
 ///
 /// Measures reconstruction fidelity of the quantize→dequantize round-trip.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let len = a.len();
+    let dot = crate::simd::simd_dot_f32(a, b, len);
+    let na = crate::simd::simd_dot_f32(a, a, len).sqrt();
+    let nb = crate::simd::simd_dot_f32(b, b, len).sqrt();
     if na < 1e-8 || nb < 1e-8 {
         return 0.0;
     }

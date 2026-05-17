@@ -573,9 +573,7 @@ pub fn softmax(x: &mut [f32]) {
 
     // Pass 3: normalize
     let inv_sum = 1.0 / sum;
-    for val in x.iter_mut() {
-        *val *= inv_sum;
-    }
+    crate::simd::simd_scale_inplace(x, inv_sum);
 }
 
 /// In-place softmax with temperature scaling: `softmax(x / temperature)`.
@@ -612,9 +610,7 @@ pub fn softmax_scaled(x: &mut [f32], inv_temp: f32) {
 
     // Pass 3: normalize
     let inv_sum = 1.0 / sum;
-    for val in x.iter_mut() {
-        *val *= inv_sum;
-    }
+    crate::simd::simd_scale_inplace(x, inv_sum);
 }
 
 /// In-place RMSNorm (no learnable gain).
@@ -630,9 +626,7 @@ pub fn rmsnorm(x: &mut [f32]) {
 
     // Pass 2: scale
     let inv_rms = 1.0 / (sum_sq / x.len() as f32 + 1e-5).sqrt();
-    for val in x.iter_mut() {
-        *val *= inv_rms;
-    }
+    crate::simd::simd_scale_inplace(x, inv_rms);
 }
 
 /// Matrix-vector multiply: output = weight @ input.

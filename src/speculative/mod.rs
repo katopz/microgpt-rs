@@ -40,6 +40,7 @@ pub use verifier::{SimulatedVerifier, SpeculativeVerifier};
 
 pub use verifier::LeviathanVerifier;
 
+#[allow(deprecated)]
 pub use step::{
     speculative_step_conditioned, speculative_step_conditioned_with, speculative_step_rollback,
     speculative_step_rollback_with,

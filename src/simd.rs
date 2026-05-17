@@ -542,6 +542,90 @@ pub fn simd_sparse_matmul_rows(
     }
 }
 
+// ── Scale Inplace ─────────────────────────────────────────────
+
+/// SIMD-accelerated in-place scale: `x[i] *= scale` for all `i`.
+///
+/// General utility for softmax normalize, rmsnorm scale, HLA decay,
+/// TurboQuant normalize, and any bulk `*= scale` pattern.
+///
+/// NEON: 4× f32 per op. AVX2: 8× f32 per op. Scalar fallback for remainder.
+#[inline]
+pub fn simd_scale_inplace(x: &mut [f32], scale: f32) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { neon_scale_inplace(x, scale) }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_avx2_fma_available() {
+            unsafe { avx2_scale_inplace(x, scale) }
+        } else {
+            scalar_scale_inplace(x, scale)
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        scalar_scale_inplace(x, scale)
+    }
+}
+
+#[inline]
+#[allow(dead_code)]
+fn scalar_scale_inplace(x: &mut [f32], scale: f32) {
+    for val in x.iter_mut() {
+        *val *= scale;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn neon_scale_inplace(x: &mut [f32], scale: f32) {
+    use core::arch::aarch64::{vdupq_n_f32, vld1q_f32, vmulq_f32, vst1q_f32};
+
+    unsafe {
+        let vs = vdupq_n_f32(scale);
+        let mut i = 0;
+        let chunks = x.len() / 4;
+
+        for _ in 0..chunks {
+            let vx = vld1q_f32(x.as_ptr().add(i));
+            let result = vmulq_f32(vx, vs);
+            vst1q_f32(x.as_mut_ptr().add(i), result);
+            i += 4;
+        }
+
+        while i < x.len() {
+            *x.get_unchecked_mut(i) *= scale;
+            i += 1;
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn avx2_scale_inplace(x: &mut [f32], scale: f32) {
+    use core::arch::x86_64::{_mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_storeu_ps};
+
+    unsafe {
+        let vs = _mm256_set1_ps(scale);
+        let mut i = 0;
+        let chunks = x.len() / 8;
+
+        for _ in 0..chunks {
+            let vx = _mm256_loadu_ps(x.as_ptr().add(i));
+            let result = _mm256_mul_ps(vx, vs);
+            _mm256_storeu_ps(x.as_mut_ptr().add(i), result);
+            i += 8;
+        }
+
+        while i < x.len() {
+            *x.get_unchecked_mut(i) *= scale;
+            i += 1;
+        }
+    }
+}
+
 // ── x86_64 Horizontal Sum Helpers ─────────────────────────────
 
 #[cfg(target_arch = "x86_64")]
@@ -953,6 +1037,68 @@ mod tests {
                 "row {r}: scalar={}, simd={}",
                 output_scalar[r],
                 output_simd[r]
+            );
+        }
+    }
+
+    // ── simd_scale_inplace tests ──────────────────────────────
+
+    #[test]
+    fn scale_aligned_len_8() {
+        let mut x = [2.0f32, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
+        simd_scale_inplace(&mut x, 0.5);
+        let expected = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        for i in 0..8 {
+            assert!((x[i] - expected[i]).abs() < 1e-6, "x[{i}]={}", x[i]);
+        }
+    }
+
+    #[test]
+    fn scale_non_aligned_len_13() {
+        let mut x = [1.0f32; 13];
+        simd_scale_inplace(&mut x, 3.0);
+        for i in 0..13 {
+            assert!((x[i] - 3.0).abs() < 1e-6, "x[{i}]={}", x[i]);
+        }
+    }
+
+    #[test]
+    fn scale_empty() {
+        let mut x: [f32; 0] = [];
+        simd_scale_inplace(&mut x, 2.0); // should not panic
+    }
+
+    #[test]
+    fn scale_single_element() {
+        let mut x = [5.0f32];
+        simd_scale_inplace(&mut x, 0.2);
+        assert!((x[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn scale_zero() {
+        let mut x = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        simd_scale_inplace(&mut x, 0.0);
+        for val in &x {
+            assert!(*val == 0.0, "expected 0.0, got {val}");
+        }
+    }
+
+    #[test]
+    fn scale_matches_scalar() {
+        let mut x_simd: Vec<f32> = (0..97).map(|i| (i as f32 * 0.1).sin()).collect();
+        let mut x_scalar = x_simd.clone();
+        let scale = 0.42f32;
+
+        simd_scale_inplace(&mut x_simd, scale);
+        scalar_scale_inplace(&mut x_scalar, scale);
+
+        for i in 0..x_simd.len() {
+            assert!(
+                (x_simd[i] - x_scalar[i]).abs() < 1e-6,
+                "x[{i}]: simd={}, scalar={}",
+                x_simd[i],
+                x_scalar[i]
             );
         }
     }

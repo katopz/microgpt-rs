@@ -1,6 +1,6 @@
 # Issue 058: Hot-Path SIMD Scale + Zero-Alloc Audit (Issue 057 Follow-up)
 
-## Status: OPEN
+## Status: CLOSED
 
 ## Summary
 
@@ -213,10 +213,11 @@ Same pattern in `extract_best_path` (`dd_tree.rs`) — O(D × N) per depth.
 - `src/turboquant/forward.rs` ~L128-134 — replace scalar `a.iter().zip(b).map(|(x,y)| x*y).sum()`
 - Also replace scalar norm computation with `simd_dot_f32(a, a, len).sqrt()`
 
-### T8: Fuse forward_prefill Phase A+B embedding (C1)
+### T8: Fuse forward_prefill Phase A+B embedding (C1) ✅
 - For single-layer: compute embedding once, reuse across phases
 - For multi-layer: store pre-rmsnorm hidden state to avoid recomputation
 - Measure impact on prefill latency with `bench_prefill_compression`
+- **Done**: Fused K/V/Q projections into single Phase A pass, storing Q + xr in `PrefillContext::queries`/`PrefillContext::residuals`. Phase B loads pre-computed values, eliminating redundant hidden load + double rmsnorm + Q matmul per position. Bit-identical output verified (547 tests pass).
 
 ### T9: Optimize `extract_ddtree_paths` + `extract_best_path` (D2)
 - Pre-index tree nodes by depth: `[Vec<&TreeNode>; MAX_DEPTH]` built in O(N)
@@ -407,14 +408,14 @@ fn bench_turboquant_matvec() {
 | HLA readout qᵀ·SK | scalar hd² matvec | SIMD matvec | `simd_matvec` |
 | cosine_similarity | scalar dot+norm | SIMD dot | `simd_dot_f32` |
 | extract_ddtree_paths | O(3×5×64)=960 scans | O(64) index + O(15) lookup | depth-indexed array |
-| forward_prefill | 2× embedding per token | 1× + reuse | fused Phase A+B |
+| forward_prefill | 2× embedding per token | 1× + reuse | fused Phase A+B ✅ |
 
 ## Priority Order
 
 1. **T1-T4** (simd_scale_inplace) — highest impact, simplest, general utility
 2. **T9** (extract_ddtree_paths) — algorithmic win, easy to verify
 3. **T5-T6** (SIMD matmul) — moderate impact, more code to change
-4. **T8** (prefill fusion) — algorithmic win, but only affects prefill path
+4. ~~**T8** (prefill fusion) — done: fused Phase A+B, Q + xr cached~~
 5. **T7** (cosine_similarity) — trivial, low priority (validation-only)
 6. **T10** (deprecation) — documentation only
 

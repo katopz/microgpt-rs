@@ -301,6 +301,12 @@ pub struct PrefillContext {
     /// Size: [max_prompt_len × n_embd]. Only used when n_layer > 1.
     /// For n_layer == 1, embeddings are computed on-the-fly and this buffer is unused.
     hidden: Vec<f32>,
+    /// Pre-computed Q projections from fused Phase A, reused in Phase B.
+    /// Size: [max_prompt_len × n_embd]. Eliminates redundant hidden load + rmsnorm + Q matmul.
+    queries: Vec<f32>,
+    /// Pre-computed attention residuals (xr) from fused Phase A, reused in Phase B.
+    /// Size: [max_prompt_len × n_embd]. Eliminates redundant hidden load + first rmsnorm.
+    residuals: Vec<f32>,
     /// LoRA intermediate buffer. Size: [lora_rank].
     /// Reused for every LoRA application across all projections.
     lora_buf: Vec<f32>,
@@ -310,8 +316,11 @@ pub struct PrefillContext {
 
 impl PrefillContext {
     pub fn new(config: &Config) -> Self {
+        let block_embd = config.block_size * config.n_embd;
         Self {
-            hidden: vec![0.0; config.block_size * config.n_embd],
+            hidden: vec![0.0; block_embd],
+            queries: vec![0.0; block_embd],
+            residuals: vec![0.0; block_embd],
             lora_buf: vec![0.0; config.lora_rank],
             max_prompt_len: config.block_size,
         }
@@ -1150,33 +1159,45 @@ pub fn forward_prefill<'a>(
                     kvd,
                 );
             }
-        }
 
-        // ── Phase B: Bidirectional attention for ALL positions ──
-        for (p, &token) in tokens.iter().enumerate().take(prompt_len) {
-            // Load hidden state again (same source as Phase A)
-            if config.n_layer > 1 {
-                ctx.x[..n].copy_from_slice(&prefill.hidden[p * n..(p + 1) * n]);
-            } else {
-                let tok_off = token * n;
-                let pos_off = p * n;
-                for i in 0..n {
-                    unsafe {
-                        *ctx.x.get_unchecked_mut(i) = *weights.wte.get_unchecked(tok_off + i)
-                            + *weights.wpe.get_unchecked(pos_off + i);
-                    }
-                }
-            }
-
-            // Pre-attention norm
-            crate::types::rmsnorm(&mut ctx.x);
-            ctx.xr[..n].copy_from_slice(&ctx.x[..n]);
-            crate::types::rmsnorm(&mut ctx.x);
-
-            // Q projection
+            // Q projection (fused: avoids redundant hidden load + rmsnorm in Phase B)
             crate::types::matmul(&mut ctx.q, &layer_weights.attn_wq, &ctx.x, n, n);
             if let Some(lora) = lora {
                 crate::types::lora_apply(&mut ctx.q, lora, &ctx.x, &mut prefill.lora_buf);
+            }
+
+            // Store Q and xr for Phase B reuse
+            let q_off = p * n;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    ctx.q.as_ptr(),
+                    prefill.queries.as_mut_ptr().add(q_off),
+                    n,
+                );
+                std::ptr::copy_nonoverlapping(
+                    ctx.xr.as_ptr(),
+                    prefill.residuals.as_mut_ptr().add(q_off),
+                    n,
+                );
+            }
+        }
+
+        // ── Phase B: Bidirectional attention for ALL positions ──
+        // Loads pre-computed Q and xr from fused Phase A, skipping redundant
+        // hidden state load + double rmsnorm + Q matmul per position.
+        for p in 0..prompt_len {
+            let q_off = p * n;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    prefill.queries.as_ptr().add(q_off),
+                    ctx.q.as_mut_ptr(),
+                    n,
+                );
+                std::ptr::copy_nonoverlapping(
+                    prefill.residuals.as_ptr().add(q_off),
+                    ctx.xr.as_mut_ptr(),
+                    n,
+                );
             }
 
             // Bidirectional attention: t_n = prompt_len (full prompt range)

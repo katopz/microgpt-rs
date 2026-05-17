@@ -8,6 +8,7 @@
 use super::codebook::compute_codebook;
 use super::rotation::{generate_qjl_matrix, generate_rotation_matrix};
 use super::types::{TurboQuantKVCacheConfig, TurboQuantLayer};
+use crate::simd::simd_scale_inplace;
 use crate::types;
 
 /// Compressed KV cache using TurboQuant quantization.
@@ -143,13 +144,10 @@ impl TurboQuantKVCache {
             return;
         }
 
-        // Normalize in-place into scratch buffer
+        // Normalize into scratch buffer (copy + SIMD scale)
         let inv_norm = 1.0 / norm;
-        for (i, &v) in key.iter().enumerate() {
-            unsafe {
-                *self.scratch_normalized.get_unchecked_mut(i) = v * inv_norm;
-            }
-        }
+        self.scratch_normalized[..key.len()].copy_from_slice(key);
+        simd_scale_inplace(&mut self.scratch_normalized, inv_norm);
 
         // Rotate in-place: R * normalized → scratch_rotated
         mat_vec_into(
@@ -186,13 +184,10 @@ impl TurboQuantKVCache {
             return;
         }
 
-        // Normalize in-place into scratch buffer
+        // Normalize into scratch buffer (copy + SIMD scale)
         let inv_norm = 1.0 / norm;
-        for (i, &v) in value.iter().enumerate() {
-            unsafe {
-                *self.scratch_normalized.get_unchecked_mut(i) = v * inv_norm;
-            }
-        }
+        self.scratch_normalized[..value.len()].copy_from_slice(value);
+        simd_scale_inplace(&mut self.scratch_normalized, inv_norm);
 
         // Rotate in-place: R * normalized → scratch_rotated
         mat_vec_into(
@@ -290,12 +285,9 @@ impl TurboQuantKVCache {
             &mut self.scratch_normalized,
         );
 
-        // Scale by norm → output
-        for (i, out_val) in out.iter_mut().enumerate() {
-            unsafe {
-                *out_val = *self.scratch_normalized.get_unchecked(i) * norm;
-            }
-        }
+        // Scale by norm → output (copy + SIMD scale)
+        out.copy_from_slice(&self.scratch_normalized);
+        simd_scale_inplace(out, norm);
     }
 
     /// Dequantize value into pre-allocated buffer. Zero-alloc hot path (Plan 051).
@@ -335,12 +327,9 @@ impl TurboQuantKVCache {
             &mut self.scratch_normalized,
         );
 
-        // Scale by norm → output
-        for (i, out_val) in out.iter_mut().enumerate() {
-            unsafe {
-                *out_val = *self.scratch_normalized.get_unchecked(i) * norm;
-            }
-        }
+        // Scale by norm → output (copy + SIMD scale)
+        out.copy_from_slice(&self.scratch_normalized);
+        simd_scale_inplace(out, norm);
     }
 
     /// Reset cache for new sequence.
@@ -402,16 +391,7 @@ fn mat_vec(m: &[f32], v: &[f32]) -> Vec<f32> {
 fn mat_vec_into(m: &[f32], v: &[f32], out: &mut [f32]) {
     let dim = v.len();
     debug_assert_eq!(out.len(), dim);
-    for (i, out_val) in out.iter_mut().enumerate() {
-        let mut sum = 0.0f32;
-        let row_off = i * dim;
-        for j in 0..dim {
-            unsafe {
-                sum += *m.get_unchecked(row_off + j) * *v.get_unchecked(j);
-            }
-        }
-        *out_val = sum;
-    }
+    crate::simd::simd_matmul_rows(out, m, v, dim, dim);
 }
 
 /// Transpose matrix-vector multiply: result = M^T * v (M is dim×dim row-major).
@@ -423,6 +403,8 @@ fn mat_vec_t(m: &[f32], v: &[f32]) -> Vec<f32> {
 }
 
 /// In-place transpose matrix-vector multiply: out = M^T * v (zero-alloc, Plan 051).
+///
+/// TODO: Replace with SIMD transpose matmul once available in `crate::simd`.
 fn mat_vec_t_into(m: &[f32], v: &[f32], out: &mut [f32]) {
     let dim = v.len();
     debug_assert_eq!(out.len(), dim);
