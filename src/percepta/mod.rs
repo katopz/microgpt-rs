@@ -86,6 +86,10 @@ pub mod evaluator;
 #[cfg(feature = "percepta_compile")]
 pub mod runner;
 
+/// C → WASM → dispatch table → token prefix compile pipeline.
+#[cfg(feature = "percepta_compile")]
+pub mod compile;
+
 // ── Re-exports from legacy (always available) ──────────────────
 
 pub use legacy::{KVCache2D, SolveEvent, StreamingSolver, Sudoku9x9, SymbolicValidator, Vec2};
@@ -161,3 +165,12 @@ pub use evaluator::{EvalError, GraphEvaluator};
 
 #[cfg(feature = "percepta_compile")]
 pub use runner::{BuildResult, Runner, RunnerError};
+
+// ── Re-exports from compile (feature-gated) ───────────────────
+
+#[cfg(feature = "percepta_compile")]
+pub use compile::{
+    CompileError, CompiledProgram, RUNTIME_H, compile_c_to_wasm, compile_program,
+    compile_wasm_to_prefix, find_clang, format_input_section, format_prefix, format_spec_input,
+    int_to_bytes, write_runtime_h,
+};

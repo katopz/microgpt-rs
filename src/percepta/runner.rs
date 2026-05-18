@@ -29,6 +29,7 @@
 
 use std::collections::HashMap;
 
+use crate::percepta::compile::{self, CompileError, CompiledProgram};
 use crate::percepta::evaluator::{EvalError, GraphEvaluator};
 use crate::percepta::graph::types::{Expression, GraphBuilder, ProgramGraph};
 use crate::percepta::scheduler::{Schedule, ScheduleError, milp_schedule};
@@ -47,7 +48,7 @@ pub enum RunnerError {
     ScheduleError(ScheduleError),
     /// Error during graph evaluation.
     EvalError(EvalError),
-    /// Error during compilation (e.g., clang not found).
+    /// Error during compilation (e.g., clang not found, WASM decode failure).
     CompileError(String),
     /// Error during weight construction.
     WeightError(String),
@@ -81,6 +82,12 @@ impl From<ScheduleError> for RunnerError {
 impl From<EvalError> for RunnerError {
     fn from(e: EvalError) -> Self {
         Self::EvalError(e)
+    }
+}
+
+impl From<CompileError> for RunnerError {
+    fn from(e: CompileError) -> Self {
+        Self::CompileError(format!("{e}"))
     }
 }
 
@@ -118,19 +125,57 @@ impl Runner {
 
     /// Compile C source to WASM token prefix.
     ///
-    /// This stage requires `clang` to be installed and the C runtime header
-    /// (`runtime.h`) to be available. The pipeline:
-    /// 1. Compile C source to WASM via clang
+    /// This stage requires `clang` with wasm32 target support. The pipeline:
+    /// 1. Compile C source to WASM via clang (with embedded `runtime.h`)
     /// 2. Decode WASM binary to instructions
     /// 3. Lower unsupported ops (MUL, DIV, etc.)
-    /// 4. Convert to token prefix
+    /// 4. Convert to flat dispatch table
+    /// 5. Format as token prefix string
     ///
-    /// **Note:** This is not yet implemented. For now, provide pre-compiled
-    /// WASM bytes or token prefixes directly.
-    pub fn compile(_source: &str) -> Result<Vec<String>, RunnerError> {
-        Err(RunnerError::NotImplemented(
-            "compile pipeline requires clang; provide pre-compiled WASM or token prefix".into(),
-        ))
+    /// # Arguments
+    /// * `source` — C source code (must define `void compute(const char *input)`)
+    ///
+    /// # Returns
+    /// The compiled program with dispatch table, prefix string, and input base.
+    pub fn compile(source: &str) -> Result<CompiledProgram, RunnerError> {
+        compile::compile_program(source, "").map_err(Into::into)
+    }
+
+    /// Compile C source with input data to WASM token prefix.
+    ///
+    /// Like [`compile`](Self::compile), but also formats the input section
+    /// for programs that read from `input`.
+    ///
+    /// # Arguments
+    /// * `source` — C source code
+    /// * `input_str` — Input string to pass to the program
+    pub fn compile_with_input(
+        source: &str,
+        input_str: &str,
+    ) -> Result<CompiledProgram, RunnerError> {
+        compile::compile_program(source, input_str).map_err(Into::into)
+    }
+
+    /// Compile pre-built WASM bytes to token prefix.
+    ///
+    /// Skips the C→WASM step. Use this when you already have a `.wasm` binary
+    /// (e.g., compiled externally or from a file).
+    ///
+    /// # Arguments
+    /// * `wasm_bytes` — Raw WASM binary data
+    pub fn compile_wasm(wasm_bytes: &[u8]) -> Result<CompiledProgram, RunnerError> {
+        compile::compile_wasm_to_prefix(wasm_bytes).map_err(Into::into)
+    }
+
+    /// Compile C source to token prefix strings only.
+    ///
+    /// Convenience wrapper that returns just the prefix and input section strings.
+    pub fn compile_to_prefix(
+        source: &str,
+        input_str: &str,
+    ) -> Result<(String, String), RunnerError> {
+        let compiled = compile::compile_program(source, input_str)?;
+        Ok((compiled.prefix.clone(), compiled.input_section.clone()))
     }
 
     // ── Build Pipeline ─────────────────────────────────────────
@@ -422,15 +467,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_runner_compile_not_implemented() {
-        let result = Runner::compile("int main() { return 0; }");
+    fn test_runner_compile_error_on_invalid_source() {
+        // Invalid C source should fail with CompileError
+        let result = Runner::compile("this is not valid C");
         assert!(result.is_err());
         match result.unwrap_err() {
-            RunnerError::NotImplemented(msg) => {
-                assert!(msg.contains("clang"));
+            RunnerError::CompileError(msg) => {
+                // Could be clang not found or clang compilation failure
+                assert!(!msg.is_empty());
             }
-            other => panic!("expected NotImplemented, got {other:?}"),
+            other => panic!("expected CompileError, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_runner_compile_wasm_with_valid_binary() {
+        // Minimal valid WASM binary with compute export
+        let wasm_bytes: Vec<u8> = vec![
+            // Magic + version
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // Type section: func() -> ()
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // Import section: output_byte
+            0x02, 0x13, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x0b, 0x6f, 0x75, 0x74, 0x70, 0x75, 0x74,
+            0x5f, 0x62, 0x79, 0x74, 0x65, 0x00, 0x00,
+            // Function section: 1 function type 0
+            0x03, 0x02, 0x01, 0x00, // Global section: __heap_base = 65536
+            0x06, 0x08, 0x01, 0x7f, 0x00, 0x41, 0x80, 0x80, 0x04, 0x0b,
+            // Export section: compute func 1, __heap_base global 0
+            0x07, 0x19, 0x02, 0x07, 0x63, 0x6f, 0x6d, 0x70, 0x75, 0x74, 0x65, 0x00, 0x01, 0x0b,
+            0x5f, 0x5f, 0x68, 0x65, 0x61, 0x70, 0x5f, 0x62, 0x61, 0x73, 0x65, 0x03, 0x00,
+            // Code section: i32.const 72, call output_byte, end
+            0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x48, 0x10, 0x00, 0x0b,
+        ];
+
+        let result = Runner::compile_wasm(&wasm_bytes);
+        assert!(result.is_ok(), "compile_wasm failed: {:?}", result.err());
+
+        let compiled = result.unwrap();
+        assert!(compiled.prefix.starts_with("{\n"));
+        assert!(compiled.prefix.ends_with("}\n"));
+        assert!(compiled.program.iter().any(|(op, _)| op == "output"));
+        assert!(compiled.program.iter().any(|(op, _)| op == "halt"));
+    }
+
+    #[test]
+    fn test_runner_compile_wasm_with_invalid_binary() {
+        let result = Runner::compile_wasm(&[0x00, 0x01, 0x02]);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -479,6 +561,12 @@ mod tests {
 
         let err = RunnerError::NotImplemented("feature".into());
         assert_eq!(format!("{err}"), "not implemented: feature");
+
+        let err = RunnerError::InvalidPrefix("empty".into());
+        assert_eq!(format!("{err}"), "invalid prefix: empty");
+
+        let err = RunnerError::WeightError("bad weights".into());
+        assert_eq!(format!("{err}"), "weight error: bad weights");
     }
 
     #[test]

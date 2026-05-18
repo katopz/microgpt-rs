@@ -4,8 +4,8 @@ Five production techniques that adapt the transformer to different tasks and dom
 
 | # | Technique | Plan | Feature Flag | What It Does |
 |---|-----------|------|-------------|--------------|
-| 1 | Bidirectional Prefill | 025 | `router` | Prompt tokens attend to ALL others during prefill |
-| 2 | Modality LoRA Switching | 025 | `router` | reader→writer LoRA swap at prefill→decode boundary |
+| 1 | Bidirectional Prefill | 025 | — | Prompt tokens attend to ALL others during prefill |
+| 2 | Modality LoRA Switching | 025 | — | reader→writer LoRA swap at prefill→decode boundary |
 | 3 | Sparse MLP (TwELL) | 022 | `sparse_mlp` | Skip dead ReLU neurons, O(alive) FLOPs |
 | 4 | Domain Latent Injection | 038 | `domain_latent` | Mid-layer K/V conditioning per domain |
 | 5 | HLA Streaming Attention | 057/060 | `hla_attention` | O(1) constant-state attention, SIMD-accelerated |
@@ -452,8 +452,8 @@ The five techniques compose without conflicts:
 
 | Technique | Affects Prefill | Affects Decode | Feature Flag |
 |-----------|:-:|:-:|-------------|
-| Bidirectional Prefill | ✅ full attention | — | `router` |
-| LoRA Switching | ✅ reader_lora | ✅ writer_lora | `router` |
+| Bidirectional Prefill | ✅ full attention | — | — |
+| LoRA Switching | ✅ reader_lora | ✅ writer_lora | — |
 | Sparse MLP | ✅ (if enabled) | ✅ (if enabled) | `sparse_mlp` |
 | Domain Latent | ✅ K/V at L/2 | ✅ K/V at L/2 | `domain_latent` |
 | HLA Streaming | — | ✅ replaces KV cache | `hla_attention` |

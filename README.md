@@ -226,6 +226,7 @@ src/percepta/
 ├── specialize.rs       — First Futamura projection (program → specialized weights)
 ├── evaluator.rs        — Graph evaluator with exact arithmetic (no weights needed)
 ├── runner.rs           — Pipeline runner: compile → build → run → evaluate
+├── compile.rs          — C source → WASM → lowered bytecode → token prefix (percepta_compile)
 ├── legacy.rs           — KVCache2D (Graham Scan) — kept for regression testing
 ├── graph/
 │   ├── mod.rs          — Graph module index + re-exports
@@ -957,11 +958,13 @@ cargo clippy --all-targets --all-features --quiet
 | `sudoku` | SudokuPruner constraint pruning + examples |
 | `validator` | SynPruner + partial parser (BPE tokenizer, `syn` AST) |
 | `sparse_mlp` | TwELL-inspired sparse MLP matmul (Plan 022) |
+| `sp_kv` | SP-KV self-pruned key-value attention with learned utility predictor (Plan 070) |
 | `ppot` | PPoT logit-parameterized CPU resampling + adaptive rescue (Plan 026) |
 | `domain_latent` | Mid-layer domain conditioning (Plan 038) |
 | `bandit` | Multi-armed bandit + HL infrastructure (TrialLog, AbsorbCompress, HotSwapPruner) |
 | `bomber` | Bomberman HL arena (bevy_ecs + bandit, Plan 033) |
 | `bomber-wasm` | WASM bomber validator loader (bomber + wasmtime + papaya, Plan 034) |
+| `bomber-agent` | Coding agent validator loop (bomber, Issue 052) |
 | `game_state` | GameState forward model trait + generic MCTS (bomber + Plan 056) |
 | `bandit_mcts` | Bandit-guided MCTS rollout policy — NFSP/MCTS duality (game_state + Plan 067) |
 | `monopoly` | Monopoly FSM arena (bevy_ecs + bandit, Plan 035) |
@@ -979,10 +982,11 @@ cargo clippy --all-targets --all-features --quiet
 | `language_domain` | Language domain: BPE vocab, LLM models (Plan 040, future) |
 | `delta_mem` | δ-Mem associative bandit memory — infrastructure only, no DDTree gain (Plan 053, off by default) |
 | `g_zero` | G-Zero self-play + FFT arena + Bomber arena + TFT party AI (Plans 049–055). Phase 1 (modelless) + Phase 2 (GRPO/DPO in `riir-gpu`, Plan 059 ✅) |
+| `go` | Go GameState + AutoGo API bridge + tournament + G-Zero self-play + AutoResearch (bandit + reqwest, Plan 065) |
 | `fft` | FFT Tactics Arena — ATB battle engine with status effects (Plan 053) |
 | `stepcode` | ⚠️ Plan 054 — NO GAIN proven. Infrastructure only. Off by default, not in `full` |
 | `dllm` | D2F Discrete Diffusion Forcing — mini dLLM + block-parallel decode (Plan 066) |
-| `full` | Enable all features (excludes `stepcode`) |
+| `full` | Enable all features (excludes `stepcode`, `sp_kv`) |
 
 > **Default features trade-off:** `default = ["sparse_mlp", "domain_latent", "ppot", "bandit"]` targets production accuracy + sparsity. `g_zero` is bench-only (Plan 049: Phase 1 ✅ T5 benchmarked, Phase 2 ✅ Plan 059 GRPO/DPO in `riir-gpu`) — run bench with `--features "g_zero,bomber"` to include heuristic learning. `g_zero` does NOT touch `forward()` hot path (zero hits in `transformer.rs`). Active features are logged in `bench/*_results.csv` and `bench/timeseries.csv` for regression tracking across feature-gate changes.
 
@@ -1004,6 +1008,8 @@ src/
     step.rs         High-level step functions (speculative, rollback, conditioned)
     prefill.rs      Speculative prefill scoring + prompt compression
     sampling.rs     Temperature, top-k, top-p sampling strategies
+    d2f.rs          D2F Discrete Diffusion Forcing — block-parallel denoising (behind "dllm" feature)
+    flow_pruner.rs  GFlowNet stop-probability regularization
     ppot/           PPoT CPU resampling:
       mod.rs         Module root
       entropy.rs     Entropy-based sampling
@@ -1024,11 +1030,21 @@ src/
     dungeon_pathfinder.rs  Dungeon pathfinder
     map_generator.rs    Procedural map generation
     pathfinder.rs      A* pathfinding
+    stepcode.rs     Path shaping + consistency scoring (Plan 054, NO GAIN)
+    delta_mem/      δ-Mem modelless distillation (Plan 053):
+      mod.rs        Module root
+      hash.rs       FeatureHasher, ContextFeatures, OutcomeFeatures
+      state.rs      DeltaMemoryConfig, DeltaMemoryState, DeltaMemorySnapshot
+      pruner.rs     CorrectionMode, WriteGranularity, MemorySteeredPruner<P>
+      multi.rs      AggregationStrategy, MultiDomainMemory
+      multi_pruner.rs  MultiDomainMemoryPruner<P>
     g_zero/          G-Zero self-play distillation:
       mod.rs           Module root
       delta_absorb.rs  Delta absorb logic
       delta_bandit.rs  Delta bandit strategies
       template_proposer.rs  Template proposing
+      bomber_templates.rs  BomberTemplate (8 strategies), BomberTemplateProposer
+      fft_templates.rs  FFTTemplate (10 strategies), FFTTemplateProposer
       types.rs         G-Zero types
     bomber/          Bomberman HL arena (bevy_ecs):
       mod.rs           Module root
@@ -1039,6 +1055,9 @@ src/
       wasm_pruner.rs   WASM pruner
       wasm_state.rs    WASM state
       tft_player.rs    TftPlayer — game theory Tit-for-Tat bomber (Issue 056)
+      g_zero_player.rs  GZeroPlayer — G-Zero self-play + delta bandit
+      replay_backward.rs  BackwardSample, ReplayBackwardWalker — GFlowNet backward policy
+      validator_agent.rs  Agent validator loop (Issue 052)
     game_state/      GameState forward model + generic MCTS (Plan 056 + 067):
       mod.rs           GameState trait, StateHeuristic, RolloutPolicy, RandomRolloutPolicy, ActionSpaceLog
       bomber_state.rs  BomberState snapshot + BomberHeuristic + BanditBomberHeuristic (Plan 067)
@@ -1056,6 +1075,16 @@ src/
       board.rs         Board definition
       players.rs       Player entities
       systems.rs       ECS systems
+    go/             Go GameState + AutoGo bridge + tournament (Plan 065):
+      mod.rs        Module root
+      types.rs      GoAction, GoCell
+      state.rs      GoState — flat array board, simple ko, Tromp-Taylor scoring
+      players.rs    GoPlayer trait + Random, Greedy, Validator, HL, GZero, MCTS implementations
+      replay.rs     GoReplay, MoveRecord — recording + playback
+      tournament.rs GoTournamentConfig, GoTournamentResult, AutoGoProxyPlayer
+      g_zero_player.rs  GoGZeroSelfPlay — Hint-δ + absorb-compress
+      autoresearch.rs   AutoResearchLoop — UCB1 bandit over config arms
+      autogo_client.rs  AutoGoClient — REST API bridge
   tokenizer/        BPE tokenizer (encode/decode/train):
     mod.rs           Module root
     bpe.rs           BPE algorithm
@@ -1081,6 +1110,7 @@ src/
     specialize.rs   First Futamura projection (program → specialized weights)
     evaluator.rs    Graph evaluator with exact arithmetic
     runner.rs       Pipeline runner: compile → build → run → evaluate
+    compile.rs     C source → WASM → lowered bytecode → token prefix (behind "percepta_compile")
     graph/
       mod.rs        Graph module index + re-exports
       types.rs      Expression, Dimension, DimensionKind, LookUp, ProgramGraph, GraphBuilder
@@ -1100,6 +1130,17 @@ src/
     rotation.rs     QR-based orthogonal rotation + QJL projection
     kv_cache.rs     TurboQuantKVCache (store_key, store_value, dequantize, bit-pack)
     forward.rs      attention_turboquant, dequantize_keys_flat/values_flat, cosine_similarity
+  hla/             Higher-order Linear Attention — O(1) inference (Plan 057):
+    mod.rs          Module root
+    types.rs        HlaQHeadState, HlaLayerState, MultiLayerHlaCache, AhlaQHeadState, AhlaLayerState, MultiLayerAhlaCache, HlaVariant
+    kernel.rs       hla_state_update, hla_readout, hla_denom, ahla_step, ahla_denom — SIMD-accelerated
+    forward.rs      forward_hla, forward_ahla, generate_hla_into, generate_ahla_into
+  sp_kv/           Self-Pruned Key-Value Attention (Plan 070):
+    mod.rs          Module root
+    types.rs        SpKvGateMode, SpKvConfig, SpKvLayerCache, SpKvCache, UtilityPredictorWeights, SpKvPredictors, GateBiasBuffer
+    utility_predictor.rs  predict, predict_single_head, soft_gate_bias, hard_gate_bias, tahg_gate_bias, UtilityAggregation
+    forward.rs      SpKvForwardContext, BiasProvider trait, forward_sp_kv
+  dllm.rs          NoiseSchedule, D2fContext, DenoiseConstraint trait, denoise_loop — dLLM research (behind "dllm" feature)
   alloc.rs          Debug-only tracking allocator (feature-gated debug_assertions)
   feedback.rs       TTT feedback (feature-gated feedback)
   benchmark.rs      BenchResult, run_all, save_results_csv

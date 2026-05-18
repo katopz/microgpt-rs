@@ -11,6 +11,7 @@ A from-scratch Rust implementation of a GPT-2 style transformer with speculative
 - Domain-specific constraint pruning (Sudoku, Rust AST via Validator)
 - BPE tokenizer + SynPruner for Rust syntax validation
 - Sub-millisecond inference on Apple Silicon
+- Discrete Diffusion Forcing (dLLM) research with block-parallel denoising
 
 ## Current Capabilities
 
@@ -24,6 +25,8 @@ A from-scratch Rust implementation of a GPT-2 style transformer with speculative
 - forward_hla: ~939K tok/s (single-core, 30K CCU feasible)
 - forward_ahla: ~1.2M tok/s (single-core)
 - TurboQuant 3-bit KV cache: 5.3× compression, 0.99 attention correlation
+- dLLM Discrete Diffusion Forcing: block-parallel denoising (behind `"dllm"` feature, Plan 066)
+- SP-KV self-pruned KV attention: 3-10× KV reduction with utility prediction (behind `"sp_kv"` feature, Plan 070)
 - PFlash block-sparse prefill: up to 21.3× sequence reduction, 100% NIAH retrieval
 - 516 tests passing, zero clippy warnings
 
@@ -33,11 +36,39 @@ A from-scratch Rust implementation of a GPT-2 style transformer with speculative
 src/
   lib.rs            Module index + debug tracking allocator
   main.rs           Entry point (proof → bench → Percepta bench → plot)
-  types.rs          Config (micro/draft/bpe/small_target/gqa_draft + micro_lora/game), InferenceOverrides, Rng, softmax, rmsnorm, matmul, matmul_relu, sparse_matmul, sample_token, LoraAdapter, LoraPair, DomainLatent, InferenceResult, lora_apply, kv_dim
-  simd.rs          SimdLevel (Scalar/Neon/Avx2), simd_level(), simd_dot_f32, simd_outer_product_acc, simd_matvec, simd_matmul_rows, simd_matmul_relu_rows (Plan 060)
-  transformer.rs    TransformerWeights, LayerWeights, KVCache, MultiLayerKVCache, KVSnapshot, PagedKVCache, RavenKVCache, ForwardContext (+ sparse buffers + lora_buf), PrefillContext, forward, forward_prefill, forward_paged, forward_raven, forward_hla (SIMD-accelerated), forward_ahla (SIMD-accelerated), forward_turboquant, generate, generate_into, generate_batch, generate_with_prefill, tokens_to_string, raven_compute_router, raven_update, raven_readout
+  types.rs          Config (micro/micro_lora/draft/game/bpe/bpe_draft/small_target/gqa_draft/dllm_micro/validate + with_overrides), InferenceOverrides, Rng, HlaMode, AttentionMode, softmax, rmsnorm, matmul, matmul_relu, sparse_matmul, sample_token, LoraAdapter, LoraPair, DomainLatent, InferenceResult, lora_apply, kv_dim
+  simd.rs          SimdLevel (Scalar/Neon/Avx2), simd_level(), simd_dot_f32, simd_fma_row, simd_outer_product_acc, simd_matvec, simd_matmul_rows, simd_matmul_relu_rows, simd_sparse_dot_f32, simd_sparse_matmul_rows, simd_scale_inplace (Plan 060)
+  transformer.rs    TransformerWeights (+ mtp projections), LayerWeights, KVCache, MultiLayerKVCache, KVSnapshot, PagedKVCache, RavenKVCache, ForwardContext (+ sparse buffers + lora_buf + mtp_context_buf + tq_dequant_pos), PrefillContext, forward, forward_with_domain_latent, forward_prefill, forward_paged, forward_raven, forward_turboquant, generate, generate_into, generate_batch, generate_with_prefill, tokens_to_string, project_target_activation, cluster_map_round_robin, cluster_map_from_embeddings, raven_compute_router, raven_update, raven_readout, preload_kv_cache
   feedback.rs       FeedbackConfig, send_feedback ⌁
-  percepta.rs       Vec2, KVCache2D, Sudoku9x9, SymbolicValidator, StreamingSolver, SolveEvent
+  percepta/         Percepta 2D Convex Hull Attention + Computation Graph:
+    mod.rs          Module declarations, re-exports (15+ submodules)
+    types.rs        TieBreak, HullMeta, Vec2 (f64), constants (HARD_K, BIG, EPS)
+    legacy.rs       Vec2 (f32), KVCache2D (Graham Scan), Sudoku9x9, SymbolicValidator, StreamingSolver, SolveEvent
+    cht.rs          Line, CHT — dynamic convex hull trick / line container
+    hull.rs         AttentionResult, HullHalf, HardAttentionHead (dual-hull O(log N)), BruteAttentionHead
+    encoding.rs     encode_key, encode_query, clear_key, hard_scale, hard_scale_query
+    cumsum.rs       CumSum — cumulative sum via uniform attention
+    standard_cache.rs  StandardCache — O(n) softmax attention KV cache
+    gates.rs        reglu, stepglu, multiply — gate primitives; PersistSlot, GateKind
+    graph/          Computation Graph DSL:
+      mod.rs        Module root, re-exports
+      types.rs      Expression (sparse linear combo), DimensionKind, Dimension, LookUp, ProgramGraph, GraphBuilder, ValidationError
+    weights.rs      TransformerWeights, LayerWeights, AttentionWeights, FfnWeights, HeadInfo, build_weights
+    transformer.rs  TransformerConfig, TransformerVocab, GenerationResult, VanillaTransformer
+    evaluator.rs    GraphEvaluator — step/predict/evaluate/compare_with_reference
+    specialize.rs   SpecializationError, SpecializationReduction, SpecializedModel, UniversalModel
+    scheduler.rs    OpKey, Phase, StdLayer, DepGraph, Schedule, build_dep_graph, milp_schedule
+    runner.rs       RunnerError, BuildResult, Runner — compile/build/run/evaluate/specialize/full_pipeline
+    compile.rs      compile_program, CompiledProgram — C source → WASM → lowered bytecode → token prefix (behind "percepta_compile")
+    wasm/           WASM MVP decoder + lowering + interpreter (Futamura projection):
+      mod.rs        Module root
+      decoder.rs    WasmModule, FuncType, FuncBody, WasmInstr, decode
+      lower.rs      lower_hard_ops, check_basic_only
+      interpreter/  WASM interpreter as computation graph:
+        mod.rs      Module root
+        arithmetic.rs  Arithmetic ops dispatch
+        dispatch.rs    Instruction dispatch table
+        tokens.rs      Token mapping
   benchmark.rs      BenchCategory, BenchResult, run_all, run_all_parallel, save_results_csv, append_timeseries_csv, generate_batch
   plot.rs           plot_results → PNG, plot_timeseries
 
@@ -51,6 +82,7 @@ src/
     step.rs         speculative_step, speculative_step_verifier, speculative_step_rollback, speculative_step_rollback_with, speculative_step_conditioned, speculative_step_conditioned_with, speculative_step_rollback_paged
     prefill.rs      PrefillScorer trait, AttentionScorer, BlockAttentionScorer, compress_prompt, compress_prompt_blocks, block_select, block_select_grid, should_compress, speculative_prefill, speculative_prefill_block, speculative_prefill_adaptive
     flow_pruner.rs  FlowPruner<P> — GFlowNet-inspired stop-probability regularization ♭
+    d2f.rs          D2fBlockState, D2fDecodeConfig, D2fBlockResult, D2fPipelineBlock, D2fPipeline, D2fPipelineResult, d2f_decode_block* (behind "dllm" feature)
     ppot/           PPoT (Plans 026 + 027) ○
       mod.rs        Module root, public API re-exports
       types.rs      TokenRule enum, PpotConfig
@@ -73,6 +105,10 @@ src/
     hot_swap.rs     HotSwapPruner<P> — blake3 hash comparison reload ♭
     regression.rs   GoldenTrace, RegressionFailure, RegressionResult, RegressionSuite, ReplayReward trait ♭
     review_metrics.rs  ReviewSummary, ReviewMetrics, ReviewStrategy, EntropyAnomalySummary ♭
+    stepcode.rs     PathStep, ShapedPath, shape_path, path_consistency ≋
+    game_state/     GameState forward model trait + generic MCTS (Plan 056) ⎗
+      mcts_search   mcts_search — Monte Carlo Tree Search
+                    StateHeuristic trait, ActionSpaceLog
     bomber/         Bomberman 4-player HL arena (bevy_ecs) ⍟
       mod.rs        BomberAction, PowerUpKind, Cell, ECS components/resources, GameEvent
       arena.rs      ArenaGrid — 13×13 grid generation + presets
@@ -142,6 +178,18 @@ src/
     kv_cache.rs     TurboQuantKVCache (store_key, store_value, dequantize, bit-pack)
     forward.rs      attention_turboquant, dequantize_keys_flat/values_flat, cosine_similarity
 
+  dllm.rs          NoiseSchedule, D2fContext, DenoiseConstraint trait, corrupt_block, forward_bidirectional_positions, forward_block_causal_positions, denoise_loop, denoising_accuracy ⌂
+  hla/             Higher-order Linear Attention — O(1) inference cache (Plan 057, SIMD Plan 060) ⎔
+    mod.rs          Module root
+    types.rs        HlaQHeadState, HlaLayerState, MultiLayerHlaCache, AhlaQHeadState, AhlaLayerState, MultiLayerAhlaCache, HlaVariant
+    kernel.rs       hla_state_update, hla_readout, hla_denom, ahla_step, ahla_denom, hla_layer_update, hla_layer_readout, ahla_layer_step
+    forward.rs      forward_hla, forward_ahla, generate_hla_into, generate_ahla_into
+  sp_kv/           Self-Pruned Key-Value Attention (Plan 070) §
+    mod.rs          Module root
+    types.rs        SpKvGateMode, SpKvConfig, SpKvLayerCache, SpKvCache, UtilityPredictorWeights, SpKvPredictors, GateBiasBuffer
+    utility_predictor.rs  predict, predict_single_head, soft_gate_bias, hard_gate_bias, tahg_gate_bias, UtilityAggregation
+    forward.rs      SpKvForwardContext, BiasProvider trait, attention_head_core, attention_head_gated, forward_sp_kv
+
   alloc.rs          Debug-only TrackingAllocator, reset_alloc_stats, get_alloc_stats (debug builds)
 
   * behind --features sudoku
@@ -156,6 +204,11 @@ src/
   ⌘ behind --features delta_mem      (bandit)
   ǂ behind --features g_zero         (bandit)
   ⌁ behind --features feedback
+  ⎔ behind --features hla_attention
+  § behind --features sp_kv
+  ⌂ behind --features dllm
+  ≋ behind --features stepcode
+  ⎗ behind --features game_state
 ```
 
 ## Feature Flags
@@ -182,6 +235,17 @@ src/
 | `language_domain` | — | Language domain: BPE vocab, LLM models (Plan 040) |
 | `gpu` | — | Placeholder — GPU training lives in riir-ai/riir-gpu |
 | `go` | `bandit`, `reqwest` | Go GameState + AutoGo API bridge + tournament + G-Zero self-play + AutoResearch loop (Plan 065) |
+| `sp_kv` | — | SP-KV self-pruned key-value attention (Plan 070) |
+| `dllm` | — | D2F Discrete Diffusion Forcing — mini dLLM research (Plan 066) |
+| `stepcode` | `bandit` | Path shaping + consistency scoring (Plan 054, infrastructure only, no perf gain) |
+| `bomber-agent` | `bomber` | Coding agent validator loop (Issue 052) |
+| `game_state` | `bomber` | GameState forward model trait + generic MCTS (Plan 056) |
+| `bandit_mcts` | `game_state` | Bandit-guided MCTS rollout policy — NFSP/MCTS duality (Plan 067) |
+| `percepta` | `ordered-float` | CHT hull cache: upper+lower, HullMeta, tie-break, cumsum |
+| `percepta_gates` | `percepta` | + ReGLU, stepglu, multiply, persist primitives |
+| `percepta_graph` | `percepta_gates` | + Expression/Dimension DSL, ProgramGraph |
+| `percepta_wasm` | `percepta_graph` | + WASM decoder + lowering + interpreter (pure Rust) |
+| `percepta_compile` | `percepta_wasm`, `good_lp` | + MILP scheduling + weights + transformer + Futamura |
 | `full` | all above | Enable all features |
 
 Default features: `sparse_mlp`, `domain_latent`, `ppot`, `bandit` (production best perf + accuracy, Plan 051).
@@ -244,3 +308,6 @@ cargo run --example go_06_bench --features go --release       # Go benchmark sui
 | 10 | `10_bomber_arena.md` | Bomberman HL arena (Plan 033) |
 | 11 | `11_monopoly_fsm.md` | Monopoly FSM arena (Plan 035) |
 | 12 | `12_fft_arena.md` | FFT Tactics Arena (Plan 053) |
+| 13 | `13_mtp_threshold_guide.md` | MTP threshold guide (Plan 055) |
+| 14 | `14_sp_kv_research.md` | SP-KV research note (Plan 070) |
+| 15 | `15_go_arena.md` | Go Arena (Plan 065) |

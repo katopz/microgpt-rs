@@ -197,12 +197,12 @@ src/percepta/
 
 - [x] **J1:** Implement graph evaluator (exact arithmetic, no transformer weights needed) ✅ `evaluator.rs` (854 lines, 14 tests)
 - [x] **J2:** Implement reference trace generator (evaluate_with_output, compare_with_reference) ✅
-- [x] **J3:** Implement compile pipeline stub (returns NotImplemented — to be rewritten as Rust→WASM) ✅
+- [x] **J3:** Implement compile pipeline (C→WASM→dispatch table→token prefix) ✅ `compile.rs` (1662 lines, 22 tests incl. e2e hello/collatz)
 - [x] **J4:** Implement build pipeline (Runner::build, build_from_graph) ✅ `runner.rs` (604 lines, 5 tests)
 - [x] **J5:** Implement run pipeline (Runner::run, run_with_weights) ✅
 - [x] **J6:** Implement specialize pipeline stub (returns NotImplemented — Futamura not yet implemented) ✅
 - [x] **J7:** Implement eval pipeline (Runner::evaluate, evaluate_with_output, full_evaluate) ✅
-- [ ] **J8:** End-to-end test: Rust→WASM → build → run for example programs — blocked on Rust→WASM compile pipeline
+- [x] **J8:** End-to-end test: Rust→WASM → build → run for example programs ✅ 4 e2e tests (hello.c, collatz.c, simple output, no-input program)
 - [ ] **J9:** Benchmark: Rust transformer vs Python transformer vs C++ transformer throughput — ⏭️ deferred: needs C-compiled WASM from Percepta Docker for fair comparison
 
 ### TG-K: Examples + Benchmarks + Documentation

@@ -3,7 +3,7 @@
 ## Overview
 Sudoku serves as the proof-of-concept domain for Deterministic Validator — demonstrating that a deterministic rules engine can validate LLM-drafted tokens inside the speculative decoding loop. The 9×9 solver with streaming output matches the web-demo experience from the Percepta blog.
 
-## Sudoku9x9 (`percepta.rs`)
+## Sudoku9x9 (`percepta/legacy.rs`)
 
 ```rust
 pub struct Sudoku9x9 {
@@ -37,7 +37,7 @@ pub struct Sudoku9x9 {
 - 7 hull vertices → 7079.9× compression via convex hull
 - O(49559) → O(log 7) ≈ O(3) attention speedup
 
-## StreamingSolver (`percepta.rs`)
+## StreamingSolver (`percepta/legacy.rs`)
 
 Emits `SolveEvent`s during solve for real-time visualization:
 
@@ -54,7 +54,7 @@ pub enum SolveEvent {
 - `format_events()` produces concise web-demo-style output
 - Shows first 4 placements, evenly spaced middle, last 5
 
-## SudokuPruner (`speculative/sudoku_pruner.rs`, behind "sudoku" feature)
+## SudokuPruner (`pruners/sudoku_pruner.rs`, behind "sudoku" feature)
 
 Implements `ConstraintPruner` for DDTree branch validation:
 

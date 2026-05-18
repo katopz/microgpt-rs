@@ -27,11 +27,47 @@ pub struct Config {
     pub sparse_threshold: f32,      // use sparse_mlp when alive ratio ≤ this (Plan 022)
     pub early_exit_patience: usize, // AutoTTS early exit patience (Plan 026)
     pub early_exit_gap: f32,        // AutoTTS early exit confidence gap
+    // MTP Drafter thresholds (Plan 055: Gemma 4 MTP)
+    pub mtp_activation_threshold: usize,    // enable MTP when n_embd >= this
+    pub mtp_cluster_vocab_threshold: usize, // enable cluster LM head when vocab_size >= this
+    pub mtp_shared_kv_prompt_threshold: usize, // enable shared KV for prompt when pos >= this
+    pub mtp_cluster_size: usize,            // cluster size for round-robin vocab mapping
+    // HLA Attention (Plan 057: Higher-order Linear Attention)
+    pub hla_mode: HlaMode,                  // Standard, Hla, Ahla
+    pub hla_normalize: bool,                // normalize HLA output
+    pub hla_decay: f32,                     // decay factor for HLA state
+    // D2F Discrete Diffusion Forcing (Plan 066)
+    pub mask_token: usize,                  // mask token ID for dLLM
+    pub attention_mode: AttentionMode,      // Causal, Bidirectional, BlockCausal, SpKv
+    // SP-KV self-pruned KV attention (Plan 070)
+    pub sp_kv_window: usize,               // sliding window size for SP-KV
+    pub sp_kv_threshold: f32,              // gate threshold for SP-KV utility predictor
+    pub sp_kv_predictor_hidden: usize,     // hidden dim for utility predictor MLP
+    pub sp_kv_predictor_lr_mult: f32,      // learning rate multiplier for predictor
 }
 ```
 - All configs constructed via factory methods: `Config::micro()`, `Config::micro_lora()`, `Config::draft()`, `Config::game()`, `Config::bpe()`, `Config::bpe_draft()`, `Config::small_target()`, `Config::gqa_draft()`
 - Validation: `n_head % n_kv_head == 0`, `n_embd == n_head * head_dim`
 - `kv_dim()` helper returns `n_kv_head * head_dim`
+
+### Key Enums (`types.rs`)
+
+```rust
+#[repr(u8)]
+pub enum HlaMode {
+    Standard,  // SDPA with KV cache (default)
+    Hla,       // Symmetric second-order linear attention — O(1) per-token memory
+    Ahla,      // Asymmetric second-order linear attention — lower state cost
+}
+
+#[repr(u8)]
+pub enum AttentionMode {
+    Causal,       // Standard autoregressive (default)
+    Bidirectional, // Attend to ALL positions — dLLM masked prediction
+    BlockCausal,  // Bidirectional within block, causal across blocks — D2F student
+    SpKv,         // Self-pruned key-value attention with learned utility (Plan 070)
+}
+```
 
 ### InferenceOverrides (`types.rs`)
 
@@ -55,6 +91,9 @@ pub struct TransformerWeights {
     pub wpe: Vec<f32>,              // [block_size, n_embd] — position embedding
     pub lm_head: Vec<f32>,          // [vocab_size, n_embd] — output projection
     pub layers: Vec<LayerWeights>,  // per-layer weights (n_layer entries)
+    pub mtp_activation_proj: Option<Vec<f32>>,  // MTP target activation projection (Plan 055)
+    pub mtp_cluster_classifier: Option<Vec<f32>>, // MTP cluster classifier (Plan 055)
+    pub mtp_cluster_map: Option<Vec<usize>>,     // MTP vocab cluster mapping (Plan 055)
 }
 
 pub struct LayerWeights {
@@ -91,6 +130,10 @@ pub struct ForwardContext {
     active_indices: Vec<usize>, // [mlp_hidden] — alive neuron indices (Plan 022)
     // #[cfg(feature = "sparse_mlp")]
     active_values: Vec<f32>,    // [mlp_hidden] — alive neuron values (Plan 022)
+    // MTP Drafter buffers (Plan 055)
+    mtp_context_buf: Vec<f32>,    // MTP projection intermediate buffer
+    // TurboQuant buffers
+    tq_dequant_pos: Vec<f32>,     // dequantized KV for current position
 }
 ```
 - Created once, reused across calls via `ctx.reset()`
@@ -191,8 +234,18 @@ Runtime SIMD detection and dispatch for hot-path operations:
 | `forward_hla(ctx, weights, hla_cache, token, pos, config)` | Symmetric second-order HLA — O(d²) constant-state attention, SIMD-accelerated (Plan 057/060, `hla_attention`) |
 | `forward_ahla(ctx, weights, ahla_cache, token, pos, config)` | Asymmetric AHLA — O(d·dv) constant-state attention, SIMD-accelerated (Plan 057/060, `hla_attention`) |
 | `forward_with_domain_latent(ctx, weights, cache, token, pos, config, dl)` | Convenience wrapper — `forward_base` with domain latent only (no LoRA) |
+| `forward_sp_kv(ctx, weights, sp_kv_cache, token, pos, config, predictors, bias)` | SP-KV self-pruned KV forward — utility-gated attention with learned predictor MLP (Plan 070, `sp_kv`) |
 
 > **Plan 059 Note**: HLA is inference-only — SDPA→HLA distillation via LoRA shows KL divergence does NOT converge. HLA provides streaming O(1) attention for inference but cannot be trained to approximate SDPA outputs. Use DeltaMemoryState for facts/retrieval.
+
+## MTP Projection (`transformer.rs`, Plan 055)
+
+Multi-Token Prediction projection weights for draft model acceleration:
+- `MtpProjection` — Projection weights for target-activation-based MTP drafting
+- `project_target_activation()` — Projects hidden state to draft token logits
+- `cluster_map_round_robin()` — Round-robin vocab cluster assignment
+- `cluster_map_from_embeddings()` — Embedding-similarity-based cluster assignment
+- Threshold-gated: features activate only when config thresholds are met (see `13_mtp_threshold_guide.md`)
 
 ## Generate (`transformer.rs`)
 ```rust
