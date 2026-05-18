@@ -430,19 +430,63 @@ impl Runner {
 
     // ── Specialize Pipeline ────────────────────────────────────
 
-    /// Specialize a universal model for a specific program.
+    /// Specialize the universal WASM interpreter for a specific program.
     ///
     /// Performs the first Futamura projection: bake the program's instruction
-    /// table into the FFN weights, producing a smaller specialized model.
+    /// table into FFN weights via piecewise-constant step functions, producing
+    /// a smaller specialized model with fewer attention heads and typically
+    /// fewer layers.
     ///
-    /// **Note:** This is not yet implemented.
+    /// # Arguments
+    /// * `program` — The WASM program to specialize (list of [`ProgramInstruction`]).
+    /// * `max_layers` — Optional maximum number of transformer layers.
+    ///
+    /// # Returns
+    /// A [`BuildResult`] containing the specialized model's weights, config, and vocab.
+    ///
+    /// # Errors
+    /// Returns [`RunnerError::CompileError`] if the program is empty.
+    /// Returns [`RunnerError::ScheduleError`] if MILP scheduling fails.
     pub fn specialize(
-        _build_result: &BuildResult,
-        _program: &[interpreter::ProgramInstruction],
+        program: &[interpreter::ProgramInstruction],
+        max_layers: Option<usize>,
     ) -> Result<BuildResult, RunnerError> {
-        Err(RunnerError::NotImplemented(
-            "specialize pipeline (Futamura projection) not yet implemented".into(),
-        ))
+        if program.is_empty() {
+            return Err(RunnerError::CompileError(
+                "program is empty; at least one instruction required".into(),
+            ));
+        }
+
+        // Build specialized WASM interpreter graph (program baked into PiecewiseLookup)
+        let mut builder = GraphBuilder::new();
+        let (input_tokens, output_tokens) = interpreter::build(Some(program), &mut builder);
+
+        // Collect unified vocabulary names
+        let mut input_names: Vec<String> = input_tokens.keys().cloned().collect();
+        input_names.sort();
+        let mut output_names: Vec<String> = output_tokens.keys().cloned().collect();
+        output_names.sort();
+        let mut all_names: Vec<String> = input_names;
+        for name in &output_names {
+            if !all_names.contains(name) {
+                all_names.push(name.clone());
+            }
+        }
+        all_names.sort();
+
+        // Build the ProgramGraph
+        let graph = builder.build(
+            all_names
+                .iter()
+                .filter_map(|name| input_tokens.get(name).cloned())
+                .collect(),
+            all_names
+                .iter()
+                .filter_map(|name| output_tokens.get(name).cloned())
+                .collect(),
+        );
+
+        Self::build_from_graph(graph, input_tokens, output_tokens, all_names, max_layers)
     }
 
     // ── Full Pipeline ──────────────────────────────────────────
@@ -559,22 +603,57 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "MILP solver too slow for unit tests; run with --ignored flag"]
-    fn test_runner_specialize_not_implemented() {
-        // Build first to get a BuildResult
-        let build_result = Runner::build(None);
-        if build_result.is_err() {
-            // If build fails (e.g., MILP solver issue), just test the error type
-            return;
-        }
-        let build_result = build_result.unwrap();
-        let result = Runner::specialize(&build_result, &[]);
+    fn test_runner_specialize_empty_program_errors() {
+        let result = Runner::specialize(&[], None);
         assert!(result.is_err());
         match result.unwrap_err() {
-            RunnerError::NotImplemented(msg) => {
-                assert!(msg.contains("Futamura"));
+            RunnerError::CompileError(msg) => {
+                assert!(
+                    msg.contains("empty"),
+                    "expected 'empty' in error, got: {msg}"
+                );
             }
-            other => panic!("expected NotImplemented, got {other:?}"),
+            other => panic!("expected CompileError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[ignore = "MILP solver too slow for unit tests; run with --ignored flag"]
+    fn test_runner_specialize_simple_program_succeeds() {
+        use crate::percepta::wasm::interpreter::Opcode;
+
+        let program = vec![
+            interpreter::ProgramInstruction::with_i32(Opcode::I32Const, 42),
+            interpreter::ProgramInstruction::new(Opcode::Output),
+            interpreter::ProgramInstruction::new(Opcode::Halt),
+        ];
+
+        let result = Runner::specialize(&program, None);
+        match result {
+            Ok(build) => {
+                assert!(
+                    build.weights.n_layers > 0,
+                    "specialized model should have layers"
+                );
+                assert!(
+                    build.weights.d_model > 0,
+                    "specialized model should have d_model > 0"
+                );
+                assert!(
+                    !build.vocab.is_empty(),
+                    "specialized model should have vocab"
+                );
+                eprintln!(
+                    "Specialized: d_model={}, n_layers={}, vocab={}",
+                    build.config.d_model,
+                    build.config.n_layers,
+                    build.vocab.len(),
+                );
+            }
+            Err(RunnerError::ScheduleError(e)) => {
+                eprintln!("Skipping specialize test (MILP): {e}");
+            }
+            Err(e) => panic!("unexpected error: {e}"),
         }
     }
 

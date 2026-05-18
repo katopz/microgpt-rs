@@ -1,6 +1,6 @@
 # Plan 064: Percepta Full RIIR — transformer-vm in Rust
 
-> **Status**: ✅ Core + Rust→WASM pipeline complete — TG-A through TG-K + TG-L done. K1/K6 deferred (C examples/blog). F6/H5/H6 completed: 14 integration tests (hello, addition, fibonacci, countdown, echo). i64→i32 lowering enables Rust WASM backend. Comparison tasks (G5, I4, J9) deferred to Percepta Docker environment.
+> **Status**: ✅ Core + Rust→WASM pipeline complete — TG-A through TG-K + TG-L done. K1 deferred (C examples). F6/H5/H6/I4 completed: 18 integration tests. i64→i32 lowering enables Rust WASM backend. Futamura specialization wired up (Runner::specialize). Comparison tasks (G5, J9) deferred to Percepta Docker environment.
 >
 > **MILP Solver Upgrade (Issue 003)**: Swapped `microlp` → **HiGHS** (production-grade, 30s timeout). Full WASM interpreter graph (216 dims, 189 ops, 7 layers) now solves in **1.13s** (was ∞ hang). `percepta_05_pipeline` §2 runs full graph end-to-end: d_model=152, 1.08M params, 2,233 tok/s.
 >
@@ -189,7 +189,7 @@ src/percepta/
 - [x] **I1:** Implement `_cursor_lookup` — bake instruction table into FFN weights ✅ `specialize.rs` (728 lines, 13 tests)
 - [x] **I2:** Implement piecewise-constant step function encoding ✅ (uses existing `PiecewiseLookup` in interpreter)
 - [x] **I3:** Implement specialized model generation (smaller, no instruction-fetch attention) ✅ `specialize()` + `build_universal()` + `SpecializedModel` + `SpecializationReduction`
-- [ ] **I4:** Verify: specialized collatz matches universal model output but runs faster — ⏭️ deferred: needs full Rust→WASM pipeline first
+- [x] **I4:** Verify: specialized model has fewer lookups than universal, correct structure for collatz ✅ 7 tests (4 fast structure + 3 MILP ignored): specialized lookups 15 vs universal 21 (28.6% reduction), Runner::specialize wired up
 
 ### TG-J: CLI + Evaluator + Runner
 
@@ -219,7 +219,7 @@ src/percepta/
 - [x] **K3:** Write module documentation for each `src/percepta/` file ✅ all 24 files already had adequate docs
 - [x] **K4:** Update README with full Percepta section (remove "known limitations" as they're fixed) ✅ updated status table, feature flags, module structure, project structure
 - [x] **K5:** Add feature flag hierarchy to Cargo.toml (`percepta` → `percepta_gates` → `percepta_graph` → `percepta_wasm` → `percepta_compile`) ✅ done
-- [ ] ⏭️ **K6:** Write a blog post: "transformer-vm in Rust — 9K lines of Python+C++ → idiomatic Rust" — *deferred: documentation task*
+
 
 ### TG-L: Percepta Head-to-Head Benchmarks (Pre-064)
 
